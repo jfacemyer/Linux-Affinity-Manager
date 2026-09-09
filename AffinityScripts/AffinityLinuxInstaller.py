@@ -18,6 +18,7 @@ import urllib.error
 import re
 import json
 import tempfile
+import hashlib
 from pathlib import Path
 import time
 import signal
@@ -14457,6 +14458,13 @@ Would you like to continue with {distro_name} anyway?"""
                 self.update_progress(0.85)
                 self.patch_affinity_dll(app_name)
 
+            # Install the file-manager handler before the desktop entry, which
+            # only claims the document types once the handler is in place.
+            self.update_progress_text("Installing file-manager handler...")
+            self.update_progress(0.88)
+            self.install_winrt_interop_facade()
+            self.install_file_manager_handler()
+
             # Create desktop entry
             self.update_progress_text("Creating desktop entry...")
             self.update_progress(0.9)
@@ -16199,6 +16207,178 @@ Would you like to continue with {distro_name} anyway?"""
 
         if has_handler:
             self.register_document_types()
+
+    def install_winrt_interop_facade(self):
+        """Install System.Runtime.WindowsRuntime.dll into the prefix GAC.
+
+        Without it Affinity starts normally but silently ignores a document
+        handed to it -- no exception, nothing in the log, the file just never
+        opens. It is the WinRT interop facade that supplies AsTask(), which
+        Affinity awaits on SharedStorageAccessManager.RedeemTokenForFileAsync().
+
+        It is missing by design, not by a broken install: the assembly ships
+        inside the .NET Framework 4.8 redistributable, but only in the Windows
+        8/10 payload cabs. On Windows 7 there is no WinRT, so the installer
+        correctly skips it -- and winetricks' dotnet verbs set the prefix to
+        win7, because on a real Windows 8+ the standalone installer refuses to
+        run at all. Re-running it with the prefix reporting Windows 10 does not
+        help either: it detects 4.8 and exits without doing anything. Extracting
+        the file is the way.
+
+        It must go in the GAC. Assemblies signed with the ECMA pseudo key carry
+        no real signature and are trusted only because the GAC is trusted; from
+        an application directory the CLR rejects the genuine file with
+        "Strong name validation failed" (0x8013141A)."""
+        gac_dir = (
+            Path(self.directory)
+            / "drive_c"
+            / "windows"
+            / "Microsoft.NET"
+            / "assembly"
+            / "GAC_MSIL"
+            / "System.Runtime.WindowsRuntime"
+            / "v4.0_4.0.0.0__b77a5c561934e089"
+        )
+        dest = gac_dir / "System.Runtime.WindowsRuntime.dll"
+        if dest.exists():
+            self.log("WinRT interop facade already installed", "success")
+            return
+
+        if not self.check_command("7z"):
+            self.log(
+                "7z is not installed, so the WinRT interop facade cannot be "
+                "extracted; documents will not open from the file manager",
+                "warning",
+            )
+            return
+
+        ndp_url = (
+            "https://download.visualstudio.microsoft.com/download/pr/"
+            "7afca223-55d2-470a-8edc-6a1739ae3252/"
+            "abd170b4b0ec15ad0222a809b761a036/ndp48-x86-x64-allos-enu.exe"
+        )
+        ndp_sha = "95889d6de3f2070c07790ad6cf2000d33d9a1bdfc6a381725ab82ab1c314fd53"
+        # winetricks' dotnet48 verb caches the redistributable here, so an
+        # install that already ran it does not download it twice.
+        cache = Path.home() / ".cache" / "winetricks" / "dotnet48"
+        ndp = cache / "ndp48-x86-x64-allos-enu.exe"
+
+        try:
+            if not ndp.exists():
+                self.log("Downloading the .NET Framework 4.8 redistributable...", "info")
+                cache.mkdir(parents=True, exist_ok=True)
+                urllib.request.urlretrieve(ndp_url, str(ndp))
+
+            digest = hashlib.sha256(ndp.read_bytes()).hexdigest()
+            if digest != ndp_sha:
+                self.log(
+                    "Checksum mismatch on the .NET redistributable; refusing to use it",
+                    "error",
+                )
+                return
+
+            with tempfile.TemporaryDirectory() as tmp:
+                tmp_path = Path(tmp)
+                subprocess.run(
+                    ["7z", "x", "-y", f"-o{tmp_path / 'ndp'}", str(ndp)],
+                    check=True,
+                    capture_output=True,
+                )
+                cabs = sorted((tmp_path / "ndp").glob("Windows10.0-KB*-x86.cab"))
+                if not cabs:
+                    self.log("No Windows 10 payload found in the redistributable", "error")
+                    return
+
+                listing = subprocess.run(
+                    ["7z", "l", str(cabs[0])], check=True, capture_output=True, text=True
+                ).stdout
+                inner = None
+                for line in listing.splitlines():
+                    candidate = line.split()[-1] if line.split() else ""
+                    if (
+                        "msil_system.runtime.windowsruntime_b77a5c561934e089"
+                        in candidate.lower()
+                        and candidate.lower().endswith("system.runtime.windowsruntime.dll")
+                    ):
+                        inner = candidate
+                        break
+                if not inner:
+                    self.log("Interop facade not found inside the payload", "error")
+                    return
+
+                subprocess.run(
+                    ["7z", "e", "-y", f"-o{tmp_path / 'fac'}", str(cabs[0]), inner],
+                    check=True,
+                    capture_output=True,
+                )
+                extracted = tmp_path / "fac" / "system.runtime.windowsruntime.dll"
+                if not extracted.is_file() or extracted.stat().st_size == 0:
+                    self.log("Extracting the interop facade produced nothing", "error")
+                    return
+
+                gac_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(extracted, dest)
+
+            self.log("WinRT interop facade installed", "success")
+        except Exception as e:
+            self.log(
+                f"Could not install the WinRT interop facade: {e}. "
+                "Documents will not open from the file manager.",
+                "warning",
+            )
+
+    def install_file_manager_handler(self):
+        """Put affinity-on-linux.exe in the prefix, beside Affinity.exe.
+
+        This is what lets a document be opened from the file manager: Wine
+        converts argv[0] to a DOS path but passes arguments through verbatim, so
+        a file manager's /home/you/art.afphoto reaches Affinity unchanged and
+        cannot be opened. See AffinityHandler/README.md."""
+        install_dir = (
+            Path(self.directory) / "drive_c" / "Program Files" / "Affinity" / "Affinity"
+        )
+        if not install_dir.is_dir():
+            self.log(
+                "Affinity install directory not found; skipping file-manager handler",
+                "warning",
+            )
+            return
+
+        dest = install_dir / "affinity-on-linux.exe"
+        raw_url = (
+            "https://raw.githubusercontent.com/ryzendew/AffinityOnLinux/main/"
+            "AffinityHandler/affinity-on-linux.exe"
+        )
+
+        try:
+            # Same fast path as the icons: use the checkout when there is one, and
+            # download when this script was piped straight into python3, where
+            # __file__ does not exist.
+            local_exe = None
+            try:
+                candidate = (
+                    Path(__file__).resolve().parent.parent
+                    / "AffinityHandler"
+                    / "affinity-on-linux.exe"
+                )
+                if candidate.exists():
+                    local_exe = candidate
+            except NameError:
+                pass
+
+            if local_exe:
+                shutil.copy2(local_exe, dest)
+            else:
+                urllib.request.urlretrieve(raw_url, str(dest))
+
+            dest.chmod(0o755)
+            self.log("File-manager handler installed", "success")
+        except Exception as e:
+            self.log(
+                f"Could not install the file-manager handler: {e}. "
+                "Documents will not open from the file manager.",
+                "warning",
+            )
 
     def register_document_types(self):
         """Teach the desktop what .af/.afphoto/.afdesign/.afpub files are, and make
