@@ -16094,6 +16094,17 @@ Would you like to continue with {distro_name} anyway?"""
             "\\", "/"
         )  # Ensure forward slashes, no double slashes
 
+        # Launch through affinity-on-linux.exe when it is installed, so documents
+        # can be opened from the file manager. Wine converts argv[0] to a DOS path
+        # but passes arguments through verbatim, so something inside the prefix has
+        # to turn the Unix path a file manager hands over into one Affinity can
+        # open; the handler also serialises concurrent double-clicks and picks the
+        # warm or cold route. Without it the entry is unchanged.
+        handler_path = app_path.parent / "affinity-on-linux.exe"
+        has_handler = handler_path.exists()
+        if has_handler:
+            app_path_str = str(handler_path).replace("\\", "/")
+
         # Get GPU environment variables if configured
         gpu_env = self.get_gpu_env_vars()
         # Get DXVK environment variables if AMD GPU is detected
@@ -16117,6 +16128,10 @@ Would you like to continue with {distro_name} anyway?"""
             if dxvk_env:
                 exec_line += f" {dxvk_env.strip()}"
             exec_line += f' {wine_str} "{app_path_str}"'
+            # %F, not %f: the file manager then hands every selected document to
+            # one invocation instead of racing one process per file.
+            if has_handler:
+                exec_line += " %F"
             f.write(f"{exec_line}\n")
             f.write("Terminal=false\n")
             f.write("Type=Application\n")
@@ -16126,6 +16141,20 @@ Would you like to continue with {distro_name} anyway?"""
                 f.write("StartupWMClass=affinity.exe\n")
             else:
                 f.write(f"StartupWMClass={name.lower()}.exe\n")
+            # Only claim the document types when the handler is there to open
+            # them. Without it a double-click would hand Affinity a Unix path it
+            # cannot resolve, which looks like the association is broken.
+            if has_handler:
+                mime_types = {
+                    "Photo": "application/afphoto;",
+                    "Designer": "application/afdesign;",
+                    "Publisher": "application/afpub;",
+                }.get(
+                    app_name,
+                    "application/af;application/afphoto;"
+                    "application/afdesign;application/afpub;",
+                )
+                f.write(f"MimeType={mime_types}\n")
 
         # Remove Wine's default entry
         wine_entry = desktop_dir / "wine" / "Programs" / f"Affinity {name} 2.desktop"
@@ -16167,6 +16196,84 @@ Would you like to continue with {distro_name} anyway?"""
                 self.log(f"Could not create desktop shortcut: {e}", "warning")
 
         self.log(f"Desktop entry created: {desktop_file}", "success")
+
+        if has_handler:
+            self.register_document_types()
+
+    def register_document_types(self):
+        """Teach the desktop what .af/.afphoto/.afdesign/.afpub files are, and make
+        Affinity the default for them.
+
+        A MimeType= line in a .desktop file does nothing on its own: the file
+        manager first has to recognise the extension, which needs shared-mime-info
+        definitions, and the association is only picked up once the mime and
+        desktop databases have been rebuilt. KDE additionally caches this in
+        ksycoca, so without kbuildsycoca the old association keeps being used and
+        it looks like nothing changed."""
+        mime_names = [
+            "x-wine-extension-af.xml",
+            "x-wine-extension-afphoto.xml",
+            "x-wine-extension-afdesign.xml",
+            "x-wine-extension-afpub.xml",
+        ]
+        raw_base = (
+            "https://raw.githubusercontent.com/ryzendew/AffinityOnLinux/main/mime/"
+        )
+
+        try:
+            mime_dir = Path.home() / ".local" / "share" / "mime" / "packages"
+            mime_dir.mkdir(parents=True, exist_ok=True)
+
+            # Same fast path as the icons: use the checkout when the installer was
+            # run from one, and fall back to downloading when it was piped
+            # straight into python3, where __file__ does not exist.
+            local_mime_dir = None
+            try:
+                candidate = Path(__file__).resolve().parent.parent / "mime"
+                if candidate.is_dir():
+                    local_mime_dir = candidate
+            except NameError:
+                pass
+
+            for name in mime_names:
+                dest = mime_dir / name
+                if local_mime_dir and (local_mime_dir / name).exists():
+                    shutil.copy2(local_mime_dir / name, dest)
+                else:
+                    urllib.request.urlretrieve(raw_base + name, str(dest))
+
+            subprocess.run(
+                ["update-mime-database", str(Path.home() / ".local" / "share" / "mime")],
+                check=False,
+                capture_output=True,
+            )
+            subprocess.run(
+                [
+                    "update-desktop-database",
+                    str(Path.home() / ".local" / "share" / "applications"),
+                ],
+                check=False,
+                capture_output=True,
+            )
+            for mime in (
+                "application/af",
+                "application/afphoto",
+                "application/afdesign",
+                "application/afpub",
+            ):
+                subprocess.run(
+                    ["xdg-mime", "default", "Affinity.desktop", mime],
+                    check=False,
+                    capture_output=True,
+                )
+            for cache in ("kbuildsycoca6", "kbuildsycoca5"):
+                if shutil.which(cache):
+                    subprocess.run([cache], check=False, capture_output=True)
+                    break
+
+            self.log("Affinity documents can now be opened from the file manager", "success")
+        except Exception as e:
+            self.log(f"Could not register Affinity document types: {e}", "warning")
 
     def _download_affinity_installer_thread(self, save_path_obj: Path):
         """Worker: Download Affinity installer and end operation."""
@@ -18383,7 +18490,18 @@ Would you like to continue with {distro_name} anyway?"""
             Path(self.directory) / "drive_c" / "Program Files" / "Affinity" / "Affinity"
         )
         hook_exe = install_dir / "AffinityHook.exe"
-        exe_name = "AffinityHook.exe" if (prefer_hook and hook_exe.exists()) else "Affinity.exe"
+        handler_exe = install_dir / "affinity-on-linux.exe"
+
+        # affinity-on-linux.exe wins over both when it is installed: it is what
+        # lets a document be opened from the file manager, and a cold start still
+        # goes through AffinityHook.exe, so preferring it here does not stop the
+        # plugin loader from loading. Without it, behaviour is unchanged.
+        if handler_exe.exists():
+            exe_name = "affinity-on-linux.exe"
+        elif prefer_hook and hook_exe.exists():
+            exe_name = "AffinityHook.exe"
+        else:
+            exe_name = "Affinity.exe"
         app_path_str = str(install_dir / exe_name).replace("\\", "/")
 
         wine_str = str(self.get_wine_path("wine"))
@@ -18401,6 +18519,10 @@ Would you like to continue with {distro_name} anyway?"""
             segments.append(dxvk_env)
         segments.append(wine_str)
         segments.append(f'"{app_path_str}"')
+        # %F, not %f: every selected document goes to one invocation rather than
+        # racing one process per file.
+        if exe_name == "affinity-on-linux.exe":
+            segments.append("%F")
 
         return "Exec=" + " ".join(segments), exe_name
 
