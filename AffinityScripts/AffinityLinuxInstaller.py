@@ -8292,7 +8292,22 @@ class AffinityInstallerGUI(QMainWindow):
             self.log("Wine setup cancelled", "warning")
             return
 
-        self.setup_wine(wine_version_choice)
+        # setup_wine() returns False when it gives up -- most often because the
+        # Wine download failed. Its return value used to be discarded, so a failed
+        # download only appeared in the log while the flow carried on to DPI
+        # configuration and beyond against a prefix that has no Wine in it.
+        if not self.setup_wine(wine_version_choice):
+            if not self.check_cancelled():
+                self.log("Wine setup failed; stopping here", "error")
+                self.show_message(
+                    "Wine setup failed",
+                    "Wine could not be set up, so the rest of the installation "
+                    "was skipped.\n\nThe usual cause is a failed download. See "
+                    "the log for the exact error, then try again -- or pick a "
+                    "different Wine version.",
+                    "error",
+                )
+            return
 
         if self.check_cancelled():
             return
