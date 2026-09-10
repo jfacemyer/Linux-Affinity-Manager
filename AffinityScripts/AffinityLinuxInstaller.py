@@ -10491,14 +10491,24 @@ class AffinityInstallerGUI(QMainWindow):
             if self.check_cancelled():
                 return False
 
-            # Setup WinMetadata (only needed for Wine 9.14 and 10.10, not 11.12+)
+            # Setup WinMetadata. 9.14 and 10.10 need it. 11.12 does not, because
+            # its RoResolveNamespace is a stub and the metadata would never be
+            # read. A build that implements RoResolveNamespace does need it --
+            # that is what lets a double-clicked document open -- so ask the
+            # build what it supports rather than keeping a version list.
             if wine_version in ["9.14", "10.10"]:
                 self.update_progress_text("Setting up Windows Metadata...")
                 self.update_progress(0.70)
                 self.setup_winmetadata()
+            elif self.wine_resolves_winrt_namespaces():
+                self.update_progress_text("Setting up Windows Metadata...")
+                self.update_progress(0.70)
+                self.install_combined_winmetadata()
             else:
                 self.log(
-                    "Skipping WinMetadata setup for Wine 11.12+ (not needed)", "info"
+                    "Skipping WinMetadata setup: this Wine stubs RoResolveNamespace, "
+                    "so the metadata would never be read",
+                    "info",
                 )
 
             if self.check_cancelled():
@@ -10675,6 +10685,77 @@ class AffinityInstallerGUI(QMainWindow):
             self.log(f"Failed to download wintypes.dll: {e}", "error")
             return False
 
+    def install_combined_winmetadata(self):
+        """Install ONLY the combined Windows.winmd into the prefix.
+
+        The same WinMetadata.tar.xz as setup_winmetadata(), but just one file out
+        of it, and that difference decides whether a document opens.
+
+        RoResolveNamespace resolves a namespace by walking up: Windows.Storage.
+        Streams, then Windows.Storage, then Windows -- first file that exists
+        wins. With the per-namespace files present it stops at, say,
+        Windows.Foundation.winmd, and the CLR then fails on assembly identity,
+        because those types reference each other as members of the single
+        "Windows" assembly rather than of per-namespace ones. Measured: with all
+        21 files the document silently never opens; with Windows.winmd alone,
+        cold and warm both work.
+
+        Left alone for 9.14 and 10.10, which have their own arrangement."""
+        try:
+            system32_dir = (
+                Path(self.directory) / "drive_c" / "windows" / "system32"
+            )
+            dest_dir = system32_dir / "WinMetadata"
+            dest = dest_dir / "Windows.winmd"
+            if dest.exists():
+                self.log("Windows.winmd already installed", "success")
+                return True
+
+            with tempfile.TemporaryDirectory() as tmp:
+                if not self._download_and_extract_winmetadata(Path(tmp)):
+                    self.log("Could not fetch WinMetadata", "warning")
+                    return False
+                src = Path(tmp) / "WinMetadata" / "Windows.winmd"
+                if not src.is_file():
+                    self.log("Windows.winmd missing from the archive", "warning")
+                    return False
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dest)
+
+            self.log("Windows.winmd installed", "success")
+            return True
+        except Exception as e:
+            self.log(f"Could not install Windows.winmd: {e}", "warning")
+            return False
+
+    def wine_resolves_winrt_namespaces(self):
+        """True when this Wine build implements RoResolveNamespace instead of
+        stubbing it.
+
+        This decides whether installing WinMetadata is worth anything. With a
+        stub, nothing ever reads C:\\windows\\system32\\WinMetadata, so putting
+        metadata there changes nothing -- which is why 11.12 skips it. With a
+        real implementation, a single genuine Windows.winmd in that directory is
+        what lets Affinity open a document handed to it on the command line.
+
+        Detected rather than kept as a version list, so a newer build that
+        implements it is picked up without editing this file. The implementation
+        resolves against the WinMetadata directory by name, so the string is
+        present in wintypes.dll only when it is."""
+        try:
+            wintypes = (
+                Path(self.get_wine_path("wine")).parent.parent
+                / "lib"
+                / "wine"
+                / "x86_64-windows"
+                / "wintypes.dll"
+            )
+            if not wintypes.is_file():
+                return False
+            return "WinMetadata".encode("utf-16-le") in wintypes.read_bytes()
+        except Exception:
+            return False
+
     def setup_winmetadata(self):
         """Download and install WinMetadata to system32"""
         self.log(
@@ -10773,6 +10854,9 @@ class AffinityInstallerGUI(QMainWindow):
         if wine_version in ["9.14", "10.10"]:
             self.log("Installing fresh WinMetadata...", "info")
             self.setup_winmetadata()
+        elif self.wine_resolves_winrt_namespaces():
+            self.log("Installing fresh Windows.winmd...", "info")
+            self.install_combined_winmetadata()
 
             # Set up wintypes.dll override
             self.log("Setting up wintypes.dll override...", "info")
