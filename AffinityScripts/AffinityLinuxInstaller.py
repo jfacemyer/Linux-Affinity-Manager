@@ -4531,6 +4531,8 @@ class AffinityInstallerGUI(QMainWindow):
                                 return "9.14"
                             elif version.startswith("10."):
                                 return "10.10"
+                            elif version == "11.16":
+                                return "11.16"
                             elif version.startswith("11."):
                                 return "11.12"
                 except Exception:
@@ -8261,15 +8263,24 @@ class AffinityInstallerGUI(QMainWindow):
         wine_version = self.show_question_dialog(
             "Choose Wine Version",
             "Which Wine version would you like to install?\n\n"
+            "• Wine 11.16 - adds the patches that let a double-clicked document open in a running Affinity, and let its window come to the front.\n"
             "• Wine 11.12 (Recommended) - ElementalWarrior Wine 11.12 with AMD GPU and OpenCL patches. Latest version with best compatibility and performance.\n"
             "• Wine 11.12 v4 (Zen 4/5) - ElementalWarrior Wine 11.12 v4 with AVX-512 and AMD Zen 4/5 optimizations. Best performance for Ryzen 7000/9000 series CPUs.\n"
             "• Wine 10.10 - ElementalWarrior Wine 10.10 with AMD GPU and OpenCL patches. Previous stable version.\n"
             "• Wine 9.14 (Legacy) - Legacy version with AMD GPU and OpenCL patches. Fallback option if you encounter issues with newer versions.\n\n"
             "Note: You can switch versions later by running 'Setup Wine Environment' again.",
-            ["Wine 11.12 (Recommended)", "Wine 11.12 v4 (Zen 4/5)", "Wine 10.10", "Wine 9.14 (Legacy)"],
+            [
+                "Wine 11.16 (opens documents from the file manager)",
+                "Wine 11.12 (Recommended)",
+                "Wine 11.12 v4 (Zen 4/5)",
+                "Wine 10.10",
+                "Wine 9.14 (Legacy)",
+            ],
         )
 
-        if wine_version == "Wine 11.12 (Recommended)":
+        if wine_version == "Wine 11.16 (opens documents from the file manager)":
+            wine_version_choice = "11.16"
+        elif wine_version == "Wine 11.12 (Recommended)":
             wine_version_choice = "11.12"
         elif wine_version == "Wine 11.12 v4 (Zen 4/5)":
             wine_version_choice = "11.12-v4"
@@ -11682,15 +11693,24 @@ class AffinityInstallerGUI(QMainWindow):
         wine_version = self.show_question_dialog(
             "Choose Wine Version",
             "Which Wine version would you like to install?\n\n"
+            "• Wine 11.16 - adds the patches that let a double-clicked document open in a running Affinity, and let its window come to the front.\n"
             "• Wine 11.12 (Recommended) - ElementalWarrior Wine 11.12 with AMD GPU and OpenCL patches. Latest version with best compatibility and performance.\n"
             "• Wine 11.12 v4 (Zen 4/5) - ElementalWarrior Wine 11.12 v4 with AVX-512 and AMD Zen 4/5 optimizations. Best performance for Ryzen 7000/9000 series CPUs.\n"
             "• Wine 10.10 - ElementalWarrior Wine 10.10 with AMD GPU and OpenCL patches. Previous stable version.\n"
             "• Wine 9.14 (Legacy) - Legacy version with AMD GPU and OpenCL patches. Fallback option if you encounter issues with newer versions.\n\n"
             "Note: You can switch versions later by running this setup again.",
-            ["Wine 11.12 (Recommended)", "Wine 11.12 v4 (Zen 4/5)", "Wine 10.10", "Wine 9.14 (Legacy)"],
+            [
+                "Wine 11.16 (opens documents from the file manager)",
+                "Wine 11.12 (Recommended)",
+                "Wine 11.12 v4 (Zen 4/5)",
+                "Wine 10.10",
+                "Wine 9.14 (Legacy)",
+            ],
         )
 
-        if wine_version == "Wine 11.12 (Recommended)":
+        if wine_version == "Wine 11.16 (opens documents from the file manager)":
+            wine_version_choice = "11.16"
+        elif wine_version == "Wine 11.12 (Recommended)":
             wine_version_choice = "11.12"
         elif wine_version == "Wine 11.12 v4 (Zen 4/5)":
             wine_version_choice = "11.12-v4"
@@ -11732,6 +11752,17 @@ class AffinityInstallerGUI(QMainWindow):
                 "wine_dir_pattern": "ElementalWarrior-wine-10.10*",
                 "archive_format": "xz",
                 "wine_display_name": "Wine 10.10 (with AMD GPU and OpenCL patches)",
+            }
+        elif wine_version == "11.16":
+            return {
+                # POC SOURCE -- a personal Forgejo build, not an upstream release.
+                # Repoint this at the upstream 11.16 release before merging.
+                "wine_url": "https://forgejo.facemyer.net/facemyer/Affinity-Wine-Builder/releases/download/11.16/ElementalWarrior-wine-11.16.tar.xz",
+                "wine_file_name": "ElementalWarrior-wine-11.16.tar.xz",
+                "wine_dir_name": "ElementalWarriorWine",
+                "wine_dir_pattern": "ElementalWarrior-wine-11.16*",
+                "archive_format": "xz",
+                "wine_display_name": "Wine 11.16 (opens documents from the file manager)",
             }
         elif wine_version == "11.12-v4":
             return {
@@ -11854,7 +11885,7 @@ class AffinityInstallerGUI(QMainWindow):
         cache_dir = Path(self.directory) / "Wine-Switch"
         cache_dir.mkdir(parents=True, exist_ok=True)
 
-        all_versions = ["9.14", "10.10", "11.12", "11.12-v4"]
+        all_versions = ["9.14", "10.10", "11.12", "11.12-v4", "11.16"]
 
         self.log(
             "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -12190,15 +12221,24 @@ class AffinityInstallerGUI(QMainWindow):
         wine_version = self.show_question_dialog(
             "Choose Wine Version",
             "Which Wine version would you like to install?\n\n"
+            "• Wine 11.16 - adds the patches that let a double-clicked document open in a running Affinity, and let its window come to the front.\n"
             "• Wine 11.12 (Recommended) - ElementalWarrior Wine 11.12 with AMD GPU and OpenCL patches. Latest version with best compatibility and performance.\n"
             "• Wine 11.12 v4 (Zen 4/5) - ElementalWarrior Wine 11.12 v4 with AVX-512 and AMD Zen 4/5 optimizations. Best performance for Ryzen 7000/9000 series CPUs.\n"
             "• Wine 10.10 - ElementalWarrior Wine 10.10 with AMD GPU and OpenCL patches. Previous stable version.\n"
             "• Wine 9.14 (Legacy) - Legacy version with AMD GPU and OpenCL patches. Fallback option if you encounter issues with newer versions.\n\n"
             "Note: This will replace your current Wine installation.",
-            ["Wine 11.12 (Recommended)", "Wine 11.12 v4 (Zen 4/5)", "Wine 10.10", "Wine 9.14 (Legacy)"],
+            [
+                "Wine 11.16 (opens documents from the file manager)",
+                "Wine 11.12 (Recommended)",
+                "Wine 11.12 v4 (Zen 4/5)",
+                "Wine 10.10",
+                "Wine 9.14 (Legacy)",
+            ],
         )
 
-        if wine_version == "Wine 11.12 (Recommended)":
+        if wine_version == "Wine 11.16 (opens documents from the file manager)":
+            wine_version_choice = "11.16"
+        elif wine_version == "Wine 11.12 (Recommended)":
             wine_version_choice = "11.12"
         elif wine_version == "Wine 11.12 v4 (Zen 4/5)":
             wine_version_choice = "11.12-v4"
