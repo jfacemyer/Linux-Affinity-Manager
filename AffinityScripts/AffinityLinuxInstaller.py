@@ -10765,6 +10765,35 @@ class AffinityInstallerGUI(QMainWindow):
             )
             dest_dir = system32_dir / "WinMetadata"
             dest = dest_dir / "Windows.winmd"
+
+            # Clear any per-namespace winmds first, and do it even when
+            # Windows.winmd is already present, so this can repair a prefix as
+            # well as populate one.
+            #
+            # They shadow the combined file rather than supplementing it:
+            # RoResolveNamespace walks a namespace up -- Windows.Storage.Streams,
+            # Windows.Storage, Windows -- and returns the FIRST file that exists.
+            # With windows.storage.winmd present it never reaches Windows.winmd,
+            # and Wine's own generated metadata is exactly what it then resolves
+            # against, which fails with TypeLoadException when Affinity is handed
+            # a document. Wine ships ten of these and a prefix picks them up on
+            # creation, so a real install has them even though a hand-built test
+            # prefix may not.
+            #
+            # Moved aside rather than deleted: they are Wine's, not ours.
+            if dest_dir.is_dir():
+                shadowed = [f for f in dest_dir.glob("*.winmd") if f.name != "Windows.winmd"]
+                if shadowed:
+                    aside = dest_dir / ".wine-shadowed"
+                    aside.mkdir(exist_ok=True)
+                    for f in shadowed:
+                        shutil.move(str(f), str(aside / f.name))
+                    self.log(
+                        f"Moved {len(shadowed)} per-namespace winmd file(s) aside; "
+                        "they shadow the combined metadata",
+                        "info",
+                    )
+
             if dest.exists():
                 self.log("Windows.winmd already installed", "success")
                 return True
