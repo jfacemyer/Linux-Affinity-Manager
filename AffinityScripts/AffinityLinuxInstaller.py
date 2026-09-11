@@ -2915,6 +2915,12 @@ class AffinityInstallerGUI(QMainWindow):
                     "loop",
                 ),
                 (
+                    "File Manager Integration",
+                    self.setup_file_manager_integration,
+                    "Set up (or repair) opening documents by double-clicking them",
+                    "loop",
+                ),
+                (
                     "WebView2 Runtime (v3)",
                     self.install_webview2_runtime,
                     "Install WebView2 for Affinity V3 Help system",
@@ -10844,6 +10850,97 @@ class AffinityInstallerGUI(QMainWindow):
             self.log("WinMetadata installed to system32", "success")
         except Exception as e:
             self.log(f"Failed to install WinMetadata: {e}", "error")
+
+    def setup_file_manager_integration(self):
+        """Install or repair everything needed to open a document by double-clicking it.
+
+        Each step is also part of a normal install and skips itself when already
+        done, so this is safe to run repeatedly. It exists because those steps can
+        fail independently of the install -- a download that did not resolve, for
+        instance -- and re-running the whole install to recover them means
+        re-fetching Wine and Affinity for no reason."""
+        self.log(
+            "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        )
+        self.log("File Manager Integration", "info")
+        self.log(
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        )
+
+        wine_binary = self.get_wine_path("wine")
+        if not wine_binary.exists():
+            self.log("Wine is not set up yet.", "error")
+            QMessageBox.warning(
+                self,
+                "Wine Not Ready",
+                "Wine setup must complete first.",
+            )
+            return
+
+        install_dir = (
+            Path(self.directory) / "drive_c" / "Program Files" / "Affinity" / "Affinity"
+        )
+        if not install_dir.is_dir():
+            self.log("Affinity is not installed yet.", "error")
+            QMessageBox.warning(
+                self,
+                "Affinity Not Installed",
+                "Install Affinity first, then run this.",
+            )
+            return
+
+        self.start_operation("File Manager Integration")
+        threading.Thread(
+            target=self._setup_file_manager_integration_entry, daemon=True
+        ).start()
+
+    def _setup_file_manager_integration_entry(self):
+        try:
+            self.update_progress_text("Installing WinRT interop facade...")
+            self.update_progress(0.2)
+            self.install_winrt_interop_facade()
+
+            if self.wine_resolves_winrt_namespaces():
+                self.update_progress_text("Installing Windows metadata...")
+                self.update_progress(0.4)
+                self.install_combined_winmetadata()
+            else:
+                self.log(
+                    "This Wine build stubs RoResolveNamespace, so documents cannot be "
+                    "opened from the file manager. Switch to a build that implements "
+                    "it (Wine 11.16).",
+                    "warning",
+                )
+
+            self.update_progress_text("Installing the file-manager handler...")
+            self.update_progress(0.6)
+            self.install_file_manager_handler()
+
+            self.update_progress_text("Updating the desktop entry...")
+            self.update_progress(0.8)
+            self.create_desktop_entry("Add")
+
+            self.update_progress(1.0)
+            handler = (
+                Path(self.directory)
+                / "drive_c"
+                / "Program Files"
+                / "Affinity"
+                / "Affinity"
+                / "affinity-on-linux.exe"
+            )
+            if handler.exists():
+                self.log("Double-clicking a document should now open it", "success")
+            else:
+                self.log(
+                    "The handler is still missing, so the desktop entry was left "
+                    "alone. See the errors above.",
+                    "warning",
+                )
+        except Exception as e:
+            self.log(f"File manager integration failed: {e}", "error")
+        finally:
+            self.end_operation()
 
     def reinstall_winmetadata(self):
         """Remove old WinMetadata folder and reinstall fresh"""
