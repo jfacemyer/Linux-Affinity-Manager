@@ -16371,7 +16371,11 @@ Would you like to continue with {distro_name} anyway?"""
         # open; the handler also serialises concurrent double-clicks and picks the
         # warm or cold route. Without it the entry is unchanged.
         handler_path = app_path.parent / "affinity-on-linux.exe"
-        has_handler = handler_path.exists()
+        # Both conditions matter: the handler has to be there, and the Wine build
+        # has to be able to act on a document once the handler forwards it.
+        # Checked here as well as at install time so that switching to a build
+        # without the support gives the association up again.
+        has_handler = handler_path.exists() and self.wine_resolves_winrt_namespaces()
         if has_handler:
             app_path_str = str(handler_path).replace("\\", "/")
 
@@ -16603,6 +16607,19 @@ Would you like to continue with {distro_name} anyway?"""
             self.log(
                 "Affinity install directory not found; skipping file-manager handler",
                 "warning",
+            )
+            return
+
+        # Pointless, and worse than pointless, on a build that stubs
+        # RoResolveNamespace: the handler would install and the desktop entry
+        # would claim the document types, but Affinity silently ignores a
+        # document handed to it, so double-clicking would open an empty
+        # application and look like the association is broken.
+        if not self.wine_resolves_winrt_namespaces():
+            self.log(
+                "This Wine build cannot open documents handed to it, so the "
+                "file-manager handler is not installed (use Wine 11.16)",
+                "info",
             )
             return
 
