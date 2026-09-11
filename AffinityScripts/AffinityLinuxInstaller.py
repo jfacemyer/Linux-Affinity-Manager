@@ -16510,8 +16510,13 @@ Would you like to continue with {distro_name} anyway?"""
             return
 
         dest = install_dir / "affinity-on-linux.exe"
+        # POC SOURCE -- a personal Forgejo fork, not upstream. Repoint at the
+        # upstream raw URL before merging; the file has to be fetchable because
+        # the documented install pipes this script straight into python3, where
+        # there is no checkout to copy from.
         raw_url = (
-            "https://raw.githubusercontent.com/ryzendew/AffinityOnLinux/main/"
+            "https://forgejo.facemyer.net/facemyer/AffinityOnLinux/raw/branch/"
+            "feature/open-documents-from-file-manager/"
             "AffinityHandler/affinity-on-linux.exe"
         )
 
@@ -16561,8 +16566,10 @@ Would you like to continue with {distro_name} anyway?"""
             "x-wine-extension-afdesign.xml",
             "x-wine-extension-afpub.xml",
         ]
+        # POC SOURCE -- see install_file_manager_handler().
         raw_base = (
-            "https://raw.githubusercontent.com/ryzendew/AffinityOnLinux/main/mime/"
+            "https://forgejo.facemyer.net/facemyer/AffinityOnLinux/raw/branch/"
+            "feature/open-documents-from-file-manager/mime/"
         )
 
         try:
