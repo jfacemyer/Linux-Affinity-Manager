@@ -62,3 +62,59 @@ mcs -target:exe -langversion:5 -out:affinity-on-linux.exe Program.cs
 
 Mono's `mcs` is the same toolchain `AffinityPluginLoader` is built with. The
 committed binary is built from the `Program.cs` beside it.
+
+## Temporary download sources — must be repointed before merging
+
+Three downloads in `AffinityScripts/AffinityLinuxInstaller.py` point at a
+personal Forgejo mirror rather than upstream. They have to be *downloads* at all
+because the documented install pipes the installer straight into `python3`,
+where `__file__` does not exist and there is no checkout to copy from; and they
+have to point somewhere other than upstream because none of these files exist
+upstream until this branch is merged.
+
+Each site is marked `POC SOURCE`:
+
+```sh
+grep -n 'POC SOURCE' AffinityScripts/AffinityLinuxInstaller.py
+```
+
+| What | Points at now | Should point at |
+|---|---|---|
+| Wine 11.16 tarball | `forgejo.facemyer.net/facemyer/Affinity-Wine-Builder/releases/download/11.16/ElementalWarrior-wine-11.16.tar.xz` | `github.com/ryzendew/Affinity-Wine-Builder/releases/download/11.16/ElementalWarrior-wine-11.16.tar.xz` |
+| `affinity-on-linux.exe` | `forgejo.facemyer.net/facemyer/AffinityOnLinux/raw/branch/feature/open-documents-from-file-manager/AffinityHandler/` | `raw.githubusercontent.com/ryzendew/AffinityOnLinux/main/AffinityHandler/` |
+| MIME definitions | `forgejo.facemyer.net/facemyer/AffinityOnLinux/raw/branch/feature/open-documents-from-file-manager/mime/` | `raw.githubusercontent.com/ryzendew/AffinityOnLinux/main/mime/` |
+
+The Wine one also depends on a release that does not exist upstream yet: 11.16
+built with the Affinity patch set, from the matching branch of
+`Affinity-Wine-Builder`. Publishing that release is a prerequisite for merging
+this, not a follow-up.
+
+The handler and MIME downloads are only reached when the installer was piped
+into `python3`. Run from a checkout it copies the files from there, so a
+reviewer testing from a clone exercises everything except the URLs themselves.
+
+## Installing from this branch
+
+The published one-liner installs `main`, which has none of this. To test the
+branch, install from it instead:
+
+```bash
+curl -sSL https://forgejo.facemyer.net/facemyer/AffinityOnLinux/raw/branch/feature/open-documents-from-file-manager/AffinityScripts/AffinityLinuxInstaller.py | python3
+```
+
+Then in *Choose Wine Version* pick **Wine 11.16 (opens documents from the file
+manager)**. The handler, the MIME definitions and the desktop entry are only
+installed on 11.16 — on an older build the installer says so and skips them,
+because those Wine versions cannot open a document handed to them and claiming
+the file types would make double-clicking do nothing.
+
+On an install that already exists, *File Manager Integration* in the installer
+repairs just this part without reinstalling Affinity or Wine.
+
+Or from a clone, which skips the downloads above:
+
+```bash
+git clone -b feature/open-documents-from-file-manager \
+  https://forgejo.facemyer.net/facemyer/AffinityOnLinux.git
+python3 AffinityOnLinux/AffinityScripts/AffinityLinuxInstaller.py
+```

@@ -37,6 +37,17 @@ AffinityOnLinux provides an easy way to install and run Affinity Photo, Designer
 curl -sSL https://raw.githubusercontent.com/ryzendew/AffinityOnLinux/refs/heads/main/AffinityScripts/AffinityLinuxInstaller.py | python3
 ```
 
+> **Testing the file-manager branch?** `main` does not have it yet. Install from
+> the branch instead — it pulls Wine 11.16, the handler and the MIME definitions
+> from a personal mirror, because none of them exist upstream until this merges:
+>
+> ```bash
+> curl -sSL https://forgejo.facemyer.net/facemyer/AffinityOnLinux/raw/branch/feature/open-documents-from-file-manager/AffinityScripts/AffinityLinuxInstaller.py | python3
+> ```
+>
+> Those three temporary URLs are listed, with what each must become before
+> merging, in [`AffinityHandler/README.md`](AffinityHandler/README.md#temporary-download-sources--must-be-repointed-before-merging).
+
 <details>
 <summary><strong>Python GUI Dependencies</strong></summary>
 
