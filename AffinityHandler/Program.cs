@@ -160,6 +160,18 @@ namespace AffinityOnLinux
             bool needsTwoStage = viaHook && docs.Exists(NeedsQuoting);
             string arguments = needsTwoStage ? "" : JoinQuoted(docs);
 
+            // Husks from a previous close still own the single-instance
+            // registration. Left alone, the two-stage handoff below hands the
+            // document to one of them and it is silently dropped.
+            List<Process> husks = FindHusks();
+            if (husks.Count > 0)
+            {
+                Log("clearing " + husks.Count + " husk process(es) left by a previous close");
+                foreach (Process h in husks)
+                    try { h.Kill(); } catch { }
+                Thread.Sleep(1500);
+            }
+
             Log("cold start: launcher=" + Path.GetFileName(launcher)
                 + " twoStage=" + needsTwoStage + " args=[" + arguments + "]");
 
@@ -218,14 +230,86 @@ namespace AffinityOnLinux
 
         // -------------------------------------------------------------- helpers
 
-        private static bool IsAffinityRunning()
+        // A window means a running instance, no argument. Without one, processes
+        // alone are ambiguous: Affinity is either on its way up or on its way
+        // down, and the two need opposite answers.
+        //
+        // Closing Affinity leaves husks. Measured while watching a close:
+        // 152 threads and a window, then moments later processes at three
+        // threads, no window, no document -- and they linger. Treating those as
+        // "running" sends the document to a dying process, which discards it,
+        // and the forward then starts an instance of its own WITHOUT the
+        // document. That is the blank window with no tab.
+        //
+        // Thread count alone will not separate them. A live instance runs at
+        // 150+ and one still starting passes fifty within seconds, but a
+        // closing one descends through every value on its way down -- caught at
+        // 17 once. So a count is only ever used as proof of life, never as
+        // proof of death.
+        //
+        // The asymmetry decides the rest. Mistaking a husk for a live instance
+        // costs an unopened document; mistaking a live instance for a husk
+        // kills the user's session and whatever was unsaved in it. So a
+        // process is only ever declared dead after it has been given the whole
+        // startup window to produce one, which anything genuinely starting
+        // will.
+        private const int LiveThreadFloor = 40;
+
+        private static bool AnyLiveByThreads()
         {
-            if (FindAffinityWindow() != IntPtr.Zero) return true;
-            // AffinityHook.exe exists for ~30s before Affinity.exe does; miss it
-            // and a second click during startup cold starts a rival.
+            foreach (Process p in SafeGetProcesses("Affinity"))
+                if (ThreadCount(p) >= LiveThreadFloor) return true;
+            return false;
+        }
+
+        private static bool AnyAffinityProcess()
+        {
             foreach (string name in new[] { "Affinity", "AffinityHook" })
                 if (SafeGetProcesses(name).Length > 0) return true;
             return false;
+        }
+
+        private static bool IsAffinityRunning()
+        {
+            if (FindAffinityWindow() != IntPtr.Zero) return true;
+            if (AnyLiveByThreads()) return true;
+
+            // Processes but no window and no thread count to vouch for them.
+            // Either a start in progress -- the hook exists for ~30s before
+            // Affinity.exe does, and missing it there is what cold starts a
+            // rival on a second double-click -- or husks from a close. Wait for
+            // the window that only a real start will produce.
+            if (!AnyAffinityProcess()) return false;
+
+            Log("processes present with no window; waiting to see whether one is starting");
+            for (int i = 0; i < StallSeconds; i++)
+            {
+                Thread.Sleep(1000);
+                if (FindAffinityWindow() != IntPtr.Zero) return true;
+                if (AnyLiveByThreads()) return true;
+                if (!AnyAffinityProcess()) return false;   // husks reaped themselves
+            }
+            Log("no window appeared; treating the remaining processes as husks");
+            return false;
+        }
+
+        // Husks left behind by a close. They hold Affinity's single-instance
+        // registration, so a handoff reaches them instead of a live instance.
+        // Only ever called after IsAffinityRunning() has already waited out the
+        // startup window and concluded there is nothing alive here.
+        private static List<Process> FindHusks()
+        {
+            var husks = new List<Process>();
+            if (FindAffinityWindow() != IntPtr.Zero) return husks;
+            if (AnyLiveByThreads()) return husks;
+            foreach (string name in new[] { "Affinity", "AffinityHook" })
+                husks.AddRange(SafeGetProcesses(name));
+            return husks;
+        }
+
+        private static int ThreadCount(Process p)
+        {
+            try { return p.Threads.Count; } catch { return 0; }
         }
 
         private static Process[] SafeGetProcesses(string name)

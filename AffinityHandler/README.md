@@ -22,6 +22,32 @@ It does three other things that need to happen inside the prefix:
 - **Watches for the startup stall.** It waits up to 45s for a titled window,
   then kills the attempt and retries, up to three times.
 
+## Husks
+
+Closing Affinity does not always end its processes. What is left has no window,
+no document and a handful of threads, and it lingers -- but it still owns
+Affinity's single-instance registration. A document handed to one is silently
+discarded, and the forwarding process then starts an instance of its own
+without the document: a blank window with no tab, from a double-click that
+looks like it did nothing.
+
+So the handler will not take a process list as proof that Affinity is running.
+A window proves it, and so does a thread count of 40 or more -- a live instance
+runs at 150+, and one still starting passes fifty within seconds. A low count
+proves nothing, because a closing instance descends through every value on its
+way down; one was caught at 17.
+
+When there are processes but neither of those, it waits out the whole startup
+window for a window to appear. Anything genuinely starting produces one -- the
+hook exists for about thirty seconds before Affinity.exe does, and missing it
+there is what cold starts a rival on a second double-click. If none appears,
+what is left is husks, and they are cleared before the cold start so the
+handoff cannot land on one.
+
+The asymmetry is deliberate: mistaking a husk for a live instance costs an
+unopened document, while mistaking a live instance for a husk kills the user's
+session and whatever was unsaved in it. Nothing is declared dead early.
+
 ## Warm and cold
 
 - **Warm** (an instance is up): hands the document straight to `Affinity.exe` and
