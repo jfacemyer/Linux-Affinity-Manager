@@ -14228,15 +14228,20 @@ Would you like to continue with {distro_name} anyway?"""
                 # Target path: AppData/Roaming/Affinity/Affinity/3.0/Settings (for v3)
                 target_dir = affinity_appdata / "Affinity" / version_folder / "Settings"
 
-                # Remove existing settings if they exist (to force fresh copy)
+                # Move existing settings aside rather than deleting them: see
+                # the identical block in _install_affinity_settings_thread.
+                # RecentFiles.xml and any customisation live here.
                 if target_dir.exists():
-                    self.log(f"Removing existing settings from: {target_dir}", "info")
+                    stamp = time.strftime("%Y%m%d-%H%M%S")
+                    kept = target_dir.with_name(f"{target_dir.name}.replaced-{stamp}")
                     try:
-                        shutil.rmtree(target_dir)
-                        self.log("Old settings removed", "success")
+                        target_dir.rename(kept)
+                        self.log(
+                            f"Existing settings kept at {kept.name}", "info"
+                        )
                     except Exception as e:
                         self.log(
-                            f"Warning: Could not fully remove old settings: {e}",
+                            f"Warning: could not move the old settings aside: {e}",
                             "warning",
                         )
 
