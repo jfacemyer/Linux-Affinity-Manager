@@ -13426,15 +13426,32 @@ Would you like to continue with {distro_name} anyway?"""
             # Target path: AppData/Roaming/Affinity/Affinity/3.0/Settings (for v3)
             target_dir = affinity_appdata / "Affinity" / version_folder / "Settings"
 
-            # Remove existing settings if they exist (to force fresh copy)
+            # Move existing settings aside rather than deleting them.
+            #
+            # This directory is not only stock configuration: RecentFiles.xml
+            # lives here, and so does whatever the user has changed. Deleting it
+            # "to force a fresh copy" silently resets preferences and wipes the
+            # recent-documents list on every update, which reads as data loss
+            # because it is -- the list regenerates as documents are opened, so
+            # it usually goes unnoticed until someone looks for a file they had
+            # open last week.
+            #
+            # Keeping the old directory costs a few hundred kilobytes and makes
+            # the step reversible.
             if target_dir.exists():
-                self.log(f"Removing existing settings from: {target_dir}", "info")
+                stamp = time.strftime("%Y%m%d-%H%M%S")
+                kept = target_dir.with_name(f"{target_dir.name}.replaced-{stamp}")
                 try:
-                    shutil.rmtree(target_dir)
-                    self.log("Old settings removed", "success")
+                    target_dir.rename(kept)
+                    self.log(
+                        f"Existing settings kept at {kept.name} "
+                        f"(RecentFiles.xml and any customisation are in there)",
+                        "info",
+                    )
                 except Exception as e:
                     self.log(
-                        f"Warning: Could not fully remove old settings: {e}", "warning"
+                        f"Warning: could not move the old settings aside: {e}",
+                        "warning",
                     )
 
             # Copy settings from source to target
