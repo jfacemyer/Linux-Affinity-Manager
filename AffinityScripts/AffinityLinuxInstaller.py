@@ -10811,6 +10811,72 @@ class AffinityInstallerGUI(QMainWindow):
             self.log(f"Failed to download wintypes.dll: {e}", "error")
             return False
 
+    def clear_shadowing_winmds(self, quiet=False):
+        """Move Wine's per-namespace winmd files out of the way.
+
+        They shadow the combined Windows.winmd rather than supplementing it:
+        RoResolveNamespace walks a namespace up -- Windows.Storage.Streams,
+        Windows.Storage, Windows -- and returns the FIRST file that exists. With
+        windows.storage.winmd present it never reaches Windows.winmd, and Wine's
+        own generated metadata is what it resolves against, which fails with
+        TypeLoadException when Affinity is handed a document. So a prefix with
+        both sets behaves exactly like a prefix with no combined metadata at all.
+
+        THIS HAS TO RUN LAST. The ten files are not a leftover -- they are part
+        of Wine, listed in wine.inf as
+
+            [WinmdFiles]  ->  DestinationDirs: 11,winmetadata
+
+        under [BaseInstall] and [BaseWow64Install], which wineboot re-runs
+        through InstallHinfSection on every prefix update. Anything that boots
+        the prefix -- a Wine version change, winetricks, installing .NET, the
+        Affinity installer itself -- copies all ten straight back. Clearing them
+        during Wine setup and stopping there leaves a finished install with the
+        metadata shadowed again, which is exactly the state that makes
+        double-clicking a document silently do nothing.
+
+        Moved aside rather than deleted: they are Wine's, not ours, and a
+        prefix that later stops using the combined metadata will want them.
+        Returns how many were moved."""
+        dest_dir = (
+            Path(self.directory) / "drive_c" / "windows" / "system32" / "WinMetadata"
+        )
+        if not dest_dir.is_dir():
+            return 0
+        shadowed = [f for f in dest_dir.glob("*.winmd") if f.name != "Windows.winmd"]
+        if not shadowed:
+            return 0
+        if not (dest_dir / "Windows.winmd").is_file():
+            # Nothing to shadow. Removing them here would leave the prefix with
+            # no WinRT metadata at all, which is worse than the wrong metadata.
+            if not quiet:
+                self.log(
+                    "Per-namespace winmd files are present but Windows.winmd is not; "
+                    "leaving them alone",
+                    "warning",
+                )
+            return 0
+        aside = dest_dir / ".wine-shadowed"
+        try:
+            aside.mkdir(exist_ok=True)
+            moved = 0
+            for f in shadowed:
+                target = aside / f.name
+                if target.exists():
+                    target.unlink()
+                shutil.move(str(f), str(target))
+                moved += 1
+        except OSError as e:
+            self.log(f"Could not move shadowing winmd files aside: {e}", "warning")
+            return 0
+        if not quiet:
+            self.log(
+                f"Moved {moved} per-namespace winmd file(s) aside; they shadow the "
+                "combined metadata that lets Affinity open a document it is handed",
+                "info",
+            )
+        return moved
+
     def install_combined_winmetadata(self):
         """Install ONLY the combined Windows.winmd into the prefix.
 
@@ -10836,31 +10902,9 @@ class AffinityInstallerGUI(QMainWindow):
 
             # Clear any per-namespace winmds first, and do it even when
             # Windows.winmd is already present, so this can repair a prefix as
-            # well as populate one.
-            #
-            # They shadow the combined file rather than supplementing it:
-            # RoResolveNamespace walks a namespace up -- Windows.Storage.Streams,
-            # Windows.Storage, Windows -- and returns the FIRST file that exists.
-            # With windows.storage.winmd present it never reaches Windows.winmd,
-            # and Wine's own generated metadata is exactly what it then resolves
-            # against, which fails with TypeLoadException when Affinity is handed
-            # a document. Wine ships ten of these and a prefix picks them up on
-            # creation, so a real install has them even though a hand-built test
-            # prefix may not.
-            #
-            # Moved aside rather than deleted: they are Wine's, not ours.
-            if dest_dir.is_dir():
-                shadowed = [f for f in dest_dir.glob("*.winmd") if f.name != "Windows.winmd"]
-                if shadowed:
-                    aside = dest_dir / ".wine-shadowed"
-                    aside.mkdir(exist_ok=True)
-                    for f in shadowed:
-                        shutil.move(str(f), str(aside / f.name))
-                    self.log(
-                        f"Moved {len(shadowed)} per-namespace winmd file(s) aside; "
-                        "they shadow the combined metadata",
-                        "info",
-                    )
+            # well as populate one. Doing it here is not enough on its own --
+            # see clear_shadowing_winmds().
+            self.clear_shadowing_winmds()
 
             if dest.exists():
                 self.log("Windows.winmd already installed", "success")
@@ -14852,6 +14896,16 @@ Would you like to continue with {distro_name} anyway?"""
                         "warning",
                     )
 
+            # Last, after everything that can boot the prefix. wineboot restores
+            # Wine's per-namespace winmd files from wine.inf on every prefix
+            # update, so clearing them any earlier than this is undone by the
+            # next step -- see clear_shadowing_winmds(). Getting this wrong
+            # produces an install that looks complete and in which
+            # double-clicking a document silently does nothing.
+            self.update_progress_text("Finalising WinRT metadata...")
+            self.update_progress(0.97)
+            self.clear_shadowing_winmds()
+
             self.update_progress(1.0)
             self.update_progress_text("Installation complete!")
             display_name = {
@@ -16719,6 +16773,11 @@ Would you like to continue with {distro_name} anyway?"""
                 "info",
             )
             return
+
+        # The handler is useless against shadowed metadata, and this runs in the
+        # repair path as well as the install path, so assert it here rather than
+        # trusting whatever ran earlier.
+        self.clear_shadowing_winmds(quiet=True)
 
         dest = install_dir / "affinity-on-linux.exe"
         # POC SOURCE -- a personal Forgejo fork, not upstream. Repoint at the
