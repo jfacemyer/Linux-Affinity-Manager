@@ -10640,6 +10640,10 @@ class AffinityInstallerGUI(QMainWindow):
             if self.check_cancelled():
                 return False
 
+            # Before anything else uses this prefix: with OpenCL left on, Affinity
+            # hangs during startup on these Wine versions and never finishes.
+            self.disable_opencl_if_needed(wine_version)
+
             # Cache all other Wine versions in background (for future switching)
             self.update_progress_text("Caching other Wine versions...")
             self.update_progress(0.72)
@@ -10925,6 +10929,70 @@ class AffinityInstallerGUI(QMainWindow):
             return True
         except Exception as e:
             self.log(f"Could not install Windows.winmd: {e}", "warning")
+            return False
+
+    # Affinity deadlocks at startup when OpenCL initialises on a real GPU, on
+    # every Wine from 11.11 onward. It is not a crash and not a slow start: the
+    # rasteriser waits on an event that is never signalled, so the splash never
+    # clears, the UI never builds and the process sits at a couple of dozen
+    # threads instead of the ~150 a finished startup reaches. The backtrace is
+    #
+    #     ntdll <- kernelbase(WaitForMultipleObjects) <- libkernel
+    #           <- libraster <- libpersona
+    #
+    # Wine builds old enough to predate the regression are left alone, so
+    # anyone who wants OpenCL can still have it by choosing one.
+    OPENCL_DEADLOCK_FROM = (11, 11)
+
+    def wine_deadlocks_on_opencl(self, wine_version=None):
+        version = wine_version or self.get_current_wine_version() or ""
+        parts = []
+        for piece in str(version).split("."):
+            digits = "".join(c for c in piece if c.isdigit())
+            if not digits:
+                break
+            parts.append(int(digits))
+        if len(parts) < 2:
+            return False
+        return (parts[0], parts[1]) >= self.OPENCL_DEADLOCK_FROM
+
+    def disable_opencl_if_needed(self, wine_version=None):
+        """Turn opencl.dll off in the prefix where leaving it on hangs startup.
+
+        Written to the prefix registry rather than into a launcher, so it holds
+        however Affinity is started -- which matters, because the failure only
+        showed up through the desktop entry. Every test that launched it by hand
+        passed WINEDLLOVERRIDES on the command line and started cleanly, and the
+        disagreement between those two took a long time to explain.
+
+        Not conditional on the OpenCL preference: answering yes to that question
+        installs OpenCL packages and vkd3d-proton, which is a different thing
+        from letting Affinity load opencl.dll and hang."""
+        if not self.wine_deadlocks_on_opencl(wine_version):
+            return False
+        try:
+            wine = self.get_wine_path("wine")
+            if not wine.exists():
+                return False
+            env = os.environ.copy()
+            env["WINEPREFIX"] = self.directory
+            subprocess.run(
+                [str(wine), "reg", "add", "HKCU\\Software\\Wine\\DllOverrides",
+                 "/v", "opencl", "/d", "", "/f"],
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=120,
+                check=False,
+            )
+            self.log(
+                "Disabled opencl.dll in the prefix: on this Wine, Affinity hangs "
+                "during startup when OpenCL initialises on a real GPU",
+                "info",
+            )
+            return True
+        except Exception as e:
+            self.log(f"Could not disable opencl.dll: {e}", "warning")
             return False
 
     def wine_resolves_winrt_namespaces(self):
@@ -14905,6 +14973,9 @@ Would you like to continue with {distro_name} anyway?"""
             self.update_progress_text("Finalising WinRT metadata...")
             self.update_progress(0.97)
             self.clear_shadowing_winmds()
+            # Again at the end: a prefix whose Wine changed during the install
+            # must still come out with opencl off.
+            self.disable_opencl_if_needed()
 
             self.update_progress(1.0)
             self.update_progress_text("Installation complete!")
