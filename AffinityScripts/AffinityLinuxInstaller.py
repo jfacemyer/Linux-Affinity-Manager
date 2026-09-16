@@ -18,6 +18,7 @@ import urllib.error
 import re
 import json
 import tempfile
+import hashlib
 from pathlib import Path
 import time
 import signal
@@ -2957,6 +2958,12 @@ class AffinityInstallerGUI(QMainWindow):
                     "loop",
                 ),
                 (
+                    "File Manager Integration",
+                    self.setup_file_manager_integration,
+                    "Set up (or repair) opening documents by double-clicking them",
+                    "loop",
+                ),
+                (
                     "WebView2 Runtime (v3)",
                     self.install_webview2_runtime,
                     "Install WebView2 for Affinity V3 Help system",
@@ -4174,14 +4181,36 @@ class AffinityInstallerGUI(QMainWindow):
         # Create button group to ensure only one radio button is selected at a time
         button_group = QButtonGroup(dialog)
 
-        # Wine 11.12 option - clean frame with radio button and description (Recommended)
+        # Wine 11.16 option - the build carrying the document-open patches
+        wine_1116_frame = QFrame()
+        wine_1116_frame.setObjectName("optionFrame")
+        wine_1116_layout = QVBoxLayout(wine_1116_frame)
+        wine_1116_layout.setContentsMargins(12, 10, 12, 10)
+        wine_1116_layout.setSpacing(6)
+        wine_1116_radio = QRadioButton("Wine 11.16 (opens documents from the file manager)")
+        wine_1116_radio.setChecked(True)
+        wine_1116_radio.setSizePolicy(
+            QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Minimum
+        )
+        wine_1116_layout.addWidget(wine_1116_radio)
+        wine_1116_desc = QLabel(
+            "ElementalWarrior Wine 11.16. Adds the patches that let a double-clicked "
+            "document open in a running Affinity and bring its window to the front, "
+            "and that keep modal dialogs above the window they block."
+        )
+        wine_1116_desc.setObjectName("optionDescription")
+        wine_1116_desc.setWordWrap(True)
+        wine_1116_layout.addWidget(wine_1116_desc)
+        button_group.addButton(wine_1116_radio)
+        options_layout.addWidget(wine_1116_frame)
+
+        # Wine 11.12 option - clean frame with radio button and description
         wine_1112_frame = QFrame()
         wine_1112_frame.setObjectName("optionFrame")
         wine_1112_layout = QVBoxLayout(wine_1112_frame)
         wine_1112_layout.setContentsMargins(12, 10, 12, 10)
         wine_1112_layout.setSpacing(6)
         wine_1112_radio = QRadioButton("Wine 11.12 (Recommended)")
-        wine_1112_radio.setChecked(True)
         wine_1112_radio.setSizePolicy(
             QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Minimum
         )
@@ -4305,7 +4334,11 @@ class AffinityInstallerGUI(QMainWindow):
         # Get result
         result = dialog.exec()
         if result == QDialog.DialogCode.Accepted:
-            if wine_1112_radio.isChecked():
+            if wine_1116_radio.isChecked():
+                self.question_dialog_response = (
+                    "Wine 11.16 (opens documents from the file manager)"
+                )
+            elif wine_1112_radio.isChecked():
                 self.question_dialog_response = "Wine 11.12 (Recommended)"
             elif wine_1112v4_radio.isChecked():
                 self.question_dialog_response = "Wine 11.12 v4 (Zen 4/5)"
@@ -4573,6 +4606,8 @@ class AffinityInstallerGUI(QMainWindow):
                                 return "9.14"
                             elif version.startswith("10."):
                                 return "10.10"
+                            elif version == "11.16":
+                                return "11.16"
                             elif version.startswith("11."):
                                 return "11.12"
                 except Exception:
@@ -8308,15 +8343,24 @@ class AffinityInstallerGUI(QMainWindow):
         wine_version = self.show_question_dialog(
             "Choose Wine Version",
             "Which Wine version would you like to install?\n\n"
+            "• Wine 11.16 - adds the patches that let a double-clicked document open in a running Affinity, and let its window come to the front.\n"
             "• Wine 11.12 (Recommended) - ElementalWarrior Wine 11.12 with AMD GPU and OpenCL patches. Latest version with best compatibility and performance.\n"
             "• Wine 11.12 v4 (Zen 4/5) - ElementalWarrior Wine 11.12 v4 with AVX-512 and AMD Zen 4/5 optimizations. Best performance for Ryzen 7000/9000 series CPUs.\n"
             "• Wine 10.10 - ElementalWarrior Wine 10.10 with AMD GPU and OpenCL patches. Previous stable version.\n"
             "• Wine 9.14 (Legacy) - Legacy version with AMD GPU and OpenCL patches. Fallback option if you encounter issues with newer versions.\n\n"
             "Note: You can switch versions later by running 'Setup Wine Environment' again.",
-            ["Wine 11.12 (Recommended)", "Wine 11.12 v4 (Zen 4/5)", "Wine 10.10", "Wine 9.14 (Legacy)"],
+            [
+                "Wine 11.16 (opens documents from the file manager)",
+                "Wine 11.12 (Recommended)",
+                "Wine 11.12 v4 (Zen 4/5)",
+                "Wine 10.10",
+                "Wine 9.14 (Legacy)",
+            ],
         )
 
-        if wine_version == "Wine 11.12 (Recommended)":
+        if wine_version == "Wine 11.16 (opens documents from the file manager)":
+            wine_version_choice = "11.16"
+        elif wine_version == "Wine 11.12 (Recommended)":
             wine_version_choice = "11.12"
         elif wine_version == "Wine 11.12 v4 (Zen 4/5)":
             wine_version_choice = "11.12-v4"
@@ -8328,7 +8372,22 @@ class AffinityInstallerGUI(QMainWindow):
             self.log("Wine setup cancelled", "warning")
             return
 
-        self.setup_wine(wine_version_choice)
+        # setup_wine() returns False when it gives up -- most often because the
+        # Wine download failed. Its return value used to be discarded, so a failed
+        # download only appeared in the log while the flow carried on to DPI
+        # configuration and beyond against a prefix that has no Wine in it.
+        if not self.setup_wine(wine_version_choice):
+            if not self.check_cancelled():
+                self.log("Wine setup failed; stopping here", "error")
+                self.show_message(
+                    "Wine setup failed",
+                    "Wine could not be set up, so the rest of the installation "
+                    "was skipped.\n\nThe usual cause is a failed download. See "
+                    "the log for the exact error, then try again -- or pick a "
+                    "different Wine version.",
+                    "error",
+                )
+            return
 
         if self.check_cancelled():
             return
@@ -10558,14 +10617,24 @@ class AffinityInstallerGUI(QMainWindow):
             if self.check_cancelled():
                 return False
 
-            # Setup WinMetadata (only needed for Wine 9.14 and 10.10, not 11.12+)
+            # Setup WinMetadata. 9.14 and 10.10 need it. 11.12 does not, because
+            # its RoResolveNamespace is a stub and the metadata would never be
+            # read. A build that implements RoResolveNamespace does need it --
+            # that is what lets a double-clicked document open -- so ask the
+            # build what it supports rather than keeping a version list.
             if wine_version in ["9.14", "10.10"]:
                 self.update_progress_text("Setting up Windows Metadata...")
                 self.update_progress(0.70)
                 self.setup_winmetadata()
+            elif self.wine_resolves_winrt_namespaces():
+                self.update_progress_text("Setting up Windows Metadata...")
+                self.update_progress(0.70)
+                self.install_combined_winmetadata()
             else:
                 self.log(
-                    "Skipping WinMetadata setup for Wine 11.12+ (not needed)", "info"
+                    "Skipping WinMetadata setup: this Wine stubs RoResolveNamespace, "
+                    "so the metadata would never be read",
+                    "info",
                 )
 
             if self.check_cancelled():
@@ -10742,6 +10811,106 @@ class AffinityInstallerGUI(QMainWindow):
             self.log(f"Failed to download wintypes.dll: {e}", "error")
             return False
 
+    def install_combined_winmetadata(self):
+        """Install ONLY the combined Windows.winmd into the prefix.
+
+        The same WinMetadata.tar.xz as setup_winmetadata(), but just one file out
+        of it, and that difference decides whether a document opens.
+
+        RoResolveNamespace resolves a namespace by walking up: Windows.Storage.
+        Streams, then Windows.Storage, then Windows -- first file that exists
+        wins. With the per-namespace files present it stops at, say,
+        Windows.Foundation.winmd, and the CLR then fails on assembly identity,
+        because those types reference each other as members of the single
+        "Windows" assembly rather than of per-namespace ones. Measured: with all
+        21 files the document silently never opens; with Windows.winmd alone,
+        cold and warm both work.
+
+        Left alone for 9.14 and 10.10, which have their own arrangement."""
+        try:
+            system32_dir = (
+                Path(self.directory) / "drive_c" / "windows" / "system32"
+            )
+            dest_dir = system32_dir / "WinMetadata"
+            dest = dest_dir / "Windows.winmd"
+
+            # Clear any per-namespace winmds first, and do it even when
+            # Windows.winmd is already present, so this can repair a prefix as
+            # well as populate one.
+            #
+            # They shadow the combined file rather than supplementing it:
+            # RoResolveNamespace walks a namespace up -- Windows.Storage.Streams,
+            # Windows.Storage, Windows -- and returns the FIRST file that exists.
+            # With windows.storage.winmd present it never reaches Windows.winmd,
+            # and Wine's own generated metadata is exactly what it then resolves
+            # against, which fails with TypeLoadException when Affinity is handed
+            # a document. Wine ships ten of these and a prefix picks them up on
+            # creation, so a real install has them even though a hand-built test
+            # prefix may not.
+            #
+            # Moved aside rather than deleted: they are Wine's, not ours.
+            if dest_dir.is_dir():
+                shadowed = [f for f in dest_dir.glob("*.winmd") if f.name != "Windows.winmd"]
+                if shadowed:
+                    aside = dest_dir / ".wine-shadowed"
+                    aside.mkdir(exist_ok=True)
+                    for f in shadowed:
+                        shutil.move(str(f), str(aside / f.name))
+                    self.log(
+                        f"Moved {len(shadowed)} per-namespace winmd file(s) aside; "
+                        "they shadow the combined metadata",
+                        "info",
+                    )
+
+            if dest.exists():
+                self.log("Windows.winmd already installed", "success")
+                return True
+
+            with tempfile.TemporaryDirectory() as tmp:
+                if not self._download_and_extract_winmetadata(Path(tmp)):
+                    self.log("Could not fetch WinMetadata", "warning")
+                    return False
+                src = Path(tmp) / "WinMetadata" / "Windows.winmd"
+                if not src.is_file():
+                    self.log("Windows.winmd missing from the archive", "warning")
+                    return False
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dest)
+
+            self.log("Windows.winmd installed", "success")
+            return True
+        except Exception as e:
+            self.log(f"Could not install Windows.winmd: {e}", "warning")
+            return False
+
+    def wine_resolves_winrt_namespaces(self):
+        """True when this Wine build implements RoResolveNamespace instead of
+        stubbing it.
+
+        This decides whether installing WinMetadata is worth anything. With a
+        stub, nothing ever reads C:\\windows\\system32\\WinMetadata, so putting
+        metadata there changes nothing -- which is why 11.12 skips it. With a
+        real implementation, a single genuine Windows.winmd in that directory is
+        what lets Affinity open a document handed to it on the command line.
+
+        Detected rather than kept as a version list, so a newer build that
+        implements it is picked up without editing this file. The implementation
+        resolves against the WinMetadata directory by name, so the string is
+        present in wintypes.dll only when it is."""
+        try:
+            wintypes = (
+                Path(self.get_wine_path("wine")).parent.parent
+                / "lib"
+                / "wine"
+                / "x86_64-windows"
+                / "wintypes.dll"
+            )
+            if not wintypes.is_file():
+                return False
+            return "WinMetadata".encode("utf-16-le") in wintypes.read_bytes()
+        except Exception:
+            return False
+
     def setup_winmetadata(self):
         """Download and install WinMetadata to system32"""
         self.log(
@@ -10778,6 +10947,97 @@ class AffinityInstallerGUI(QMainWindow):
             self.log("WinMetadata installed to system32", "success")
         except Exception as e:
             self.log(f"Failed to install WinMetadata: {e}", "error")
+
+    def setup_file_manager_integration(self):
+        """Install or repair everything needed to open a document by double-clicking it.
+
+        Each step is also part of a normal install and skips itself when already
+        done, so this is safe to run repeatedly. It exists because those steps can
+        fail independently of the install -- a download that did not resolve, for
+        instance -- and re-running the whole install to recover them means
+        re-fetching Wine and Affinity for no reason."""
+        self.log(
+            "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        )
+        self.log("File Manager Integration", "info")
+        self.log(
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        )
+
+        wine_binary = self.get_wine_path("wine")
+        if not wine_binary.exists():
+            self.log("Wine is not set up yet.", "error")
+            QMessageBox.warning(
+                self,
+                "Wine Not Ready",
+                "Wine setup must complete first.",
+            )
+            return
+
+        install_dir = (
+            Path(self.directory) / "drive_c" / "Program Files" / "Affinity" / "Affinity"
+        )
+        if not install_dir.is_dir():
+            self.log("Affinity is not installed yet.", "error")
+            QMessageBox.warning(
+                self,
+                "Affinity Not Installed",
+                "Install Affinity first, then run this.",
+            )
+            return
+
+        self.start_operation("File Manager Integration")
+        threading.Thread(
+            target=self._setup_file_manager_integration_entry, daemon=True
+        ).start()
+
+    def _setup_file_manager_integration_entry(self):
+        try:
+            self.update_progress_text("Installing WinRT interop facade...")
+            self.update_progress(0.2)
+            self.install_winrt_interop_facade()
+
+            if self.wine_resolves_winrt_namespaces():
+                self.update_progress_text("Installing Windows metadata...")
+                self.update_progress(0.4)
+                self.install_combined_winmetadata()
+            else:
+                self.log(
+                    "This Wine build stubs RoResolveNamespace, so documents cannot be "
+                    "opened from the file manager. Switch to a build that implements "
+                    "it (Wine 11.16).",
+                    "warning",
+                )
+
+            self.update_progress_text("Installing the file-manager handler...")
+            self.update_progress(0.6)
+            self.install_file_manager_handler()
+
+            self.update_progress_text("Updating the desktop entry...")
+            self.update_progress(0.8)
+            self.create_desktop_entry("Add")
+
+            self.update_progress(1.0)
+            handler = (
+                Path(self.directory)
+                / "drive_c"
+                / "Program Files"
+                / "Affinity"
+                / "Affinity"
+                / "affinity-on-linux.exe"
+            )
+            if handler.exists():
+                self.log("Double-clicking a document should now open it", "success")
+            else:
+                self.log(
+                    "The handler is still missing, so the desktop entry was left "
+                    "alone. See the errors above.",
+                    "warning",
+                )
+        except Exception as e:
+            self.log(f"File manager integration failed: {e}", "error")
+        finally:
+            self.end_operation()
 
     def reinstall_winmetadata(self):
         """Remove old WinMetadata folder and reinstall fresh"""
@@ -10840,6 +11100,9 @@ class AffinityInstallerGUI(QMainWindow):
         if wine_version in ["9.14", "10.10"]:
             self.log("Installing fresh WinMetadata...", "info")
             self.setup_winmetadata()
+        elif self.wine_resolves_winrt_namespaces():
+            self.log("Installing fresh Windows.winmd...", "info")
+            self.install_combined_winmetadata()
 
             # Set up wintypes.dll override
             self.log("Setting up wintypes.dll override...", "info")
@@ -11665,15 +11928,24 @@ class AffinityInstallerGUI(QMainWindow):
         wine_version = self.show_question_dialog(
             "Choose Wine Version",
             "Which Wine version would you like to install?\n\n"
+            "• Wine 11.16 - adds the patches that let a double-clicked document open in a running Affinity, and let its window come to the front.\n"
             "• Wine 11.12 (Recommended) - ElementalWarrior Wine 11.12 with AMD GPU and OpenCL patches. Latest version with best compatibility and performance.\n"
             "• Wine 11.12 v4 (Zen 4/5) - ElementalWarrior Wine 11.12 v4 with AVX-512 and AMD Zen 4/5 optimizations. Best performance for Ryzen 7000/9000 series CPUs.\n"
             "• Wine 10.10 - ElementalWarrior Wine 10.10 with AMD GPU and OpenCL patches. Previous stable version.\n"
             "• Wine 9.14 (Legacy) - Legacy version with AMD GPU and OpenCL patches. Fallback option if you encounter issues with newer versions.\n\n"
             "Note: You can switch versions later by running this setup again.",
-            ["Wine 11.12 (Recommended)", "Wine 11.12 v4 (Zen 4/5)", "Wine 10.10", "Wine 9.14 (Legacy)"],
+            [
+                "Wine 11.16 (opens documents from the file manager)",
+                "Wine 11.12 (Recommended)",
+                "Wine 11.12 v4 (Zen 4/5)",
+                "Wine 10.10",
+                "Wine 9.14 (Legacy)",
+            ],
         )
 
-        if wine_version == "Wine 11.12 (Recommended)":
+        if wine_version == "Wine 11.16 (opens documents from the file manager)":
+            wine_version_choice = "11.16"
+        elif wine_version == "Wine 11.12 (Recommended)":
             wine_version_choice = "11.12"
         elif wine_version == "Wine 11.12 v4 (Zen 4/5)":
             wine_version_choice = "11.12-v4"
@@ -11715,6 +11987,17 @@ class AffinityInstallerGUI(QMainWindow):
                 "wine_dir_pattern": "ElementalWarrior-wine-10.10*",
                 "archive_format": "xz",
                 "wine_display_name": "Wine 10.10 (with AMD GPU and OpenCL patches)",
+            }
+        elif wine_version == "11.16":
+            return {
+                # POC SOURCE -- a personal Forgejo build, not an upstream release.
+                # Repoint this at the upstream 11.16 release before merging.
+                "wine_url": "https://forgejo.facemyer.net/facemyer/Affinity-Wine-Builder/releases/download/11.16/ElementalWarrior-wine-11.16.tar.xz",
+                "wine_file_name": "ElementalWarrior-wine-11.16.tar.xz",
+                "wine_dir_name": "ElementalWarriorWine",
+                "wine_dir_pattern": "ElementalWarrior-wine-11.16*",
+                "archive_format": "xz",
+                "wine_display_name": "Wine 11.16 (opens documents from the file manager)",
             }
         elif wine_version == "11.12-v4":
             return {
@@ -11837,7 +12120,7 @@ class AffinityInstallerGUI(QMainWindow):
         cache_dir = Path(self.directory) / "Wine-Switch"
         cache_dir.mkdir(parents=True, exist_ok=True)
 
-        all_versions = ["9.14", "10.10", "11.12", "11.12-v4"]
+        all_versions = ["9.14", "10.10", "11.12", "11.12-v4", "11.16"]
 
         self.log(
             "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -12173,15 +12456,24 @@ class AffinityInstallerGUI(QMainWindow):
         wine_version = self.show_question_dialog(
             "Choose Wine Version",
             "Which Wine version would you like to install?\n\n"
+            "• Wine 11.16 - adds the patches that let a double-clicked document open in a running Affinity, and let its window come to the front.\n"
             "• Wine 11.12 (Recommended) - ElementalWarrior Wine 11.12 with AMD GPU and OpenCL patches. Latest version with best compatibility and performance.\n"
             "• Wine 11.12 v4 (Zen 4/5) - ElementalWarrior Wine 11.12 v4 with AVX-512 and AMD Zen 4/5 optimizations. Best performance for Ryzen 7000/9000 series CPUs.\n"
             "• Wine 10.10 - ElementalWarrior Wine 10.10 with AMD GPU and OpenCL patches. Previous stable version.\n"
             "• Wine 9.14 (Legacy) - Legacy version with AMD GPU and OpenCL patches. Fallback option if you encounter issues with newer versions.\n\n"
             "Note: This will replace your current Wine installation.",
-            ["Wine 11.12 (Recommended)", "Wine 11.12 v4 (Zen 4/5)", "Wine 10.10", "Wine 9.14 (Legacy)"],
+            [
+                "Wine 11.16 (opens documents from the file manager)",
+                "Wine 11.12 (Recommended)",
+                "Wine 11.12 v4 (Zen 4/5)",
+                "Wine 10.10",
+                "Wine 9.14 (Legacy)",
+            ],
         )
 
-        if wine_version == "Wine 11.12 (Recommended)":
+        if wine_version == "Wine 11.16 (opens documents from the file manager)":
+            wine_version_choice = "11.16"
+        elif wine_version == "Wine 11.12 (Recommended)":
             wine_version_choice = "11.12"
         elif wine_version == "Wine 11.12 v4 (Zen 4/5)":
             wine_version_choice = "11.12-v4"
@@ -14525,6 +14817,13 @@ Would you like to continue with {distro_name} anyway?"""
                 self.update_progress(0.85)
                 self.patch_affinity_dll(app_name)
 
+            # Install the file-manager handler before the desktop entry, which
+            # only claims the document types once the handler is in place.
+            self.update_progress_text("Installing file-manager handler...")
+            self.update_progress(0.88)
+            self.install_winrt_interop_facade()
+            self.install_file_manager_handler()
+
             # Create desktop entry
             self.update_progress_text("Creating desktop entry...")
             self.update_progress(0.9)
@@ -16162,6 +16461,21 @@ Would you like to continue with {distro_name} anyway?"""
             "\\", "/"
         )  # Ensure forward slashes, no double slashes
 
+        # Launch through affinity-on-linux.exe when it is installed, so documents
+        # can be opened from the file manager. Wine converts argv[0] to a DOS path
+        # but passes arguments through verbatim, so something inside the prefix has
+        # to turn the Unix path a file manager hands over into one Affinity can
+        # open; the handler also serialises concurrent double-clicks and picks the
+        # warm or cold route. Without it the entry is unchanged.
+        handler_path = app_path.parent / "affinity-on-linux.exe"
+        # Both conditions matter: the handler has to be there, and the Wine build
+        # has to be able to act on a document once the handler forwards it.
+        # Checked here as well as at install time so that switching to a build
+        # without the support gives the association up again.
+        has_handler = handler_path.exists() and self.wine_resolves_winrt_namespaces()
+        if has_handler:
+            app_path_str = str(handler_path).replace("\\", "/")
+
         # Get GPU environment variables if configured
         gpu_env = self.get_gpu_env_vars()
         # Get DXVK environment variables if AMD GPU is detected
@@ -16185,6 +16499,10 @@ Would you like to continue with {distro_name} anyway?"""
             if dxvk_env:
                 exec_line += f" {dxvk_env.strip()}"
             exec_line += f' {wine_str} "{app_path_str}"'
+            # %F, not %f: the file manager then hands every selected document to
+            # one invocation instead of racing one process per file.
+            if has_handler:
+                exec_line += " %F"
             f.write(f"{exec_line}\n")
             f.write("Terminal=false\n")
             f.write("Type=Application\n")
@@ -16194,6 +16512,20 @@ Would you like to continue with {distro_name} anyway?"""
                 f.write("StartupWMClass=affinity.exe\n")
             else:
                 f.write(f"StartupWMClass={name.lower()}.exe\n")
+            # Only claim the document types when the handler is there to open
+            # them. Without it a double-click would hand Affinity a Unix path it
+            # cannot resolve, which looks like the association is broken.
+            if has_handler:
+                mime_types = {
+                    "Photo": "application/afphoto;",
+                    "Designer": "application/afdesign;",
+                    "Publisher": "application/afpub;",
+                }.get(
+                    app_name,
+                    "application/af;application/afphoto;"
+                    "application/afdesign;application/afpub;",
+                )
+                f.write(f"MimeType={mime_types}\n")
 
         # Remove Wine's default entry
         wine_entry = desktop_dir / "wine" / "Programs" / f"Affinity {name} 2.desktop"
@@ -16235,6 +16567,276 @@ Would you like to continue with {distro_name} anyway?"""
                 self.log(f"Could not create desktop shortcut: {e}", "warning")
 
         self.log(f"Desktop entry created: {desktop_file}", "success")
+
+        if has_handler:
+            self.register_document_types()
+
+    def install_winrt_interop_facade(self):
+        """Install System.Runtime.WindowsRuntime.dll into the prefix GAC.
+
+        Without it Affinity starts normally but silently ignores a document
+        handed to it -- no exception, nothing in the log, the file just never
+        opens. It is the WinRT interop facade that supplies AsTask(), which
+        Affinity awaits on SharedStorageAccessManager.RedeemTokenForFileAsync().
+
+        It is missing by design, not by a broken install: the assembly ships
+        inside the .NET Framework 4.8 redistributable, but only in the Windows
+        8/10 payload cabs. On Windows 7 there is no WinRT, so the installer
+        correctly skips it -- and winetricks' dotnet verbs set the prefix to
+        win7, because on a real Windows 8+ the standalone installer refuses to
+        run at all. Re-running it with the prefix reporting Windows 10 does not
+        help either: it detects 4.8 and exits without doing anything. Extracting
+        the file is the way.
+
+        It must go in the GAC. Assemblies signed with the ECMA pseudo key carry
+        no real signature and are trusted only because the GAC is trusted; from
+        an application directory the CLR rejects the genuine file with
+        "Strong name validation failed" (0x8013141A)."""
+        gac_dir = (
+            Path(self.directory)
+            / "drive_c"
+            / "windows"
+            / "Microsoft.NET"
+            / "assembly"
+            / "GAC_MSIL"
+            / "System.Runtime.WindowsRuntime"
+            / "v4.0_4.0.0.0__b77a5c561934e089"
+        )
+        dest = gac_dir / "System.Runtime.WindowsRuntime.dll"
+        if dest.exists():
+            self.log("WinRT interop facade already installed", "success")
+            return
+
+        if not self.check_command("7z"):
+            self.log(
+                "7z is not installed, so the WinRT interop facade cannot be "
+                "extracted; documents will not open from the file manager",
+                "warning",
+            )
+            return
+
+        ndp_url = (
+            "https://download.visualstudio.microsoft.com/download/pr/"
+            "7afca223-55d2-470a-8edc-6a1739ae3252/"
+            "abd170b4b0ec15ad0222a809b761a036/ndp48-x86-x64-allos-enu.exe"
+        )
+        ndp_sha = "95889d6de3f2070c07790ad6cf2000d33d9a1bdfc6a381725ab82ab1c314fd53"
+        # winetricks' dotnet48 verb caches the redistributable here, so an
+        # install that already ran it does not download it twice.
+        cache = Path.home() / ".cache" / "winetricks" / "dotnet48"
+        ndp = cache / "ndp48-x86-x64-allos-enu.exe"
+
+        try:
+            if not ndp.exists():
+                self.log("Downloading the .NET Framework 4.8 redistributable...", "info")
+                cache.mkdir(parents=True, exist_ok=True)
+                urllib.request.urlretrieve(ndp_url, str(ndp))
+
+            digest = hashlib.sha256(ndp.read_bytes()).hexdigest()
+            if digest != ndp_sha:
+                self.log(
+                    "Checksum mismatch on the .NET redistributable; refusing to use it",
+                    "error",
+                )
+                return
+
+            with tempfile.TemporaryDirectory() as tmp:
+                tmp_path = Path(tmp)
+                subprocess.run(
+                    ["7z", "x", "-y", f"-o{tmp_path / 'ndp'}", str(ndp)],
+                    check=True,
+                    capture_output=True,
+                )
+                cabs = sorted((tmp_path / "ndp").glob("Windows10.0-KB*-x86.cab"))
+                if not cabs:
+                    self.log("No Windows 10 payload found in the redistributable", "error")
+                    return
+
+                listing = subprocess.run(
+                    ["7z", "l", str(cabs[0])], check=True, capture_output=True, text=True
+                ).stdout
+                inner = None
+                for line in listing.splitlines():
+                    candidate = line.split()[-1] if line.split() else ""
+                    if (
+                        "msil_system.runtime.windowsruntime_b77a5c561934e089"
+                        in candidate.lower()
+                        and candidate.lower().endswith("system.runtime.windowsruntime.dll")
+                    ):
+                        inner = candidate
+                        break
+                if not inner:
+                    self.log("Interop facade not found inside the payload", "error")
+                    return
+
+                subprocess.run(
+                    ["7z", "e", "-y", f"-o{tmp_path / 'fac'}", str(cabs[0]), inner],
+                    check=True,
+                    capture_output=True,
+                )
+                extracted = tmp_path / "fac" / "system.runtime.windowsruntime.dll"
+                if not extracted.is_file() or extracted.stat().st_size == 0:
+                    self.log("Extracting the interop facade produced nothing", "error")
+                    return
+
+                gac_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(extracted, dest)
+
+            self.log("WinRT interop facade installed", "success")
+        except Exception as e:
+            self.log(
+                f"Could not install the WinRT interop facade: {e}. "
+                "Documents will not open from the file manager.",
+                "warning",
+            )
+
+    def install_file_manager_handler(self):
+        """Put affinity-on-linux.exe in the prefix, beside Affinity.exe.
+
+        This is what lets a document be opened from the file manager: Wine
+        converts argv[0] to a DOS path but passes arguments through verbatim, so
+        a file manager's /home/you/art.afphoto reaches Affinity unchanged and
+        cannot be opened. See AffinityHandler/README.md."""
+        install_dir = (
+            Path(self.directory) / "drive_c" / "Program Files" / "Affinity" / "Affinity"
+        )
+        if not install_dir.is_dir():
+            self.log(
+                "Affinity install directory not found; skipping file-manager handler",
+                "warning",
+            )
+            return
+
+        # Pointless, and worse than pointless, on a build that stubs
+        # RoResolveNamespace: the handler would install and the desktop entry
+        # would claim the document types, but Affinity silently ignores a
+        # document handed to it, so double-clicking would open an empty
+        # application and look like the association is broken.
+        if not self.wine_resolves_winrt_namespaces():
+            self.log(
+                "This Wine build cannot open documents handed to it, so the "
+                "file-manager handler is not installed (use Wine 11.16)",
+                "info",
+            )
+            return
+
+        dest = install_dir / "affinity-on-linux.exe"
+        # POC SOURCE -- a personal Forgejo fork, not upstream. Repoint at the
+        # upstream raw URL before merging; the file has to be fetchable because
+        # the documented install pipes this script straight into python3, where
+        # there is no checkout to copy from.
+        raw_url = (
+            "https://forgejo.facemyer.net/facemyer/AffinityOnLinux/raw/branch/"
+            "feature/open-documents-from-file-manager/"
+            "AffinityHandler/affinity-on-linux.exe"
+        )
+
+        try:
+            # Same fast path as the icons: use the checkout when there is one, and
+            # download when this script was piped straight into python3, where
+            # __file__ does not exist.
+            local_exe = None
+            try:
+                candidate = (
+                    Path(__file__).resolve().parent.parent
+                    / "AffinityHandler"
+                    / "affinity-on-linux.exe"
+                )
+                if candidate.exists():
+                    local_exe = candidate
+            except NameError:
+                pass
+
+            if local_exe:
+                shutil.copy2(local_exe, dest)
+            else:
+                urllib.request.urlretrieve(raw_url, str(dest))
+
+            dest.chmod(0o755)
+            self.log("File-manager handler installed", "success")
+        except Exception as e:
+            self.log(
+                f"Could not install the file-manager handler: {e}. "
+                "Documents will not open from the file manager.",
+                "warning",
+            )
+
+    def register_document_types(self):
+        """Teach the desktop what .af/.afphoto/.afdesign/.afpub files are, and make
+        Affinity the default for them.
+
+        A MimeType= line in a .desktop file does nothing on its own: the file
+        manager first has to recognise the extension, which needs shared-mime-info
+        definitions, and the association is only picked up once the mime and
+        desktop databases have been rebuilt. KDE additionally caches this in
+        ksycoca, so without kbuildsycoca the old association keeps being used and
+        it looks like nothing changed."""
+        mime_names = [
+            "x-wine-extension-af.xml",
+            "x-wine-extension-afphoto.xml",
+            "x-wine-extension-afdesign.xml",
+            "x-wine-extension-afpub.xml",
+        ]
+        # POC SOURCE -- see install_file_manager_handler().
+        raw_base = (
+            "https://forgejo.facemyer.net/facemyer/AffinityOnLinux/raw/branch/"
+            "feature/open-documents-from-file-manager/mime/"
+        )
+
+        try:
+            mime_dir = Path.home() / ".local" / "share" / "mime" / "packages"
+            mime_dir.mkdir(parents=True, exist_ok=True)
+
+            # Same fast path as the icons: use the checkout when the installer was
+            # run from one, and fall back to downloading when it was piped
+            # straight into python3, where __file__ does not exist.
+            local_mime_dir = None
+            try:
+                candidate = Path(__file__).resolve().parent.parent / "mime"
+                if candidate.is_dir():
+                    local_mime_dir = candidate
+            except NameError:
+                pass
+
+            for name in mime_names:
+                dest = mime_dir / name
+                if local_mime_dir and (local_mime_dir / name).exists():
+                    shutil.copy2(local_mime_dir / name, dest)
+                else:
+                    urllib.request.urlretrieve(raw_base + name, str(dest))
+
+            subprocess.run(
+                ["update-mime-database", str(Path.home() / ".local" / "share" / "mime")],
+                check=False,
+                capture_output=True,
+            )
+            subprocess.run(
+                [
+                    "update-desktop-database",
+                    str(Path.home() / ".local" / "share" / "applications"),
+                ],
+                check=False,
+                capture_output=True,
+            )
+            for mime in (
+                "application/af",
+                "application/afphoto",
+                "application/afdesign",
+                "application/afpub",
+            ):
+                subprocess.run(
+                    ["xdg-mime", "default", "Affinity.desktop", mime],
+                    check=False,
+                    capture_output=True,
+                )
+            for cache in ("kbuildsycoca6", "kbuildsycoca5"):
+                if shutil.which(cache):
+                    subprocess.run([cache], check=False, capture_output=True)
+                    break
+
+            self.log("Affinity documents can now be opened from the file manager", "success")
+        except Exception as e:
+            self.log(f"Could not register Affinity document types: {e}", "warning")
 
     def _download_affinity_installer_thread(self, save_path_obj: Path):
         """Worker: Download Affinity installer and end operation."""
@@ -18451,7 +19053,18 @@ Would you like to continue with {distro_name} anyway?"""
             Path(self.directory) / "drive_c" / "Program Files" / "Affinity" / "Affinity"
         )
         hook_exe = install_dir / "AffinityHook.exe"
-        exe_name = "AffinityHook.exe" if (prefer_hook and hook_exe.exists()) else "Affinity.exe"
+        handler_exe = install_dir / "affinity-on-linux.exe"
+
+        # affinity-on-linux.exe wins over both when it is installed: it is what
+        # lets a document be opened from the file manager, and a cold start still
+        # goes through AffinityHook.exe, so preferring it here does not stop the
+        # plugin loader from loading. Without it, behaviour is unchanged.
+        if handler_exe.exists():
+            exe_name = "affinity-on-linux.exe"
+        elif prefer_hook and hook_exe.exists():
+            exe_name = "AffinityHook.exe"
+        else:
+            exe_name = "Affinity.exe"
         app_path_str = str(install_dir / exe_name).replace("\\", "/")
 
         wine_str = str(self.get_wine_path("wine"))
@@ -18469,6 +19082,10 @@ Would you like to continue with {distro_name} anyway?"""
             segments.append(dxvk_env)
         segments.append(wine_str)
         segments.append(f'"{app_path_str}"')
+        # %F, not %f: every selected document goes to one invocation rather than
+        # racing one process per file.
+        if exe_name == "affinity-on-linux.exe":
+            segments.append("%F")
 
         return "Exec=" + " ".join(segments), exe_name
 
