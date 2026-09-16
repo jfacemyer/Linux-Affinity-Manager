@@ -277,19 +277,60 @@ namespace AffinityOnLinux
             // Processes but no window and no thread count to vouch for them.
             // Either a start in progress -- the hook exists for ~30s before
             // Affinity.exe does, and missing it there is what cold starts a
-            // rival on a second double-click -- or husks from a close. Wait for
-            // the window that only a real start will produce.
+            // rival on a second double-click -- or husks from a close.
             if (!AnyAffinityProcess()) return false;
 
-            Log("processes present with no window; waiting to see whether one is starting");
+            // Age settles it without waiting. A start that has not produced a
+            // window yet is seconds old; a husk has been alive since Affinity
+            // was started, which is however long the session lasted. Waiting out
+            // the startup window instead is correct but costs 46 seconds on
+            // every close-then-click, which reads as nothing happening at all.
+            if (!AnyStartedRecently())
+            {
+                Log("processes are older than a startup and have no window; husks");
+                return false;
+            }
+
+            Log("recently started processes with no window; waiting to see whether one is starting");
             for (int i = 0; i < StallSeconds; i++)
             {
                 Thread.Sleep(1000);
                 if (FindAffinityWindow() != IntPtr.Zero) return true;
                 if (AnyLiveByThreads()) return true;
                 if (!AnyAffinityProcess()) return false;   // husks reaped themselves
+                if (!AnyStartedRecently())
+                {
+                    Log("no window within a startup; husks");
+                    return false;
+                }
             }
             Log("no window appeared; treating the remaining processes as husks");
+            return false;
+        }
+
+        // Long enough for a genuine start to have put a window up. The hook
+        // exists for about thirty seconds before Affinity.exe does, so this is
+        // measured from the oldest of them and kept generous -- being wrong the
+        // other way kills a live session.
+        private const int StartupGraceSeconds = 75;
+
+        private static bool AnyStartedRecently()
+        {
+            foreach (string name in new[] { "Affinity", "AffinityHook" })
+                foreach (Process p in SafeGetProcesses(name))
+                {
+                    try
+                    {
+                        if ((DateTime.Now - p.StartTime).TotalSeconds < StartupGraceSeconds)
+                            return true;
+                    }
+                    catch
+                    {
+                        // No start time: say it might be starting. An unopened
+                        // document beats killing something that is alive.
+                        return true;
+                    }
+                }
             return false;
         }
 
