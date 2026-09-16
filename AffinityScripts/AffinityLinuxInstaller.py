@@ -11185,29 +11185,46 @@ class AffinityInstallerGUI(QMainWindow):
         finally:
             self.end_operation()
 
-    def _reinstall_winmetadata_thread(self):
-        """Reinstall WinMetadata in background thread"""
-        # Kill Wine processes
+    def refresh_winmetadata(self, *, context="update"):
+        """Reinstall the WinRT metadata, by Wine version, without destroying
+        what is already there.
+
+        Two defects this replaces.
+
+        The update path used to do this unconditionally and always via
+        setup_winmetadata(), the per-namespace archive. That archive is right
+        only for Wine 9.14 and 10.10; on a Wine that resolves namespaces for
+        itself the per-namespace files SHADOW the combined Windows.winmd rather
+        than supplement it, so every update quietly undid the thing that lets a
+        document open from the file manager.
+
+        And it deleted first. A prefix that has been curated -- 85 files against
+        the 21 in the archive -- lost that curation to a routine update with no
+        way back. So the old directory is moved aside, never removed, and the
+        counts are reported: reinstalling should not silently take a prefix
+        backwards.
+        """
+        system32_dir = Path(self.directory) / "drive_c" / "windows" / "system32"
+        winmetadata_dir = system32_dir / "WinMetadata"
+
         self.log("Stopping Wine processes...", "info")
         self.run_command(["wineserver", "-k"], check=False)
         time.sleep(2)
 
-        system32_dir = Path(self.directory) / "drive_c" / "windows" / "system32"
-        winmetadata_dir = system32_dir / "WinMetadata"
-
-        # Remove existing WinMetadata folder
+        before = len(list(winmetadata_dir.glob("*.winmd"))) if winmetadata_dir.exists() else 0
+        kept_at = None
         if winmetadata_dir.exists():
-            self.log("Removing existing WinMetadata folder...", "info")
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            kept_at = system32_dir / f"WinMetadata.replaced-{stamp}"
             try:
-                shutil.rmtree(winmetadata_dir)
-                self.log("Old WinMetadata folder removed", "success")
+                winmetadata_dir.rename(kept_at)
+                self.log(f"Existing WinMetadata ({before} files) kept at {kept_at.name}", "info")
             except Exception as e:
-                self.log(f"Warning: Could not fully remove old folder: {e}", "warning")
+                self.log(f"Warning: could not move the old folder aside: {e}", "warning")
+                kept_at = None
 
-        # Ensure system32 directory exists
         system32_dir.mkdir(parents=True, exist_ok=True)
 
-        # Reinstall WinMetadata by downloading and extracting (only for Wine < 11.12)
         wine_version = self.get_current_wine_version()
         if wine_version in ["9.14", "10.10"]:
             self.log("Installing fresh WinMetadata...", "info")
@@ -11215,19 +11232,31 @@ class AffinityInstallerGUI(QMainWindow):
         elif self.wine_resolves_winrt_namespaces():
             self.log("Installing fresh Windows.winmd...", "info")
             self.install_combined_winmetadata()
-
-            # Set up wintypes.dll override
             self.log("Setting up wintypes.dll override...", "info")
             self.setup_wintypes_dll_override()
-
-            # Copy wintypes.dll for all installed Affinity apps (v2 and v3)
             self.log("Copying wintypes.dll for installed Affinity apps...", "info")
             self.copy_wintypes_dll_for_all_apps()
+            # Last, and only here: the per-namespace files must go after
+            # anything that can run a wineboot, because wine.inf puts them back.
+            self.clear_shadowing_winmds(quiet=True)
         else:
             self.log(
-                "Skipping WinMetadata and wintypes.dll setup for Wine 11.12+ (not needed)",
+                "Skipping WinMetadata and wintypes.dll setup for this Wine (not needed)",
                 "info",
             )
+
+        after = len(list(winmetadata_dir.glob("*.winmd"))) if winmetadata_dir.exists() else 0
+        if kept_at and after < before:
+            self.log(
+                f"Note: this prefix had {before} metadata files and now has {after}. "
+                f"The previous set is at {kept_at}; restore it if a document stops "
+                f"opening from the file manager.",
+                "warning",
+            )
+
+    def _reinstall_winmetadata_thread(self):
+        """Reinstall WinMetadata in background thread"""
+        self.refresh_winmetadata(context="reinstall")
 
         self.log("\n✓ WinMetadata reinstallation completed!", "success")
 
@@ -14713,28 +14742,7 @@ Would you like to continue with {distro_name} anyway?"""
                 "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             )
 
-            # Kill Wine processes before removing WinMetadata
-            self.log("Stopping Wine processes...", "info")
-            self.run_command(["wineserver", "-k"], check=False)
-            time.sleep(2)
-
-            system32_dir = Path(self.directory) / "drive_c" / "windows" / "system32"
-            winmetadata_dir = system32_dir / "WinMetadata"
-
-            # Remove existing WinMetadata folder
-            if winmetadata_dir.exists():
-                self.log("Removing existing WinMetadata folder...", "info")
-                try:
-                    shutil.rmtree(winmetadata_dir)
-                    self.log("Old WinMetadata folder removed", "success")
-                except Exception as e:
-                    self.log(
-                        f"Warning: Could not fully remove old folder: {e}", "warning"
-                    )
-
-            # Reinstall WinMetadata by downloading and extracting
-            self.log("Installing fresh WinMetadata...", "info")
-            self.setup_winmetadata()
+            self.refresh_winmetadata(context="update")
 
             # For Affinity v3 (Unified), reinstall settings files
             if display_name and (
