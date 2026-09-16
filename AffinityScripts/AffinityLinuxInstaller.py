@@ -536,6 +536,27 @@ class AffinityInstallerGUI(QMainWindow):
         QTimer.singleShot(500, self._check_and_update_dxvk_vkd3d)
         QTimer.singleShot(700, self.show_donation_dialog)
 
+    def system_wine_matches_prefix(self):
+        """Can the Wine on PATH drive this prefix?
+
+        A prefix records the wineserver protocol of the Wine that created it.
+        A different Wine is refused with "version mismatch <client>/<server>",
+        and the failure is instant and silent enough to be mistaken for the
+        installer having started. Ask before launching rather than reading the
+        wreckage afterwards."""
+        try:
+            env = os.environ.copy()
+            env["WINEPREFIX"] = self.directory
+            result = subprocess.run(
+                ["wine", "--version"],
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+            blob = (result.stdout or "") + (result.stderr or "")
+            return "version mismatch" not in blob.lower()
+        except Exception:
+            # Cannot tell: prefer the prefix's own Wine, which is always right.
+            return False
+
     def announce_target(self):
         """Put the prefix this window operates on in the title and the log."""
         target = Path(self.directory)
@@ -5953,10 +5974,28 @@ class AffinityInstallerGUI(QMainWindow):
             self.run_command(["winecfg", "-v", "win11"], check=False, env=env)
             self.log("✓ Windows version set to 11", "success")
 
-        # Use system Wine for Affinity installations (custom Wine doesn't work for installation)
+        # Use system Wine for Affinity installations (custom Wine doesn't work
+        # for installation) -- but ONLY when system Wine can actually talk to
+        # this prefix.
+        #
+        # A prefix belongs to the Wine that made it. Point a different Wine at
+        # it and wineserver refuses with "version mismatch 961/931", the
+        # installer exits in under two seconds, and the heuristics below then
+        # decided it was "running despite error" and carried on: every
+        # post-install step ran, the update reported success, and the
+        # application was never replaced. Observed on a prefix built by
+        # ElementalWarrior 11.16 with wine 11.1 on PATH.
         if is_affinity_v3 or is_affinity_v2:
-            wine = "wine"  # Use system Wine for installation
-            self.log("Using system Wine for Affinity installation", "info")
+            wine = "wine"
+            if not self.system_wine_matches_prefix():
+                wine = str(self.get_wine_path("wine"))
+                self.log(
+                    "System Wine does not match this prefix -- using the "
+                    f"prefix's own Wine for installation: {wine}",
+                    "warning",
+                )
+            else:
+                self.log("Using system Wine for Affinity installation", "info")
         elif is_webview2:
             # Use system wine for WebView2
             wine = "wine"
@@ -6029,6 +6068,14 @@ class AffinityInstallerGUI(QMainWindow):
                         "no such file",
                         "unable to load",
                     ]
+                    # Not a marker to weigh up: the installer never ran at all.
+                    if "version mismatch" in txt:
+                        self.log(
+                            "Wine client/server version mismatch -- the installer "
+                            "could not attach to this prefix and did not run.",
+                            "error",
+                        )
+                        return False
                     # For Affinity installers, ignore debugger messages if installer is running
                     if is_affinity_v3 or is_affinity_v2:
                         # Double-check if installer is actually running
@@ -6043,6 +6090,14 @@ class AffinityInstallerGUI(QMainWindow):
                         ok = False
                 # For Affinity installers, even if ok is False, check if installer is actually running
                 if (is_affinity_v3 or is_affinity_v2) and not ok:
+                    if "version mismatch" in (self._last_stream_output_text or "").lower():
+                        self.log(
+                            "Wine client/server version mismatch -- not continuing; "
+                            "the application would be left unchanged while the "
+                            "update reported success.",
+                            "error",
+                        )
+                        return False
                     # Check one more time if installer is running
                     time.sleep(2)
                     if self._has_installer_activity(installer_file):
