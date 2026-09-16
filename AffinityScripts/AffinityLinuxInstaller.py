@@ -18816,7 +18816,11 @@ Would you like to continue with {distro_name} anyway?"""
                 name = asset.get("name", "")
                 if name.startswith("affinitypluginloader-") and name.endswith(".zip"):
                     apl_asset = asset
-                elif name.startswith("apl-winefix-") and name.endswith(".zip"):
+                elif (
+                    name.startswith("winefix-") or name.startswith("apl-winefix-")
+                ) and name.endswith(".zip"):
+                    # Released as apl-winefix-*.zip up to v0.2.x and winefix-*.zip
+                    # since; accept either so older releases still install.
                     winefix_asset = asset
 
             if not apl_asset:
@@ -18831,7 +18835,7 @@ Would you like to continue with {distro_name} anyway?"""
                 return
             if not winefix_asset:
                 self.log(
-                    "✗ Could not find apl-winefix-*.zip in release assets", "error"
+                    "✗ Could not find winefix-*.zip in release assets", "error"
                 )
                 self.log("Available assets:", "info")
                 for asset in assets:
@@ -18901,13 +18905,15 @@ Would you like to continue with {distro_name} anyway?"""
                     self.finish_operation(False)
                     return
 
-                # Verify d2d1.dll landed in the apl/ subfolder
-                d2d1_path = install_dir / "apl" / "d2d1.dll"
+                # Verify d2d1.dll landed beside Affinity.exe. It has to be there
+                # rather than under apl/: Wine finds it through the executable's
+                # own directory, which is also why it shadows Wine's own d2d1.
+                d2d1_path = install_dir / "d2d1.dll"
                 if d2d1_path.exists():
-                    self.log(f"  ✓ apl/d2d1.dll verified", "success")
+                    self.log("  ✓ d2d1.dll verified", "success")
                 else:
                     self.log(
-                        "  ⚠ apl/d2d1.dll not found after extraction — check zip layout",
+                        "  ⚠ d2d1.dll not found after extraction — check zip layout",
                         "warning",
                     )
 
