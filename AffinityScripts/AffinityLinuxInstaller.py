@@ -220,6 +220,44 @@ if not PYQT6_AVAILABLE:
     sys.exit(1)
 
 
+# Overrides that let something else drive this installer.
+#
+# The installer is otherwise a single-prefix tool: it installs into
+# ~/.AffinityLinux, or into the one path remembered in
+# ~/.config/AffinityOnLinux/install_location, chosen through a dialog. Anything
+# wanting a second prefix -- a manager handling several, a test run that must
+# not touch the working install -- has no way to say so.
+#
+# Environment rather than only argv, because the caller is usually a subprocess
+# launcher and because it then survives however the script is invoked (piped
+# into python3, run from a checkout, re-execed).
+ENV_INSTALL_DIR = "AFFINITY_INSTALL_DIR"
+ENV_INSTALLER_FILE = "AFFINITY_INSTALLER_FILE"
+
+
+def override_install_dir():
+    """Prefix directory to install into, or None.
+
+    Used verbatim -- no .AffinityLinux suffix is appended, unlike the custom
+    location dialog. The caller names the directory; that is the point."""
+    value = os.environ.get(ENV_INSTALL_DIR, "").strip()
+    return str(Path(value).expanduser()) if value else None
+
+
+def override_installer_file():
+    """An Affinity installer .exe to install from instead of downloading, or None.
+
+    downloads.affinity.studio serves whatever the current release is, with no
+    versioned URL, so pinning a version means keeping its installer and pointing
+    at it. Returns None if the path does not exist, so a stale value degrades
+    into the normal download rather than failing the install."""
+    value = os.environ.get(ENV_INSTALLER_FILE, "").strip()
+    if not value:
+        return None
+    path = Path(value).expanduser()
+    return str(path) if path.is_file() else None
+
+
 class ZoomableTextEdit(QTextEdit):
     """QTextEdit with Ctrl+Wheel zoom support"""
 
@@ -343,8 +381,13 @@ class AffinityInstallerGUI(QMainWindow):
         self.distro_version = None
         self.directory = str(Path.home() / ".AffinityLinux")
         self._load_persisted_install_location()
+        # An explicit target wins over the remembered one: the caller asked for
+        # this prefix, and must not be redirected to whatever was used last.
+        self._forced_directory = override_install_dir()
+        if self._forced_directory:
+            self.directory = self._forced_directory
         self.setup_complete = False
-        self.installer_file = None
+        self.installer_file = override_installer_file()
         self.update_buttons = {}
         self.switch_backend_button = None
         self.log_font_size = 11
@@ -7997,16 +8040,21 @@ class AffinityInstallerGUI(QMainWindow):
 
     def one_click_setup(self):
         """One-click full setup: detects distro, installs deps, sets up Wine, installs Winetricks deps"""
-        # Ask up front whether the user wants to install somewhere other than
-        # the default location, before anything else happens.
-        location_reply = QMessageBox.question(
-            self,
-            "Custom Install Location",
-            "Do you want to choose a custom install location?\n\n"
-            f"Default location:\n{self.directory}",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
+        # Nothing to ask when the caller named the directory.
+        if self._forced_directory:
+            self.log(f"Installing into {self.directory} (set by the caller)", "info")
+            location_reply = None
+        else:
+            # Ask up front whether the user wants to install somewhere other than
+            # the default location, before anything else happens.
+            location_reply = QMessageBox.question(
+                self,
+                "Custom Install Location",
+                "Do you want to choose a custom install location?\n\n"
+                f"Default location:\n{self.directory}",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
 
         if location_reply == QMessageBox.StandardButton.Yes:
             chosen_dir = QFileDialog.getExistingDirectory(
@@ -8530,6 +8578,11 @@ class AffinityInstallerGUI(QMainWindow):
         }
         display_name = app_names.get(app_code, "Affinity")
 
+        # A pinned installer answers the download-or-provide question before it
+        # is asked. Checked before Wine so the message order matches the normal
+        # path; the Wine check below still gates the install itself.
+        pinned = override_installer_file()
+
         # Check if Wine is set up
         wine = self.get_wine_path("wine")
         if not wine.exists():
@@ -8542,6 +8595,21 @@ class AffinityInstallerGUI(QMainWindow):
                 "Wine is not set up yet. Please run 'Setup Wine Environment' first.",
                 "error",
             )
+            return
+
+        # A pinned installer skips the dialog: the caller has already decided
+        # which build to install, and asking would let a click undo the pin.
+        if pinned:
+            self.log(
+                f"\nInstalling {display_name} from a pinned installer: {pinned}",
+                "info",
+            )
+            self.start_operation(f"Install {display_name}")
+            threading.Thread(
+                target=self._run_installation_entry,
+                args=(app_code, pinned),
+                daemon=True,
+            ).start()
             return
 
         # Ask user if they want to download or provide their own exe (without parent to avoid threading issues)
@@ -18823,9 +18891,46 @@ def kill_stalled_wine_processes():
         print("[Cleanup] No stale Wine processes found - starting clean")
 
 
+def parse_overrides(argv):
+    """Turn --install-dir / --installer-file into the environment the overrides
+    read, so argv and environment cannot disagree and only one path needs
+    testing. Unknown arguments are left alone: this script is also piped
+    straight into python3, where argv belongs to whatever invoked it."""
+    args = list(argv[1:])
+    flags = {"--install-dir": ENV_INSTALL_DIR, "--installer-file": ENV_INSTALLER_FILE}
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        name, _, inline = arg.partition("=")
+        if name in flags:
+            if inline:
+                os.environ[flags[name]] = inline
+                i += 1
+            elif i + 1 < len(args):
+                os.environ[flags[name]] = args[i + 1]
+                i += 2
+            else:
+                print(f"{name} needs a value", file=sys.stderr)
+                sys.exit(2)
+            continue
+        if arg in ("-h", "--help"):
+            print(
+                "AffinityLinuxInstaller.py [--install-dir DIR] [--installer-file EXE]\n"
+                "\n"
+                f"  --install-dir DIR      install into DIR instead of ~/.AffinityLinux\n"
+                f"                         (or ${ENV_INSTALL_DIR})\n"
+                f"  --installer-file EXE   install from EXE instead of downloading the\n"
+                f"                         current release (or ${ENV_INSTALLER_FILE})\n"
+            )
+            sys.exit(0)
+        i += 1
+
+
 def main():
     """Main entry point"""
     import time as time_module
+
+    parse_overrides(sys.argv)
 
     total_start_time = time_module.time()
 
