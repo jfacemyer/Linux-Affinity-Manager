@@ -122,11 +122,7 @@ namespace AffinityOnLinux
                     foreach (string d in docs)
                     {
                         Log("warm handoff: " + d);
-                        if (StartAndWait(affinity, Quote(d), 30) != 0)
-                        {
-                            Note("Affinity refused " + Path.GetFileName(d));
-                            failed = 1;
-                        }
+                        if (!HandOff(affinity, d, 2)) failed = 1;
                     }
                 }
                 return failed;
@@ -188,7 +184,7 @@ namespace AffinityOnLinux
                         foreach (string d in docs)
                         {
                             Log("cold two-stage handoff: " + d);
-                            StartAndWait(affinity, Quote(d), 30);
+                            HandOff(affinity, d, 3);
                         }
                     return true;
                 }
@@ -202,6 +198,46 @@ namespace AffinityOnLinux
             Note("failed to start after " + MaxTries + " attempts; launching without the watchdog");
             Start(launcher, arguments);
             return true;
+        }
+
+        // Hand a document over and confirm it arrived.
+        //
+        // The handoff is a race against Affinity finishing its startup. The
+        // forwarding process exits 0 either way -- it has done its job once the
+        // command line is delivered -- so its exit code says nothing about
+        // whether the document opened. Watched failing: the instance was 17
+        // seconds old and 24 threads into a startup that ends near 150, the
+        // forward was accepted, and the document was dropped.
+        //
+        // Affinity writes "<document>~lock~" beside a document it has open, so
+        // that file is the answer. Where one already exists -- a crash leaves
+        // them behind -- there is nothing to watch for, and the handoff is made
+        // once without confirmation rather than guessing.
+        private static bool HandOff(string affinity, string doc, int tries)
+        {
+            string lockFile = doc + "~lock~";
+            bool preexisting = File.Exists(lockFile);
+
+            for (int attempt = 1; attempt <= tries; attempt++)
+            {
+                StartAndWait(affinity, Quote(doc), 30);
+                if (preexisting) return true;         // cannot tell; do not retry
+
+                for (int i = 0; i < 20; i++)
+                {
+                    Thread.Sleep(1000);
+                    if (File.Exists(lockFile))
+                    {
+                        if (attempt > 1) Log("opened on attempt " + attempt);
+                        return true;
+                    }
+                }
+                if (attempt < tries)
+                    Log("no lock file after the handoff; Affinity was probably still "
+                        + "starting -- retrying (" + (attempt + 1) + "/" + tries + ")");
+            }
+            Note("Affinity did not open " + Path.GetFileName(doc));
+            return false;
         }
 
         // 1 = a window came up, 2 = the child exited first, 0 = stalled.
