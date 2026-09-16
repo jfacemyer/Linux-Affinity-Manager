@@ -364,6 +364,7 @@ class AffinityInstallerGUI(QMainWindow):
         super().__init__()
         step_start = log_timing("QMainWindow.__init__", step_start)
 
+        # Title set again at the end of __init__, once self.directory is known.
         self.setWindowTitle("Affinity Linux Installer")
         screen = self.screen().availableGeometry()
         screen_width = screen.width()
@@ -469,6 +470,16 @@ class AffinityInstallerGUI(QMainWindow):
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         )
 
+        # Which prefix this window drives, in the title bar and in the log.
+        #
+        # Two installer windows can be open at once -- one on the working prefix
+        # and one on a copy -- and they share this log file. With a fixed title
+        # and unmarked log lines there was no way to tell them apart, on screen
+        # or afterwards: an interleaved log reads as one process doing
+        # contradictory things to two directories. The pid is here so a log can
+        # be untangled after the fact.
+        self.announce_target()
+
         step_start = log_timing("Defer slow operations", step_start)
 
         total_time = time.time() - startup_start
@@ -524,6 +535,14 @@ class AffinityInstallerGUI(QMainWindow):
         QTimer.singleShot(50, self._deferred_startup_tasks)
         QTimer.singleShot(500, self._check_and_update_dxvk_vkd3d)
         QTimer.singleShot(700, self.show_donation_dialog)
+
+    def announce_target(self):
+        """Put the prefix this window operates on in the title and the log."""
+        target = Path(self.directory)
+        forced = " (given by the caller)" if getattr(self, "_forced_directory", None) else ""
+        self.setWindowTitle(f"Affinity Linux Installer - {target.name}")
+        self.setToolTip(str(target))
+        self.log(f"Install directory: {target}{forced}   [pid {os.getpid()}]", "info")
 
     def _deferred_startup_tasks(self):
         """Run slow startup tasks in background after window is shown"""
