@@ -537,25 +537,39 @@ class AffinityInstallerGUI(QMainWindow):
         QTimer.singleShot(700, self.show_donation_dialog)
 
     def system_wine_matches_prefix(self):
-        """Can the Wine on PATH drive this prefix?
+        """Is the Wine on PATH the same build as the prefix's own Wine?
 
-        A prefix records the wineserver protocol of the Wine that created it.
-        A different Wine is refused with "version mismatch <client>/<server>",
-        and the failure is instant and silent enough to be mistaken for the
-        installer having started. Ask before launching rather than reading the
-        wreckage afterwards."""
-        try:
-            env = os.environ.copy()
-            env["WINEPREFIX"] = self.directory
-            result = subprocess.run(
-                ["wine", "--version"],
-                env=env, capture_output=True, text=True, timeout=30,
-            )
-            blob = (result.stdout or "") + (result.stderr or "")
-            return "version mismatch" not in blob.lower()
-        except Exception:
-            # Cannot tell: prefer the prefix's own Wine, which is always right.
-            return False
+        A prefix belongs to the Wine that created it. Driving it with a
+        different build risks a wineserver protocol refusal -- "version mismatch
+        961/931", instant and quiet enough to be mistaken for the installer
+        having started -- and, when no server happens to be running, something
+        worse: a wineboot from an older Wine writing over a prefix built by a
+        newer one.
+
+        Compare the versions rather than probing. An earlier version of this
+        asked `wine --version` under the prefix and looked for the mismatch
+        text, which never appears: --version prints and exits without ever
+        contacting wineserver, so the check passed in exactly the case it was
+        written to catch.
+        """
+        def version_of(binary):
+            try:
+                result = subprocess.run(
+                    [str(binary), "--version"],
+                    capture_output=True, text=True, timeout=30,
+                )
+                return (result.stdout or result.stderr or "").strip().splitlines()[0].strip()
+            except Exception:
+                return None
+
+        own = self.get_wine_path("wine")
+        if not own or not Path(str(own)).exists():
+            return True                      # no Wine in the prefix; system is all there is
+
+        system_version, own_version = version_of("wine"), version_of(own)
+        if not system_version or not own_version:
+            return False                     # cannot tell: the prefix's own Wine is always right
+        return system_version == own_version
 
     def announce_target(self):
         """Put the prefix this window operates on in the title and the log."""
