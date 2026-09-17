@@ -13217,311 +13217,6 @@ Would you like to continue with {distro_name} anyway?"""
             target=self._install_affinity_settings_entry, daemon=True
         ).start()
 
-    def _install_affinity_settings_thread(self):
-        """Install Affinity v3 (Unified) settings in background thread - downloads repo and copies Settings"""
-        # Determine Windows username
-        # Wine typically uses "Public" as the default username, but check for existing users
-        users_dir = Path(self.directory) / "drive_c" / "users"
-        username = "Public"  # Default Wine username
-
-        # Check if users directory exists and has other users
-        if users_dir.exists():
-            # Look for existing user directories (excluding Public, Default, etc.)
-            existing_users = [
-                d.name
-                for d in users_dir.iterdir()
-                if d.is_dir()
-                and d.name not in ["Public", "Default", "All Users", "Default User"]
-            ]
-            if existing_users:
-                # Use the first existing user, or fall back to Public
-                username = existing_users[0]
-                self.log(f"Using existing Windows user: {username}", "info")
-            else:
-                self.log(f"Using default Windows user: {username}", "info")
-        else:
-            self.log(f"Creating users directory structure for: {username}", "info")
-            users_dir.mkdir(parents=True, exist_ok=True)
-
-        # Create temp directory for cloning/downloading
-        temp_dir = Path(self.directory) / ".temp_settings"
-        if temp_dir.exists():
-            self.log("Cleaning up existing temp directory...", "info")
-            try:
-                shutil.rmtree(temp_dir)
-            except Exception as e:
-                self.log(f"Warning: Could not remove existing temp dir: {e}", "warning")
-        temp_dir.mkdir(exist_ok=True)
-
-        # Download the repository as a zip file
-        self.update_progress_text("Downloading Settings from repository...")
-        self.update_progress(0.1)
-        self.log("Downloading Settings from GitHub repository...", "info")
-        repo_zip = temp_dir / "AffinityOnLinux.zip"
-        repo_url = (
-            "https://github.com/seapear/AffinityOnLinux/archive/refs/heads/main.zip"
-        )
-
-        if not self.download_file(repo_url, str(repo_zip), "Settings repository"):
-            self.log("Failed to download Settings repository", "error")
-            self.log(f"  URL: {repo_url}", "error")
-            try:
-                shutil.rmtree(temp_dir)
-            except Exception:
-                pass
-            return
-
-        # Verify the zip file was downloaded
-        if not repo_zip.exists() or repo_zip.stat().st_size == 0:
-            self.log("Downloaded zip file is missing or empty", "error")
-            try:
-                shutil.rmtree(temp_dir)
-            except Exception:
-                pass
-            return
-
-        self.log(
-            f"Downloaded zip file size: {repo_zip.stat().st_size / 1024 / 1024:.2f} MB",
-            "info",
-        )
-
-        # Extract the zip file
-        self.update_progress_text("Extracting Settings repository...")
-        self.update_progress(0.3)
-        self.log("Extracting Settings repository...", "info")
-        try:
-            if self.check_command("7z"):
-                success, stdout, stderr = self.run_command(
-                    ["7z", "x", str(repo_zip), f"-o{temp_dir}", "-y"]
-                )
-                if not success:
-                    self.log(f"7z extraction failed: {stderr}", "error")
-                    raise Exception("7z extraction failed")
-                self.log("Extraction completed with 7z", "success")
-            elif self.check_command("unzip"):
-                with zipfile.ZipFile(repo_zip, "r") as zip_ref:
-                    zip_ref.extractall(temp_dir)
-                self.log("Extraction completed with unzip", "success")
-            else:
-                self.log("Neither 7z nor unzip available for extraction", "error")
-                self.log(
-                    "Please install 7z or unzip to extract the repository", "error"
-                )
-                try:
-                    shutil.rmtree(temp_dir)
-                except Exception:
-                    pass
-                return
-
-            # Find the extracted directory (usually AffinityOnLinux-main)
-            extracted_dirs = list(temp_dir.glob("AffinityOnLinux-*"))
-            self.log(
-                f"Found {len(extracted_dirs)} extracted director{'y' if len(extracted_dirs) == 1 else 'ies'}",
-                "info",
-            )
-
-            extracted_dir = extracted_dirs[0] if extracted_dirs else None
-            if not extracted_dir:
-                self.log("Could not find extracted repository directory", "error")
-                self.log(
-                    f"Contents of temp_dir: {[d.name for d in temp_dir.iterdir()]}",
-                    "error",
-                )
-                try:
-                    shutil.rmtree(temp_dir)
-                except Exception:
-                    pass
-                return
-
-            self.log(f"Using extracted directory: {extracted_dir.name}", "info")
-
-            # Check if Auxiliary directory exists
-            auxiliary_dir = extracted_dir / "Auxiliary"
-            if not auxiliary_dir.exists():
-                self.log("Auxiliary directory not found in repository", "error")
-                self.log(
-                    f"Contents of extracted directory: {[d.name for d in extracted_dir.iterdir()]}",
-                    "error",
-                )
-                try:
-                    shutil.rmtree(temp_dir)
-                except Exception:
-                    pass
-                return
-
-            settings_dir = auxiliary_dir / "Settings"
-            if not settings_dir.exists():
-                self.log("Settings directory not found in Auxiliary", "error")
-                self.log(
-                    f"Contents of Auxiliary: {[d.name for d in auxiliary_dir.iterdir()]}",
-                    "error",
-                )
-                try:
-                    shutil.rmtree(temp_dir)
-                except Exception:
-                    pass
-                return
-
-            # List what's in the Settings directory
-            settings_contents = [d.name for d in settings_dir.iterdir() if d.is_dir()]
-            self.log(f"Found Settings folders: {settings_contents}", "info")
-
-            # Source Settings directory path - For Affinity v3 (Unified), use 3.0
-            # $APP would be "Affinity" and version is 3.0
-            # So the source should be: Auxiliary/Settings/Affinity/3.0/Settings
-            self.update_progress_text("Locating Settings files...")
-            self.update_progress(0.5)
-            settings_source_dirs = [
-                settings_dir / "Affinity" / "3.0" / "Settings",  # Affinity v3 uses 3.0
-                settings_dir / "Affinity" / "Settings",
-                settings_dir / "Unified" / "3.0" / "Settings",
-                settings_dir / "Unified" / "Settings",
-            ]
-
-            settings_source = None
-            for source_dir in settings_source_dirs:
-                if source_dir.exists():
-                    files = list(source_dir.iterdir())
-                    if files:
-                        settings_source = source_dir
-                        self.log(
-                            f"Found settings at: {source_dir.relative_to(extracted_dir)}",
-                            "success",
-                        )
-                        self.log(f"  Contains {len(files)} file(s)/folder(s)", "info")
-                        break
-
-            if not settings_source:
-                self.log("Settings directory not found in repository", "error")
-                self.log("Tried paths:", "error")
-                for path in settings_source_dirs:
-                    self.log(
-                        f"  - {path.relative_to(extracted_dir)}: {'exists' if path.exists() else 'not found'}",
-                        "error",
-                    )
-
-                # List what's actually in Settings/Affinity if it exists
-                affinity_settings = settings_dir / "Affinity"
-                if affinity_settings.exists():
-                    self.log(
-                        f"Contents of Settings/Affinity: {[d.name for d in affinity_settings.iterdir()]}",
-                        "info",
-                    )
-
-                try:
-                    shutil.rmtree(temp_dir)
-                except Exception:
-                    pass
-                return
-
-            # Target directory in Wine prefix
-            # Based on Settings.md: mv $APP/3.0/Settings drive_c/users/$USERNAME/AppData/Roaming/Affinity/
-            # For Affinity v3, this means: Affinity/3.0/Settings -> AppData/Roaming/Affinity/Affinity/3.0/Settings
-            affinity_appdata = users_dir / username / "AppData" / "Roaming" / "Affinity"
-
-            # Check what version folder Affinity v3 actually uses by looking at existing structure
-            affinity_dir = affinity_appdata / "Affinity"
-            version_folder = None
-            if affinity_dir.exists():
-                existing_versions = [
-                    d.name for d in affinity_dir.iterdir() if d.is_dir()
-                ]
-                if existing_versions:
-                    # Prefer 3.0 for Affinity v3
-                    if "3.0" in existing_versions:
-                        version_folder = "3.0"
-                    elif "2.0" in existing_versions:
-                        version_folder = "2.0"
-                    else:
-                        # Use the first one found (sorted)
-                        version_folder = sorted(existing_versions)[0]
-                    self.log(
-                        f"Found existing Affinity version folder: {version_folder}",
-                        "info",
-                    )
-
-            # If no existing version folder, use 3.0 for Affinity v3
-            if not version_folder:
-                # Try to detect from source path
-                source_parts = settings_source.parts
-                if "3.0" in source_parts:
-                    version_folder = "3.0"
-                elif "2.0" in source_parts:
-                    version_folder = "2.0"
-                else:
-                    version_folder = "3.0"  # Default to 3.0 for Affinity v3
-                self.log(
-                    f"Using version folder: {version_folder} (Affinity v3 uses 3.0)",
-                    "info",
-                )
-
-            # Target path: AppData/Roaming/Affinity/Affinity/3.0/Settings (for v3)
-            target_dir = affinity_appdata / "Affinity" / version_folder / "Settings"
-
-            # Fill in only the settings files that are missing.
-            #
-            # The stock set is a seed for a fresh prefix. On a prefix that has
-            # been used this directory holds the user's own preferences and
-            # RecentFiles.xml, and replacing it wipes both. See _seed_settings.
-            self.update_progress_text("Installing Settings files...")
-            self.update_progress(0.7)
-            target_dir.mkdir(parents=True, exist_ok=True)
-            self.log("Installing stock settings, keeping any you already have...", "info")
-            self.log(f"  From: {settings_source}", "info")
-            self.log(f"  To: {target_dir}", "info")
-
-            added, kept = self._seed_settings(settings_source, target_dir)
-            self.update_progress(0.9)
-
-            if kept:
-                self.log(
-                    f"Kept {len(kept)} existing settings file(s) untouched "
-                    f"(your preferences and RecentFiles.xml are among them)",
-                    "success",
-                )
-            self.log(
-                f"Added {len(added)} missing settings file(s) to: {target_dir}",
-                "success",
-            )
-            for rel in added[:5]:
-                self.log(f"  + {rel}", "info")
-
-            # Set permissions (make sure files are readable)
-            try:
-                for root, dirs, files in os.walk(target_dir):
-                    for d in dirs:
-                        os.chmod(os.path.join(root, d), 0o755)
-                    for f in files:
-                        os.chmod(os.path.join(root, f), 0o644)
-                self.log("File permissions set correctly", "success")
-            except Exception as e:
-                self.log(f"Note: Could not set permissions: {e}", "warning")
-
-            # Clean up temp files
-            try:
-                shutil.rmtree(temp_dir)
-                self.log("Temp files cleaned up", "info")
-            except Exception as e:
-                self.log(f"Note: Could not clean up temp files: {e}", "warning")
-
-            self.update_progress(1.0)
-            self.update_progress_text("Settings installation complete!")
-            self.log("\n✓ Affinity v3 settings installation completed!", "success")
-            self.log(
-                "Settings files have been installed for Affinity v3 (Unified).", "info"
-            )
-
-        except Exception as e:
-            import traceback
-
-            self.log(f"Error installing settings: {e}", "error")
-            self.log(f"Traceback: {traceback.format_exc()}", "error")
-            # Clean up on error
-            try:
-                shutil.rmtree(temp_dir)
-                repo_zip.unlink(missing_ok=True)
-            except:
-                pass
 
     def _wine_reg_key_exists(self, hive, key_path):
         """Check if a registry key exists by parsing the prefix's reg files (fast)."""
@@ -18991,198 +18686,7 @@ Would you like to continue with {distro_name} anyway?"""
         # This is just a placeholder to fix the syntax error
         pass
 
-    def install_affinity_plugin_loader(self):
-        """Download and install the latest AffinityPluginLoader + WineFix into the Affinity install dir,
-        then update Affinity.desktop to launch via AffinityHook.exe."""
-        self.log(
-            "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        )
-        self.log("Install AffinityPluginLoader + WineFix", "info")
-        self.log(
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        )
 
-        install_dir = (
-            Path(self.directory) / "drive_c" / "Program Files" / "Affinity" / "Affinity"
-        )
-        if not install_dir.exists():
-            self.log("✗ Affinity install directory not found:", "error")
-            self.log(f"  {install_dir}", "error")
-            self.log("Please install Affinity first.", "info")
-            self.show_message(
-                "Affinity Not Found",
-                f"Affinity install directory not found:\n{install_dir}\n\nPlease install Affinity first.",
-                QMessageBox.Icon.Warning,
-            )
-            return
-
-        self.start_operation("Install AffinityPluginLoader")
-        threading.Thread(
-            target=self._install_affinity_plugin_loader_thread,
-            args=(install_dir,),
-            daemon=True,
-        ).start()
-
-    def _install_affinity_plugin_loader_thread(self, install_dir):
-        """Worker thread: fetch latest release assets, download both zips, extract, patch desktop."""
-        try:
-            # ── 1. Query GitHub API for latest release ──────────────────────────────
-            self.log("Fetching latest release info from GitHub...", "info")
-            api_url = "https://api.github.com/repos/noahc3/AffinityPluginLoader/releases/latest"
-            request = urllib.request.Request(api_url)
-            request.add_header("User-Agent", "AffinityLinuxInstaller")
-            try:
-                with urllib.request.urlopen(request, timeout=15) as resp:
-                    release_data = json.loads(resp.read().decode())
-            except Exception as e:
-                self.log(f"✗ Failed to fetch release info: {e}", "error")
-                self.finish_operation(False)
-                return
-
-            tag = release_data.get("tag_name", "unknown")
-            assets = release_data.get("assets", [])
-            self.log(f"Latest release: {tag}", "info")
-            self.log(f"Found {len(assets)} asset(s) in release", "info")
-
-            # ── 2. Locate the two zip assets by prefix ──────────────────────────────
-            apl_asset = None
-            winefix_asset = None
-            for asset in assets:
-                name = asset.get("name", "")
-                if name.startswith("affinitypluginloader-") and name.endswith(".zip"):
-                    apl_asset = asset
-                elif (
-                    name.startswith("winefix-") or name.startswith("apl-winefix-")
-                ) and name.endswith(".zip"):
-                    # Released as apl-winefix-*.zip up to v0.2.x and winefix-*.zip
-                    # since; accept either so older releases still install.
-                    winefix_asset = asset
-
-            if not apl_asset:
-                self.log(
-                    "✗ Could not find affinitypluginloader-*.zip in release assets",
-                    "error",
-                )
-                self.log("Available assets:", "info")
-                for asset in assets:
-                    self.log(f"  • {asset.get('name', '?')}", "info")
-                self.finish_operation(False)
-                return
-            if not winefix_asset:
-                self.log(
-                    "✗ Could not find winefix-*.zip in release assets", "error"
-                )
-                self.log("Available assets:", "info")
-                for asset in assets:
-                    self.log(f"  • {asset.get('name', '?')}", "info")
-                self.finish_operation(False)
-                return
-
-            self.log(f"AffinityPluginLoader asset: {apl_asset['name']}", "info")
-            self.log(f"WineFix asset:              {winefix_asset['name']}", "info")
-
-            # ── 3. Download both zips to a temp directory ───────────────────────────
-            with tempfile.TemporaryDirectory() as tmpdir:
-                tmpdir_path = Path(tmpdir)
-
-                apl_zip_path = tmpdir_path / apl_asset["name"]
-                winefix_zip_path = tmpdir_path / winefix_asset["name"]
-
-                for asset, dest in [
-                    (apl_asset, apl_zip_path),
-                    (winefix_asset, winefix_zip_path),
-                ]:
-                    url = asset["browser_download_url"]
-                    name = asset["name"]
-                    size = asset.get("size", 0)
-                    self.log(f"Downloading {name} ({size // 1024} KB)...", "info")
-                    self.progress_signal.emit(0)
-                    try:
-
-                        def _progress(block_num, block_size, total_size):
-                            if total_size > 0:
-                                pct = min(
-                                    100.0, block_num * block_size / total_size * 100
-                                )
-                                self.progress_signal.emit(pct)
-
-                        urllib.request.urlretrieve(url, str(dest), reporthook=_progress)
-                        self.progress_signal.emit(100)
-                        self.log(f"  ✓ Downloaded {name}", "success")
-                    except Exception as e:
-                        self.log(f"✗ Failed to download {name}: {e}", "error")
-                        self.finish_operation(False)
-                        return
-
-                # ── 4. Extract AffinityPluginLoader zip ─────────────────────────────
-                self.log(f"\nExtracting {apl_asset['name']} → {install_dir}", "info")
-                if not self._extract_zip_verified(apl_zip_path, install_dir):
-                    self.finish_operation(False)
-                    return
-
-                # ── 5. Extract WineFix zip ───────────────────────────────────────────
-                # The winefix zip contains an apl/ subdirectory with d2d1.dll (and
-                # potentially other files). We extract the zip to a staging area first
-                # so we can verify the layout, then copy everything into install_dir.
-                self.log(f"\nExtracting {winefix_asset['name']}...", "info")
-                winefix_stage = tmpdir_path / "winefix_stage"
-                winefix_stage.mkdir()
-                if not self._extract_zip_verified(winefix_zip_path, winefix_stage):
-                    self.finish_operation(False)
-                    return
-
-                # Copy all extracted files/folders into the Affinity install dir
-                self.log(f"Installing WineFix files → {install_dir}", "info")
-                try:
-                    self._copy_tree_verified(winefix_stage, install_dir)
-                except Exception as e:
-                    self.log(f"✗ Failed to install WineFix files: {e}", "error")
-                    self.finish_operation(False)
-                    return
-
-                # Verify d2d1.dll landed beside Affinity.exe. It has to be there
-                # rather than under apl/: Wine finds it through the executable's
-                # own directory, which is also why it shadows Wine's own d2d1.
-                d2d1_path = install_dir / "d2d1.dll"
-                if d2d1_path.exists():
-                    self.log("  ✓ d2d1.dll verified", "success")
-                else:
-                    self.log(
-                        "  ⚠ d2d1.dll not found after extraction — check zip layout",
-                        "warning",
-                    )
-
-            # ── 6. Verify AffinityHook.exe is present ───────────────────────────────
-            hook_exe = install_dir / "AffinityHook.exe"
-            if hook_exe.exists():
-                self.log(f"\n✓ AffinityHook.exe present at {hook_exe}", "success")
-            else:
-                self.log(
-                    f"\n⚠ AffinityHook.exe not found at {hook_exe} — desktop entry will still be updated",
-                    "warning",
-                )
-
-            # ── 7. Patch Affinity.desktop to use AffinityHook.exe ──────────────────
-            self._patch_affinity_desktop_for_hook()
-
-            self.log(
-                "\n✓ AffinityPluginLoader + WineFix installation complete!", "success"
-            )
-            self.log(
-                "Affinity will now launch via AffinityHook.exe from the desktop shortcut.",
-                "info",
-            )
-            self.finish_operation(True)
-            self.show_message(
-                "Installation Complete",
-                f"AffinityPluginLoader ({tag}) and WineFix have been installed successfully.\n\n"
-                "Affinity.desktop has been updated to launch via AffinityHook.exe.",
-                QMessageBox.Icon.Information,
-            )
-
-        except Exception as e:
-            self.log(f"✗ Unexpected error during installation: {e}", "error")
-            self.finish_operation(False)
 
     def _extract_zip_verified(self, zip_path, dest_dir):
         """Extract a zip file into dest_dir, verifying every member extracts successfully.
@@ -19463,7 +18967,13 @@ Would you like to continue with {distro_name} anyway?"""
                 (
                     a
                     for a in assets
-                    if a["name"].lower().startswith("winefix")
+                    # Released as apl-winefix-*.zip up to v0.2.x and winefix-*.zip
+                    # since. Accept either, or an older pinned release installs
+                    # nothing and the whole plugin-loader step aborts.
+                    if (
+                        a["name"].lower().startswith("winefix")
+                        or a["name"].lower().startswith("apl-winefix")
+                    )
                     and a["name"].endswith(".zip")
                 ),
                 None,
@@ -19482,7 +18992,10 @@ Would you like to continue with {distro_name} anyway?"""
                 return
 
             if not winefix_asset:
-                self.log("✗ Could not find apl-winefix zip in release assets.", "error")
+                self.log(
+                    "✗ Could not find a winefix-*.zip or apl-winefix-*.zip in release assets.",
+                    "error",
+                )
                 self.log("Assets found:", "info")
                 for a in assets:
                     self.log(f"  - {a['name']}", "info")
@@ -19582,6 +19095,33 @@ Would you like to continue with {distro_name} anyway?"""
                         self.log(
                             f"✓ {label}: {installed_count} file(s) installed", "success"
                         )
+
+                    # WineFix's d2d1.dll ships under apl/ in the zip, and the loop
+                    # above preserves that. It has to end up BESIDE Affinity.exe:
+                    # Wine resolves a DLL through the executable's own directory,
+                    # which is how this copy shadows Wine's d2d1 at all. Left under
+                    # apl/ it is never loaded and WineFix silently does nothing.
+                    if label == "WineFix":
+                        beside = install_dir / "d2d1.dll"
+                        if not beside.exists():
+                            found = next(
+                                (f for f in extract_dir.rglob("d2d1.dll") if f.is_file()),
+                                None,
+                            )
+                            if found:
+                                shutil.copy2(str(found), str(beside))
+                                self.log(
+                                    f"  Moved d2d1.dll up from {found.relative_to(extract_dir)}"
+                                    " so Affinity.exe can find it",
+                                    "success",
+                                )
+                        if beside.exists():
+                            self.log("  ✓ d2d1.dll is beside Affinity.exe", "success")
+                        else:
+                            self.log(
+                                "  ⚠ no d2d1.dll in the WineFix archive — check its layout",
+                                "warning",
+                            )
 
             # ── 5. Verify AffinityHook.exe is present after install ───────────────────
             hook_exe = install_dir / "AffinityHook.exe"
