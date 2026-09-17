@@ -10557,7 +10557,12 @@ class AffinityInstallerGUI(QMainWindow):
             self.update_progress_text("Preparing Wine environment...")
             self.update_progress(0.0)
             self.log("Stopping Wine processes...", "info")
-            self.run_command(["wineserver", "-k"], check=False)
+            # Scoped to this prefix: run_command defaults to os.environ.copy(),
+            # so with no WINEPREFIX this killed whatever prefix the process had
+            # inherited, taking every Wine process it served with it.
+            _env = os.environ.copy()
+            _env["WINEPREFIX"] = self.directory
+            self.run_command(["wineserver", "-k"], check=False, env=_env)
 
             if self.check_cancelled():
                 return False
@@ -11314,7 +11319,12 @@ class AffinityInstallerGUI(QMainWindow):
         winmetadata_dir = system32_dir / "WinMetadata"
 
         self.log("Stopping Wine processes...", "info")
-        self.run_command(["wineserver", "-k"], check=False)
+        # Scoped to this prefix: run_command defaults to os.environ.copy(),
+        # so with no WINEPREFIX this killed whatever prefix the process had
+        # inherited, taking every Wine process it served with it.
+        _env = os.environ.copy()
+        _env["WINEPREFIX"] = self.directory
+        self.run_command(["wineserver", "-k"], check=False, env=_env)
         time.sleep(2)
 
         before = len(list(winmetadata_dir.glob("*.winmd"))) if winmetadata_dir.exists() else 0
@@ -12785,7 +12795,12 @@ class AffinityInstallerGUI(QMainWindow):
             self.update_progress_text("Stopping Wine processes...")
             self.update_progress(0.1)
             self.log("Stopping Wine processes...", "info")
-            self.run_command(["wineserver", "-k"], check=False)
+            # Scoped to this prefix: run_command defaults to os.environ.copy(),
+            # so with no WINEPREFIX this killed whatever prefix the process had
+            # inherited, taking every Wine process it served with it.
+            _env = os.environ.copy()
+            _env["WINEPREFIX"] = self.directory
+            self.run_command(["wineserver", "-k"], check=False, env=_env)
             time.sleep(1)  # Give processes time to terminate
 
             if self.check_cancelled():
@@ -15042,7 +15057,12 @@ Would you like to continue with {distro_name} anyway?"""
         self.log("Restoring Windows metadata files...", "info")
 
         # Kill Wine processes
-        self.run_command(["wineserver", "-k"], check=False)
+        # Scoped to this prefix: run_command defaults to os.environ.copy(),
+        # so with no WINEPREFIX this killed whatever prefix the process had
+        # inherited, taking every Wine process it served with it.
+        _env = os.environ.copy()
+        _env["WINEPREFIX"] = self.directory
+        self.run_command(["wineserver", "-k"], check=False, env=_env)
         time.sleep(2)
 
         system32_dir = Path(self.directory) / "drive_c" / "windows" / "system32"
@@ -18450,10 +18470,18 @@ Would you like to continue with {distro_name} anyway?"""
             self.log("Uninstall cancelled by user", "warning")
             return
 
-        # Stop Wine processes first
+        # Stop Wine processes in THE PREFIX BEING UNINSTALLED. run_command
+        # defaults its environment to os.environ.copy(), so with no WINEPREFIX
+        # set this killed the wineserver of whatever prefix this process had
+        # inherited -- or ~/.wine -- and killing a wineserver takes every
+        # process it serves with it. Same fault as the startup pkill, in the one
+        # operation where the user is least expecting another prefix to be
+        # touched.
         self.log("Stopping Wine processes...", "info")
         try:
-            self.run_command(["wineserver", "-k"], check=False)
+            env = os.environ.copy()
+            env["WINEPREFIX"] = self.directory
+            self.run_command(["wineserver", "-k"], check=False, env=env)
             time.sleep(2)
             self.log("Wine processes stopped", "success")
         except Exception as e:
