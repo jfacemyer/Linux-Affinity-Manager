@@ -19395,36 +19395,120 @@ Would you like to continue with {distro_name} anyway?"""
         thanks.exec()
 
 
-def kill_stalled_wine_processes():
-    """Kill winetricks, winedevice.exe, and wineserver processes so the installer
-    starts cleanly. Only run when the GUI opens - leftover Wine processes (especially
-    a stalled winetricks) cause lockups if the installer starts on top of them."""
-    targets = [
-        ("winetricks", ["winetricks"]),
-        ("winedevice.exe", ["winedevice.exe", "winedevice"]),
-        ("wineserver", ["wineserver"]),
-    ]
-    killed_any = False
-    for display_name, patterns in targets:
-        for pattern in patterns:
-            try:
-                subprocess.run(
-                    ["pkill", "-9", "-x", pattern],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-                result = subprocess.run(
-                    ["pkill", "-9", "-f", pattern],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-                if result.returncode == 0:
-                    killed_any = True
-                    print(f"[Cleanup] Killed leftover {display_name} process(es)")
-            except Exception:
-                continue
-    if not killed_any:
-        print("[Cleanup] No stale Wine processes found - starting clean")
+HELPER_NAMES = ("winetricks", "winedevice.exe", "winedevice", "wineserver")
+
+
+def _prefix_of_pid(pid):
+    """The WINEPREFIX a process itself was started with, resolved, or None.
+
+    A process's own environment is the only trustworthy answer. Matching on the
+    command line instead is what made this function dangerous."""
+    try:
+        with open(f"/proc/{pid}/environ", "rb") as f:
+            for entry in f.read().split(b"\0"):
+                if entry.startswith(b"WINEPREFIX="):
+                    value = entry[len("WINEPREFIX="):].decode("utf-8", "replace")
+                    return os.path.realpath(os.path.expanduser(value))
+    except OSError:
+        pass
+    return None
+
+
+def _looks_like_wine_helper(pid):
+    """Is this one of the helper processes worth clearing?
+
+    Checked against both comm and the command line's own basenames: comm is
+    truncated at 15 characters and, for winetricks, names the interpreter rather
+    than the script. Being liberal here is safe because the caller still
+    requires the WINEPREFIX to match."""
+    try:
+        with open(f"/proc/{pid}/comm") as f:
+            if f.read().strip() in HELPER_NAMES:
+                return True
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            argv = f.read().split(b"\0")
+    except OSError:
+        return False
+    for arg in argv:
+        if not arg:
+            continue
+        if os.path.basename(arg.decode("utf-8", "replace")) in HELPER_NAMES:
+            return True
+    return False
+
+
+def cleanup_target_prefix():
+    """The prefix this run is going to install into.
+
+    Resolved the same way the window will resolve it, and available here because
+    parse_overrides() has already put any --install-dir into the environment."""
+    directory = os.environ.get(ENV_INSTALL_DIR, "").strip()
+    if not directory:
+        try:
+            saved = Path.home() / ".config" / "AffinityOnLinux" / "install_location"
+            if saved.exists():
+                directory = saved.read_text().strip()
+        except OSError:
+            directory = ""
+    if not directory:
+        directory = str(Path.home() / ".AffinityLinux")
+    return os.path.realpath(os.path.expanduser(directory))
+
+
+def kill_stalled_wine_processes(prefix=None):
+    """Clear leftover winetricks/winedevice/wineserver processes IN THE PREFIX
+    THIS RUN WILL INSTALL INTO, so the installer does not start on top of a
+    stalled one.
+
+    It used to run `pkill -9 -x` and `pkill -9 -f` over "winetricks",
+    "winedevice" and "wineserver" with no scoping at all. `-f` matches the whole
+    command line, machine-wide, so opening the installer SIGKILLed the wineserver
+    of every Wine prefix on the system -- and killing a wineserver takes every
+    process it serves with it. On a machine with Affinity open in another prefix
+    that meant the session and whatever was unsaved in it, before the window had
+    even appeared, and with no way to opt out: this runs before any directory is
+    chosen, so --install-dir could not protect you.
+
+    Now each candidate has to name the target prefix in its own environment, and
+    if the target prefix has a live Affinity in it nothing is killed at all --
+    the point is to clear a stall, not to end a session."""
+    target = prefix or cleanup_target_prefix()
+
+    live = []
+    stale = []
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        pid = int(entry)
+        if _prefix_of_pid(pid) != target:
+            continue
+        try:
+            with open(f"/proc/{pid}/comm") as f:
+                comm = f.read().strip()
+        except OSError:
+            continue
+        if comm in ("Affinity.exe", "AffinityHook.ex", "AffinityHook.exe"):
+            live.append(pid)
+        elif _looks_like_wine_helper(pid):
+            stale.append((pid, comm))
+
+    if live:
+        print(
+            f"[Cleanup] Affinity is running in {target} (pid {live[0]}) - "
+            "leaving its Wine processes alone. Close it before installing."
+        )
+        return
+
+    if not stale:
+        print(f"[Cleanup] No stale Wine processes in {target} - starting clean")
+        return
+
+    for pid, comm in stale:
+        try:
+            os.kill(pid, signal.SIGKILL)
+            print(f"[Cleanup] Killed leftover {comm} (pid {pid}) in {target}")
+        except OSError:
+            pass
 
 
 def parse_overrides(argv):
