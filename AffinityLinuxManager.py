@@ -37,6 +37,7 @@ from PyQt6.QtWidgets import (
     QFormLayout,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -60,6 +61,8 @@ from affinity_manager import (
     hosted,
     installer,
     prefsseed,
+    removal,
+    snapshots,
     oplock,
     prefixlog,
     prefixstate,
@@ -491,6 +494,278 @@ class CarrySettingsDialog(SizedDialog):
 
     def mode(self):
         return prefsseed.REPLACE if self.replace.isChecked() else prefsseed.FILL
+
+
+class RemovalDialog(SizedDialog):
+    """Everything removing a prefix would take with it, as a list.
+
+    The confirmation is the list. A yes/no on a summary is where "and 4 other
+    items" hides the one you would have objected to -- and the things most
+    easily forgotten here are the ones that bite later: a menu entry that
+    launches nothing, and a document association that silently stops working
+    because the prefix holding it has gone.
+
+    Two rows are not like the others. Settings snapshots are listed unticked,
+    because losing the backups of a thing along with the thing is the wrong
+    default. And anything without our marker is not offered at all -- it is
+    named at the bottom as left alone, so the dialog can say what it will not
+    do as well as what it will.
+    """
+
+    FIT_MIN_WIDTH = 860
+    COLUMNS = ["", "What", "Where", "Size"]
+
+    def __init__(self, parent, plan):
+        super().__init__(parent)
+        self.setWindowTitle(f"Remove {plan.name}")
+        self.setModal(True)
+        ui.apply(self)
+        self.plan = plan
+        self.boxes = []
+
+        layout = QVBoxLayout(self)
+        blurb = QLabel(
+            f"<b>{plan.name}</b> put all of this on this machine. Choose what "
+            "goes. There is no undo for any of it.")
+        blurb.setWordWrap(True)
+        layout.addWidget(blurb)
+
+        self.tree = QTreeWidget()
+        self.tree.setColumnCount(len(self.COLUMNS))
+        self.tree.setHeaderLabels(self.COLUMNS)
+        self.tree.setRootIsDecorated(False)
+        self.tree.setColumnWidth(0, 34)
+        self.tree.setColumnWidth(1, 300)
+        for item in plan.items:
+            row = SizeSortItem([
+                "", item.label,
+                item.detail,
+                probe.human_size(item.size) if item.size else "",
+            ])
+            row.setData(SizeSortItem.SIZE_COLUMN, Qt.ItemDataRole.UserRole,
+                        item.size)
+            row.setFlags(row.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            row.setCheckState(0, Qt.CheckState.Checked if item.default
+                              else Qt.CheckState.Unchecked)
+            row.setData(0, Qt.ItemDataRole.UserRole, item)
+            self.tree.addTopLevelItem(row)
+            self.boxes.append(row)
+        # Swapped: the plan's own wording is the reason a row is proposed, and
+        # it is more useful than the path for the rows that have no path.
+        self.tree.setColumnWidth(2, 360)
+        layout.addWidget(self.tree, 1)
+
+        if plan.left_alone:
+            left = QLabel(
+                "<b>Left alone, not ours:</b> "
+                + ", ".join(str(a.path.name if a.path else a.detail)
+                            for a in plan.left_alone[:8]))
+            left.setWordWrap(True)
+            left.setObjectName("descriptionLabel")
+            layout.addWidget(left)
+
+        if plan.running:
+            running = QLabel(
+                f"Affinity is running in this prefix (pid {plan.running[0]}). "
+                "Nothing can be removed until it is closed.")
+            running.setWordWrap(True)
+            running.setObjectName("cautionText")
+            layout.addWidget(running)
+
+        self.arm = QCheckBox("Yes, remove the ticked items")
+        layout.addWidget(self.arm)
+
+        self.buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        self.ok = self.buttons.button(QDialogButtonBox.StandardButton.Ok)
+        self.ok.setText("Remove")
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        layout.addWidget(self.buttons)
+
+        self.arm.toggled.connect(self._retotal)
+        self.tree.itemChanged.connect(lambda *_: self._retotal())
+        self._retotal()
+
+    def _retotal(self):
+        chosen = self.chosen()
+        total = probe.human_size(sum(i.size for i in chosen))
+        self.ok.setText(f"Remove {len(chosen)} item(s)  ({total})"
+                        if chosen else "Remove")
+        self.ok.setEnabled(bool(chosen) and self.arm.isChecked()
+                           and not self.plan.running)
+
+    def chosen(self):
+        return [row.data(0, Qt.ItemDataRole.UserRole) for row in self.boxes
+                if row.checkState(0) == Qt.CheckState.Checked]
+
+
+class SnapshotsDialog(SizedDialog):
+    """Settings snapshots for one prefix: take, restore, delete.
+
+    A snapshot is the prefix's configuration and not the prefix -- tens of
+    kilobytes against several gigabytes -- which is what makes it something to
+    take before every risky change rather than once a year.
+
+    Restoring across prefixes is allowed and is the point: it is how the live
+    prefix's settings get into a test one. So the confirmation names both sides
+    and says when they differ, because restoring into the wrong prefix is the
+    expensive mistake."""
+
+    FIT_MIN_WIDTH = 760
+    COLUMNS = ["Taken", "Label", "From", "Files", "Size"]
+
+    def __init__(self, parent, entry):
+        super().__init__(parent)
+        self.entry = entry
+        self.name = entry["name"]
+        self.path = Path(entry["path"])
+        self.setWindowTitle(f"Settings snapshots — {self.name}")
+        self.setModal(True)
+        ui.apply(self)
+
+        layout = QVBoxLayout(self)
+        blurb = QLabel(
+            "Preferences, shortcuts, recent files and the session state — "
+            "copied aside under a dated name, and kept as a directory so you "
+            "can read one without restoring it.")
+        blurb.setWordWrap(True)
+        layout.addWidget(blurb)
+
+        self.tree = QTreeWidget()
+        self.tree.setColumnCount(len(self.COLUMNS))
+        self.tree.setHeaderLabels(self.COLUMNS)
+        self.tree.setRootIsDecorated(False)
+        self.tree.itemSelectionChanged.connect(self._selection_changed)
+        layout.addWidget(self.tree, 1)
+
+        self.detail = QLabel("")
+        self.detail.setWordWrap(True)
+        self.detail.setObjectName("descriptionLabel")
+        layout.addWidget(self.detail)
+
+        row = QHBoxLayout()
+        take = QPushButton("Take a snapshot…")
+        take.clicked.connect(self._take)
+        row.addWidget(take)
+        row.addStretch(1)
+        self.restore_button = QPushButton("Restore…")
+        self.restore_button.clicked.connect(self._restore)
+        self.delete_button = QPushButton("Delete")
+        self.delete_button.clicked.connect(self._delete)
+        close = QPushButton("Close")
+        close.clicked.connect(self.reject)
+        for b in (self.restore_button, self.delete_button, close):
+            row.addWidget(b)
+        layout.addLayout(row)
+
+        self._reload()
+
+    # -- the list ------------------------------------------------------------
+
+    def _reload(self):
+        self.tree.clear()
+        for snap in snapshots.listing(self.name):
+            item = QTreeWidgetItem([
+                snap.when,
+                snap.label or "—",
+                snap.prefix,
+                str(snap.files),
+                probe.human_size(snap.bytes),
+            ])
+            item.setData(0, Qt.ItemDataRole.UserRole, snap)
+            self.tree.addTopLevelItem(item)
+        for i in range(len(self.COLUMNS)):
+            self.tree.resizeColumnToContents(i)
+        self._selection_changed()
+
+    def selected(self):
+        rows = self.tree.selectedItems()
+        return rows[0].data(0, Qt.ItemDataRole.UserRole) if rows else None
+
+    def _selection_changed(self):
+        snap = self.selected()
+        self.restore_button.setEnabled(snap is not None)
+        self.delete_button.setEnabled(snap is not None)
+        if snap is None:
+            self.detail.setText(
+                "Nothing here yet." if not self.tree.topLevelItemCount()
+                else "Choose one to restore or delete it.")
+            return
+        self.detail.setText(f"{snap.path}\n" + " ".join(snap.notes))
+
+    # -- taking --------------------------------------------------------------
+
+    def _take(self):
+        label, ok = QInputDialog.getText(
+            self, "Label this snapshot",
+            "An optional name, so you can tell it apart later\n"
+            "(\"before 3.3\", \"known good\"):")
+        if not ok:
+            return
+        try:
+            snap = snapshots.take(self.name, self.path, label)
+        except (snapshots.NoSettings, snapshots.NotASnapshot, OSError) as exc:
+            QMessageBox.warning(self, "Could not take a snapshot", str(exc))
+            return
+        self._reload()
+        self.detail.setText(f"Took {snap.name} — {snap.files} file(s), "
+                            f"{probe.human_size(snap.bytes)}.")
+
+    # -- restoring -----------------------------------------------------------
+
+    def _restore(self):
+        snap = self.selected()
+        if snap is None:
+            return
+        try:
+            plan = snapshots.plan_restore(snap, self.name, self.path)
+        except OSError as exc:
+            QMessageBox.warning(self, "Cannot restore", str(exc))
+            return
+
+        box = QMessageBox(self)
+        box.setWindowTitle("Restore these settings")
+        box.setText("\n\n".join(plan.describe()))
+        box.setInformativeText(
+            "The settings currently in this prefix are snapshotted first, and "
+            "the ones they replace are kept beside them with the date in the "
+            "name. Nothing is deleted.")
+        box.setStandardButtons(QMessageBox.StandardButton.Ok
+                               | QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        if box.exec() != QMessageBox.StandardButton.Ok:
+            return
+        try:
+            notes = snapshots.restore(plan)
+        except (maintenance.Busy, OSError) as exc:
+            QMessageBox.warning(self, "Could not restore", str(exc))
+            return
+        prefixlog.write(self.name, "Restored settings from " + str(snap))
+        self._reload()
+        QMessageBox.information(self, "Restored", "\n".join(notes))
+
+    # -- deleting ------------------------------------------------------------
+
+    def _delete(self):
+        snap = self.selected()
+        if snap is None:
+            return
+        if QMessageBox.question(
+            self, "Delete this snapshot",
+            f"Permanently delete {snap.name}?\n\n{snap.path}\n\n"
+            "There is no undo, and a snapshot is the only copy of the "
+            "preferences it holds.",
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        ) != QMessageBox.StandardButton.Ok:
+            return
+        try:
+            snapshots.remove(snap)
+        except (snapshots.NotASnapshot, OSError) as exc:
+            QMessageBox.warning(self, "Could not delete it", str(exc))
+            return
+        self._reload()
 
 
 class SizeSortItem(QTreeWidgetItem):
@@ -1721,6 +1996,10 @@ class ManagerWindow(QMainWindow):
             "Setup", self.open_installer,
             "Install, update and configure this prefix -- AffinityOnLinux, "
             "inside this window")
+        self.snapshots_button = self._action(
+            "Snapshots", self.show_snapshots,
+            "Dated copies of this prefix's preferences, shortcuts and recent "
+            "files -- take one before anything risky")
         self.protect_button = self._action(
             "Protect", self.toggle_protection, "Mark this prefix as not deletable")
         self.forget_button = self._action(
@@ -1747,6 +2026,7 @@ class ManagerWindow(QMainWindow):
         left_layout.addWidget(self._button_card(
             "Selected prefix",
             [self.launch_button, self.commands_button, self.installer_button,
+             self.snapshots_button,
              self.clone_button, self.clean_button,
              self.protect_button, self.forget_button, self.delete_button]))
         left_layout.addWidget(self._button_card("View", [self.refresh_button]))
@@ -1954,6 +2234,7 @@ class ManagerWindow(QMainWindow):
 
     BUSY_BUTTONS = ("new_button", "find_button", "adopt_button", "launch_button",
                     "commands_button", "installer_button", "clone_button",
+                    "snapshots_button",
                     "clean_button", "protect_button", "forget_button",
                     "delete_button", "refresh_button")
 
@@ -2240,6 +2521,7 @@ class ManagerWindow(QMainWindow):
             self.installer_button,
             self.forget_button,
             self.commands_button,
+            self.snapshots_button,
             self.protect_button,
             self.delete_button,
         ):
@@ -2326,6 +2608,12 @@ class ManagerWindow(QMainWindow):
         if not entry:
             return
         self.show_setup(entry)
+
+    def show_snapshots(self):
+        entry = self.selected_entry()
+        if not entry:
+            return
+        SnapshotsDialog(self, entry).exec()
 
     def show_commands(self):
         entry = self.selected_entry()
@@ -2559,16 +2847,20 @@ class ManagerWindow(QMainWindow):
             )
             return
 
-        size = probe.human_size(probe.disk_usage(path)) if path.exists() else "0B"
-        if not ConfirmDialog.ask(
-            self,
-            "Delete this prefix",
-            f"Permanently delete <b>{name}</b>?<br><br>"
-            f"{path}<br>{size} on disk.<br><br>"
-            f"There is no undo. Anything unsaved in that prefix, and any "
-            f"settings it holds, go with it.",
-            confirm=f"Delete {name}",
-        ):
+        # Itemised, because the things most easily forgotten here are the ones
+        # that bite later: a menu entry that launches nothing, and a document
+        # association that silently stops working because the prefix holding it
+        # has gone. The list is the confirmation.
+        try:
+            plan = removal.plan(self.reg, name)
+        except KeyError:
+            self.refresh()
+            return
+        dialog = RemovalDialog(self, plan)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        chosen = dialog.chosen()
+        if not chosen:
             return
 
         # Through the lock like the others. Removing several gigabytes takes
@@ -2576,28 +2868,16 @@ class ManagerWindow(QMainWindow):
         # deleting from is the worst of the collisions -- it would produce a
         # copy that is quietly half a prefix.
         try:
-            self._busy_start(f"Deleting {name}", prefix=name, operation="Delete")
+            self._busy_start(f"Removing {name}", prefix=name, operation="Remove")
         except oplock.InUse as exc:
             self._refuse(exc)
             return
-        try:
-            if path.exists():
-                shutil.rmtree(path)
-        except OSError as e:
-            self._busy_done("Delete failed")
-            QMessageBox.critical(self, "Could not delete", str(e))
-            return
-        for stale in desktopentry.entries_for(name):
-            try:
-                stale.unlink()
-            except OSError:
-                pass
-        desktopentry.refresh_menu()
-        # Released before the row is forgotten: _busy_done clears the working
-        # state off a registry entry, and there is about to be no entry.
-        self._busy_done(f"Deleted {path} and removed {name} from the list.")
-        self.reg.forget(name)
+        notes = removal.apply(self.reg, plan, chosen)
+        # Released before the refresh: the registry row may be gone, and
+        # _busy_done clears the working state off an entry that has to exist.
+        self._busy_done(f"Removed {len(chosen)} item(s) belonging to {name}")
         self.refresh()
+        QMessageBox.information(self, f"{name} removed", "\n".join(notes[:14]))
 
     def forget_selected(self):
         entry = self.selected_entry()
