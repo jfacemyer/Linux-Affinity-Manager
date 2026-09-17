@@ -98,12 +98,18 @@ namespace AffinityOnLinux
 
         private static int Run(string[] args)
         {
-            if (args.Length == 1 && (args[0] == "--reap" || args[0] == "--reap-dry-run"))
+            // Any --reap spelling is a subcommand, however many arguments follow.
+            // Matching only on args.Length == 1 meant "--reap /some/file" fell
+            // through and cold-started Affinity instead.
+            if (args.Length > 0 && (args[0] == "--reap" || args[0] == "--reap-dry-run"))
             {
                 bool dryRun = args[0] == "--reap-dry-run";
                 int n = ReapSpentInstances(dryRun);
                 Log("reaper: " + n + (dryRun ? " process(es) would be reaped" : " process(es) reaped"));
-                return 0;
+                // Say whether anything was found, so a script can branch on it.
+                // Always returning 0 made "nothing to reap" and "cleared a
+                // corpse" indistinguishable.
+                return n > 0 ? 0 : 1;
             }
 
             string dir = FindAffinityDirectory();
@@ -186,6 +192,7 @@ namespace AffinityOnLinux
         private static bool ColdStart(string launcher, string affinity, bool viaHook, List<string> docs)
         {
             bool needsTwoStage = viaHook && docs.Exists(NeedsQuoting);
+            bool opened = true;
             string arguments = needsTwoStage ? "" : JoinQuoted(docs);
 
             // Husks from a previous close still own the single-instance
@@ -228,10 +235,12 @@ namespace AffinityOnLinux
                 foreach (string d in docs)
                 {
                     Log("cold two-stage handoff: " + d);
-                    HandOff(affinity, d, 3);
+                    // Report it. Discarding this made a cold launch that never
+                    // opened the document exit 0, so a caller had no way to know.
+                    if (!HandOff(affinity, d, 3)) opened = false;
                 }
             }
-            return true;
+            return opened;
         }
 
         // RETIRED 2026-09-16 -- the retry watchdog, kept for reference.
@@ -865,7 +874,13 @@ namespace AffinityOnLinux
             // Belt and braces: the prefix registry already carries opencl="".
             // With OpenCL live on a real GPU the startup deadlock is ~100%
             // instead of ~33%.
-            psi.EnvironmentVariables["WINEDLLOVERRIDES"] = "opencl=d";
+            // Append rather than assign. Replacing the value discards whatever
+            // the launcher or the user set -- a d2d1 or dxgi override put there
+            // deliberately vanishes for the process we start, and the symptom is
+            // a rendering difference nobody can account for.
+            string overrides = psi.EnvironmentVariables["WINEDLLOVERRIDES"];
+            psi.EnvironmentVariables["WINEDLLOVERRIDES"] =
+                string.IsNullOrEmpty(overrides) ? "opencl=d" : overrides + ";opencl=d";
             try { return Process.Start(psi); }
             catch (Exception ex) { Log("start failed: " + ex.Message); return null; }
         }
@@ -880,6 +895,9 @@ namespace AffinityOnLinux
 
         // ------------------------------------------------------------ path work
 
+        [DllImport("kernel32.dll")] private static extern IntPtr GetProcessHeap();
+        [DllImport("kernel32.dll")] private static extern bool HeapFree(IntPtr heap, uint flags, IntPtr mem);
+
         [DllImport("kernel32.dll", EntryPoint = "wine_get_dos_file_name",
                    CallingConvention = CallingConvention.Cdecl)]
         private static extern IntPtr WineGetDosFileName(IntPtr utf8Path);
@@ -891,7 +909,11 @@ namespace AffinityOnLinux
         private static string ToDosPath(string path)
         {
             if (string.IsNullOrEmpty(path)) return null;
-            if (!path.StartsWith("/")) return path;      // already a Windows path
+            // Ordinal: the default StartsWith is culture-sensitive, and under a
+            // culture that does clever things with separators this is the wrong
+            // question asked the wrong way. Every other comparison in this file
+            // is already ordinal.
+            if (!path.StartsWith("/", StringComparison.Ordinal)) return path;
 
             byte[] utf8 = Encoding.UTF8.GetBytes(path);
             IntPtr buf = Marshal.AllocHGlobal(utf8.Length + 1);
@@ -900,7 +922,17 @@ namespace AffinityOnLinux
                 Marshal.Copy(utf8, 0, buf, utf8.Length);
                 Marshal.WriteByte(buf, utf8.Length, 0);
                 IntPtr result = WineGetDosFileName(buf);
-                return result == IntPtr.Zero ? null : Marshal.PtrToStringUni(result);
+                if (result == IntPtr.Zero) return null;
+                try { return Marshal.PtrToStringUni(result); }
+                // Wine documents the buffer as the caller's to free, and
+                // kernel32/path.c allocates it with RtlAllocateHeap on the
+                // PROCESS heap -- so it is HeapFree, not Marshal.FreeHGlobal.
+                // That one calls LocalFree, a different allocator, and handing
+                // one allocator's pointer to another is how a free becomes a
+                // crash. One leak per document would be nothing, but this is
+                // also the warm-handoff path and a file manager can hand it
+                // several at once.
+                finally { HeapFree( GetProcessHeap(), 0, result ); }
             }
             catch (EntryPointNotFoundException) { return path; }   // not Wine
             catch (DllNotFoundException) { return path; }
