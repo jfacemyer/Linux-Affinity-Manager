@@ -321,9 +321,20 @@ namespace AffinityOnLinux
             {
                 string dir = Path.GetDirectoryName(lockFile);
                 if (dir == null) return false;
-                string prefix = Path.GetFileName(lockFile) + ":";
+
+                // Compare the WHOLE path. Path.GetFileName must not touch these
+                // names: ':' is Path.VolumeSeparatorChar, and both .NET Framework
+                // and Mono stop at it, so GetFileName of
+                //     ...\doc.af~lock~:com.dropbox.ignored
+                // returns "com.dropbox.ignored". Written the obvious way, with
+                // GetFileName on both sides, this branch never matched anything
+                // and the whole fix was dead code. Measured under Wine, not
+                // reasoned about: a probe printed GetFileName -> com.dropbox.ignored
+                // and the comparison false for a marker sitting right there.
+                string marker = lockFile + ":";
                 foreach (string f in Directory.GetFiles(dir))
-                    if (Path.GetFileName(f).StartsWith(prefix, StringComparison.Ordinal))
+                    if (f.Length > marker.Length &&
+                        f.StartsWith(marker, StringComparison.OrdinalIgnoreCase))
                         return true;
             }
             catch { }
