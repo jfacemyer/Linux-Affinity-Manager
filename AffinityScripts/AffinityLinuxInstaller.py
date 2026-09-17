@@ -16680,7 +16680,30 @@ Would you like to continue with {distro_name} anyway?"""
             if local_exe:
                 shutil.copy2(local_exe, dest)
             else:
-                urllib.request.urlretrieve(raw_url, str(dest))
+                # Download beside the destination and rename into place, rather
+                # than writing over it. urlretrieve leaves a partial file behind
+                # on ContentTooShortError, and every later decision about the
+                # handler keys off the file merely existing -- so a truncated
+                # download became "File-manager handler installed" and a prefix
+                # that cannot open documents.
+                part = dest.with_name(dest.name + ".part")
+                try:
+                    with urllib.request.urlopen(raw_url, timeout=60) as r, open(part, "wb") as f:
+                        shutil.copyfileobj(r, f)
+                    head = part.open("rb").read(2)
+                    size = part.stat().st_size
+                    if head != b"MZ" or size < 4096:
+                        raise RuntimeError(
+                            f"downloaded handler is not a PE image ({size} bytes, "
+                            f"starts {head!r})"
+                        )
+                    os.replace(str(part), str(dest))
+                finally:
+                    if part.exists():
+                        try:
+                            part.unlink()
+                        except OSError:
+                            pass
 
             dest.chmod(0o755)
             self.log("File-manager handler installed", "success")
@@ -19292,8 +19315,15 @@ def kill_stalled_wine_processes():
 def parse_overrides(argv):
     """Turn --install-dir / --installer-file into the environment the overrides
     read, so argv and environment cannot disagree and only one path needs
-    testing. Unknown arguments are left alone: this script is also piped
-    straight into python3, where argv belongs to whatever invoked it."""
+    testing.
+
+    Non-flag arguments are left alone: this script is also piped straight into
+    python3, where argv belongs to whatever invoked it. An unrecognised --flag
+    is refused, though, because silently dropping it is dangerous here. A
+    mistyped `--install-dirr /tmp/scratch` used to be ignored, self.directory
+    stayed at the default, and every subsequent operation -- including Uninstall,
+    which deletes it -- addressed ~/.AffinityLinux: the working prefix the run
+    was trying to stay away from."""
     args = list(argv[1:])
     flags = {"--install-dir": ENV_INSTALL_DIR, "--installer-file": ENV_INSTALLER_FILE}
     i = 0
@@ -19321,6 +19351,13 @@ def parse_overrides(argv):
                 f"                         current release (or ${ENV_INSTALLER_FILE})\n"
             )
             sys.exit(0)
+        if arg.startswith("--"):
+            print(
+                f"unknown option {name}\n"
+                "run with --help for the options this accepts",
+                file=sys.stderr,
+            )
+            sys.exit(2)
         i += 1
 
 
