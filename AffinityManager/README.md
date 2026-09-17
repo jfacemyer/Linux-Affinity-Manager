@@ -149,6 +149,19 @@ the installer is still a single file you can run with `curl … | python3`, and
 it neither imports nor knows about this. The dependency points one way only,
 and this is the optional half.
 
+**This repository is upstream of that copy.** It is carried there with
+`git subtree`, squashed so the AffinityOnLinux branch stays reviewable, and
+re-synced deliberately rather than by hand:
+
+```sh
+# from the AffinityOnLinux checkout
+git subtree pull --prefix=AffinityManager --squash <path-to-this-repo> main
+```
+
+Two copies of two thousand lines will drift if the only thing keeping them in
+step is somebody remembering. The subtree link is what makes the resync a
+command rather than an act of memory.
+
 In that layout the installer beside it is found first and outranks any fetched
 checkout — a copy shipped inside AffinityOnLinux should drive the installer it
 shipped with — and the branch warning below is suppressed, because there the
