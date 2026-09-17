@@ -13154,6 +13154,38 @@ Would you like to continue with {distro_name} anyway?"""
             self.update_progress_text("Ready")
             self.end_operation()
 
+    def _seed_settings(self, settings_source, target_dir):
+        """Copy the repository's stock Settings in without overwriting the user's.
+
+        This step exists because a fresh prefix needs the seed files before
+        Affinity v3 will save settings at all. But the same directory is where
+        the user's own preferences live, and where RecentFiles.xml lives, so
+        copying the whole stock tree over the top of it is data loss: every
+        install or update resets the preferences and empties the recent
+        documents list. It goes unnoticed for a while, because the list starts
+        refilling as soon as documents are opened -- until someone looks for a
+        file they had open last week.
+
+        Filling in only what is missing serves both cases. A fresh prefix gets
+        the complete set; a prefix that has been used is left exactly as it was.
+
+        Returns (added, kept) as lists of paths relative to the source.
+        """
+        added, kept = [], []
+        for src in sorted(settings_source.rglob("*")):
+            rel = src.relative_to(settings_source)
+            dest = target_dir / rel
+            if src.is_dir():
+                dest.mkdir(parents=True, exist_ok=True)
+                continue
+            if dest.exists():
+                kept.append(rel)
+                continue
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dest)
+            added.append(rel)
+        return added, kept
+
     def install_affinity_settings(self):
         """Install Affinity v3 (Unified) settings files to enable settings saving"""
         self.log(
@@ -13426,61 +13458,33 @@ Would you like to continue with {distro_name} anyway?"""
             # Target path: AppData/Roaming/Affinity/Affinity/3.0/Settings (for v3)
             target_dir = affinity_appdata / "Affinity" / version_folder / "Settings"
 
-            # Move existing settings aside rather than deleting them.
+            # Fill in only the settings files that are missing.
             #
-            # This directory is not only stock configuration: RecentFiles.xml
-            # lives here, and so does whatever the user has changed. Deleting it
-            # "to force a fresh copy" silently resets preferences and wipes the
-            # recent-documents list on every update, which reads as data loss
-            # because it is -- the list regenerates as documents are opened, so
-            # it usually goes unnoticed until someone looks for a file they had
-            # open last week.
-            #
-            # Keeping the old directory costs a few hundred kilobytes and makes
-            # the step reversible.
-            if target_dir.exists():
-                stamp = time.strftime("%Y%m%d-%H%M%S")
-                kept = target_dir.with_name(f"{target_dir.name}.replaced-{stamp}")
-                try:
-                    target_dir.rename(kept)
-                    self.log(
-                        f"Existing settings kept at {kept.name} "
-                        f"(RecentFiles.xml and any customisation are in there)",
-                        "info",
-                    )
-                except Exception as e:
-                    self.log(
-                        f"Warning: could not move the old settings aside: {e}",
-                        "warning",
-                    )
-
-            # Copy settings from source to target
-            self.update_progress_text("Copying Settings files...")
+            # The stock set is a seed for a fresh prefix. On a prefix that has
+            # been used this directory holds the user's own preferences and
+            # RecentFiles.xml, and replacing it wipes both. See _seed_settings.
+            self.update_progress_text("Installing Settings files...")
             self.update_progress(0.7)
-            target_dir.parent.mkdir(parents=True, exist_ok=True)
-            self.log(f"Copying settings from repository to Wine prefix...", "info")
+            target_dir.mkdir(parents=True, exist_ok=True)
+            self.log("Installing stock settings, keeping any you already have...", "info")
             self.log(f"  From: {settings_source}", "info")
             self.log(f"  To: {target_dir}", "info")
 
-            # Copy with metadata preservation
-            shutil.copytree(settings_source, target_dir, dirs_exist_ok=True)
+            added, kept = self._seed_settings(settings_source, target_dir)
             self.update_progress(0.9)
-            self.log(f"Settings copied successfully to: {target_dir}", "success")
 
-            # Verify the copy
-            copied_files = list(target_dir.rglob("*"))
-            source_files = list(settings_source.rglob("*"))
+            if kept:
+                self.log(
+                    f"Kept {len(kept)} existing settings file(s) untouched "
+                    f"(your preferences and RecentFiles.xml are among them)",
+                    "success",
+                )
             self.log(
-                f"Copied {len(copied_files)} file(s)/folder(s) (source had {len(source_files)})",
+                f"Added {len(added)} missing settings file(s) to: {target_dir}",
                 "success",
             )
-
-            # List some of the copied files for verification
-            xml_files = list(target_dir.rglob("*.xml"))
-            if xml_files:
-                self.log(f"Found {len(xml_files)} XML file(s) in settings", "info")
-                for xml_file in xml_files[:5]:  # Show first 5
-                    self.log(f"  - {xml_file.relative_to(target_dir)}", "info")
+            for rel in added[:5]:
+                self.log(f"  + {rel}", "info")
 
             # Set permissions (make sure files are readable)
             try:
@@ -14228,50 +14232,33 @@ Would you like to continue with {distro_name} anyway?"""
                 # Target path: AppData/Roaming/Affinity/Affinity/3.0/Settings (for v3)
                 target_dir = affinity_appdata / "Affinity" / version_folder / "Settings"
 
-                # Move existing settings aside rather than deleting them: see
-                # the identical block in _install_affinity_settings_thread.
-                # RecentFiles.xml and any customisation live here.
-                if target_dir.exists():
-                    stamp = time.strftime("%Y%m%d-%H%M%S")
-                    kept = target_dir.with_name(f"{target_dir.name}.replaced-{stamp}")
-                    try:
-                        target_dir.rename(kept)
-                        self.log(
-                            f"Existing settings kept at {kept.name}", "info"
-                        )
-                    except Exception as e:
-                        self.log(
-                            f"Warning: could not move the old settings aside: {e}",
-                            "warning",
-                        )
-
-                # Copy settings from source to target
-                self.update_progress_text("Copying Settings files...")
+                # Fill in only the settings files that are missing.
+                #
+                # The stock set is a seed for a fresh prefix. On a prefix that has
+                # been used this directory holds the user's own preferences and
+                # RecentFiles.xml, and replacing it wipes both. See _seed_settings.
+                self.update_progress_text("Installing Settings files...")
                 self.update_progress(0.7)
-                target_dir.parent.mkdir(parents=True, exist_ok=True)
-                self.log(f"Copying settings from repository to Wine prefix...", "info")
+                target_dir.mkdir(parents=True, exist_ok=True)
+                self.log("Installing stock settings, keeping any you already have...", "info")
                 self.log(f"  From: {settings_source}", "info")
                 self.log(f"  To: {target_dir}", "info")
 
-                # Copy with metadata preservation
-                shutil.copytree(settings_source, target_dir, dirs_exist_ok=True)
+                added, kept = self._seed_settings(settings_source, target_dir)
                 self.update_progress(0.9)
-                self.log(f"Settings copied successfully to: {target_dir}", "success")
 
-                # Verify the copy
-                copied_files = list(target_dir.rglob("*"))
-                source_files = list(settings_source.rglob("*"))
+                if kept:
+                    self.log(
+                        f"Kept {len(kept)} existing settings file(s) untouched "
+                        f"(your preferences and RecentFiles.xml are among them)",
+                        "success",
+                    )
                 self.log(
-                    f"Copied {len(copied_files)} file(s)/folder(s) (source had {len(source_files)})",
+                    f"Added {len(added)} missing settings file(s) to: {target_dir}",
                     "success",
                 )
-
-                # List some of the copied files for verification
-                xml_files = list(target_dir.rglob("*.xml"))
-                if xml_files:
-                    self.log(f"Found {len(xml_files)} XML file(s) in settings", "info")
-                    for xml_file in xml_files[:5]:  # Show first 5
-                        self.log(f"  - {xml_file.relative_to(target_dir)}", "info")
+                for rel in added[:5]:
+                    self.log(f"  + {rel}", "info")
 
                 # Set permissions (make sure files are readable)
                 try:
