@@ -11320,14 +11320,39 @@ class AffinityInstallerGUI(QMainWindow):
         before = len(list(winmetadata_dir.glob("*.winmd"))) if winmetadata_dir.exists() else 0
         kept_at = None
         if winmetadata_dir.exists():
+            # A second-resolution stamp collides when an install and an update
+            # land in the same second, and rename() onto an existing directory
+            # fails. Make it unique.
             stamp = time.strftime("%Y%m%d-%H%M%S")
             kept_at = system32_dir / f"WinMetadata.replaced-{stamp}"
+            n = 1
+            while kept_at.exists():
+                kept_at = system32_dir / f"WinMetadata.replaced-{stamp}.{n}"
+                n += 1
             try:
                 winmetadata_dir.rename(kept_at)
                 self.log(f"Existing WinMetadata ({before} files) kept at {kept_at.name}", "info")
             except Exception as e:
-                self.log(f"Warning: could not move the old folder aside: {e}", "warning")
-                kept_at = None
+                # Do NOT carry on. The 9.14/10.10 branch below rmtree's this
+                # directory, so falling through after a failed rename turns
+                # "moved aside, never removed" into exactly removal.
+                self.log(
+                    f"Could not move the existing WinMetadata aside: {e}. "
+                    "Stopping rather than risking the copy that is there.",
+                    "error",
+                )
+                return
+
+            # Prune. Nothing else ever removed these, and refresh_winmetadata
+            # runs on every update and every reinstall, so they accumulated one
+            # folder of winmds per run, forever.
+            backups = sorted(system32_dir.glob("WinMetadata.replaced-*"))
+            for stale in backups[:-3]:
+                try:
+                    shutil.rmtree(stale)
+                    self.log(f"Pruned old backup {stale.name}", "info")
+                except OSError:
+                    pass
 
         system32_dir.mkdir(parents=True, exist_ok=True)
 
@@ -16577,14 +16602,36 @@ Would you like to continue with {distro_name} anyway?"""
             if not ndp.exists():
                 self.log("Downloading the .NET Framework 4.8 redistributable...", "info")
                 cache.mkdir(parents=True, exist_ok=True)
-                urllib.request.urlretrieve(ndp_url, str(ndp))
+                # 72MB, written into winetricks' own cache. Download beside it
+                # and rename: urlretrieve straight onto the destination leaves a
+                # partial file on a dropped connection, and every later run then
+                # sees it exists, fails the same checksum, and refuses -- with no
+                # way out but deleting it by hand.
+                part = ndp.with_name(ndp.name + ".part")
+                try:
+                    with urllib.request.urlopen(ndp_url, timeout=300) as r, \
+                         open(part, "wb") as f:
+                        shutil.copyfileobj(r, f)
+                    os.replace(str(part), str(ndp))
+                finally:
+                    if part.exists():
+                        try:
+                            part.unlink()
+                        except OSError:
+                            pass
 
             digest = hashlib.sha256(ndp.read_bytes()).hexdigest()
             if digest != ndp_sha:
                 self.log(
-                    "Checksum mismatch on the .NET redistributable; refusing to use it",
+                    "Checksum mismatch on the .NET redistributable; refusing to use it "
+                    "and removing it, so the next run downloads it again rather than "
+                    "failing the same way",
                     "error",
                 )
+                try:
+                    ndp.unlink()
+                except OSError:
+                    pass
                 return
 
             with tempfile.TemporaryDirectory() as tmp:
@@ -16773,43 +16820,84 @@ Would you like to continue with {distro_name} anyway?"""
             except NameError:
                 pass
 
+            # Install under a name winemenubuilder will never generate. It
+            # writes x-wine-extension-<ext>.xml into this very directory for
+            # every association a prefix registers -- this machine already has
+            # x-wine-extension-crd.xml and x-wine-extension-application.xml --
+            # so sharing the scheme means one of us silently overwrites the
+            # other's file. The MIME type inside is what matters; the filename
+            # only has to be ours.
             for name in mime_names:
-                dest = mime_dir / name
+                dest = mime_dir / f"affinity-{name}"
+                part = dest.with_name(dest.name + ".part")
                 if local_mime_dir and (local_mime_dir / name).exists():
-                    shutil.copy2(local_mime_dir / name, dest)
+                    shutil.copy2(local_mime_dir / name, part)
                 else:
-                    urllib.request.urlretrieve(raw_base + name, str(dest))
+                    with urllib.request.urlopen(raw_base + name, timeout=60) as r, \
+                         open(part, "wb") as f:
+                        shutil.copyfileobj(r, f)
+                if part.stat().st_size == 0:
+                    part.unlink()
+                    raise RuntimeError(f"{name} downloaded empty")
+                os.replace(str(part), str(dest))
+                # A copy this installer wrote under the old colliding name is
+                # now a duplicate declaring the same type; drop it so the two
+                # cannot disagree after an edit.
+                old_style = mime_dir / name
+                if old_style.exists() and old_style.read_bytes() == dest.read_bytes():
+                    old_style.unlink()
 
-            subprocess.run(
-                ["update-mime-database", str(Path.home() / ".local" / "share" / "mime")],
-                check=False,
-                capture_output=True,
+            # Look at what these say. Every one of them ran with check=False and
+            # capture_output=True and nothing read either, so the success line
+            # below was printed whatever happened -- including when the MIME
+            # database had not been rebuilt and nothing was actually associated.
+            def tool(cmd):
+                r = subprocess.run(cmd, check=False, capture_output=True)
+                if r.returncode != 0:
+                    err = (r.stderr or b"").decode("utf-8", "replace").strip()
+                    self.log(
+                        f"{cmd[0]} exited {r.returncode}"
+                        + (f": {err.splitlines()[-1]}" if err else ""),
+                        "warning",
+                    )
+                return r.returncode == 0
+
+            mime_ok = tool(
+                ["update-mime-database", str(Path.home() / ".local" / "share" / "mime")]
             )
-            subprocess.run(
+            tool(
                 [
                     "update-desktop-database",
                     str(Path.home() / ".local" / "share" / "applications"),
-                ],
-                check=False,
-                capture_output=True,
+                ]
             )
+            associated = 0
             for mime in (
                 "application/af",
                 "application/afphoto",
                 "application/afdesign",
                 "application/afpub",
             ):
-                subprocess.run(
-                    ["xdg-mime", "default", "Affinity.desktop", mime],
-                    check=False,
-                    capture_output=True,
-                )
+                if tool(["xdg-mime", "default", "Affinity.desktop", mime]):
+                    associated += 1
             for cache in ("kbuildsycoca6", "kbuildsycoca5"):
                 if shutil.which(cache):
-                    subprocess.run([cache], check=False, capture_output=True)
+                    tool([cache])
                     break
 
-            self.log("Affinity documents can now be opened from the file manager", "success")
+            if mime_ok and associated:
+                self.log(
+                    "Affinity documents can now be opened from the file manager",
+                    "success",
+                )
+            else:
+                self.log(
+                    "Document types may not be registered: "
+                    f"mime database {'rebuilt' if mime_ok else 'NOT rebuilt'}, "
+                    f"{associated} of 4 associations set. Opening a document from "
+                    "the file manager may not work.",
+                    "warning",
+                )
         except Exception as e:
             self.log(f"Could not register Affinity document types: {e}", "warning")
 
