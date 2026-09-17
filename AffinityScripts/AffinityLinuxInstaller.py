@@ -236,6 +236,47 @@ ENV_INSTALL_DIR = "AFFINITY_INSTALL_DIR"
 ENV_INSTALLER_FILE = "AFFINITY_INSTALLER_FILE"
 
 
+def script_dir():
+    """The checkout directory this file was run from, or None if there is none.
+
+    The documented install is `curl ... | python3`, and there __file__ is not a
+    path. Python sets it to the literal string "<stdin>", so both spellings
+    used here before were wrong:
+
+      Path(__file__).parent          ->  Path(".")  -- the CURRENT DIRECTORY
+      Path(__file__).resolve().parent.parent  ->  the parent of it
+
+    which means the fast paths looked for icons, MIME definitions and
+    affinity-on-linux.exe in whatever directory the user happened to be
+    standing in when they ran the pipe. An `icons/` folder there was picked up
+    as if it were this project's; an `AffinityHandler/affinity-on-linux.exe`
+    there was copied into the prefix and run. The `except NameError` guards
+    written to cover the piped case never fired, because there is no NameError
+    to catch.
+
+    So the test is not "is __file__ defined" but "is it a file". Only a real
+    checkout is a fast path. Everything else downloads, which is what the piped
+    install has always actually been doing."""
+    try:
+        here = __file__
+    except NameError:                       # older Pythons leave it unset
+        return None
+    if not here or here.startswith("<"):    # "<stdin>", "<string>"
+        return None
+    try:
+        resolved = Path(here).resolve()
+    except (OSError, ValueError):
+        return None
+    return resolved.parent if resolved.is_file() else None
+
+
+def checkout_root():
+    """The repository this file sits in, or None. This file lives in
+    <root>/AffinityScripts, so the root is one level up."""
+    where = script_dir()
+    return where.parent if where else None
+
+
 def override_install_dir():
     """Prefix directory to install into, or None.
 
@@ -908,8 +949,9 @@ class AffinityInstallerGUI(QMainWindow):
         if base_icon_path.exists():
             return base_icon_path
 
-        local_icons_dir = Path(__file__).parent / "icons"
-        if local_icons_dir.exists():
+        here = script_dir()
+        local_icons_dir = (here / "icons") if here else None
+        if local_icons_dir and local_icons_dir.exists():
             local_themed_icon = local_icons_dir / f"{icon_name}-{theme_suffix}.svg"
             if local_themed_icon.exists():
                 return local_themed_icon
@@ -6444,9 +6486,11 @@ class AffinityInstallerGUI(QMainWindow):
             # Ensure icons directory exists
             icons_dir.mkdir(parents=True, exist_ok=True)
 
-            # Check if local icons directory exists and has icons (fast path)
-            local_icons_dir = Path(__file__).parent / "icons"
-            if local_icons_dir.exists():
+            # Check if local icons directory exists and has icons (fast path).
+            # Only a real checkout counts -- see script_dir().
+            here = script_dir()
+            local_icons_dir = (here / "icons") if here else None
+            if local_icons_dir and local_icons_dir.exists():
                 # If local icons exist, copy them quickly instead of downloading
                 try:
                     local_icons = list(local_icons_dir.glob("*.svg"))
@@ -15860,8 +15904,9 @@ Would you like to continue with {distro_name} anyway?"""
             }
 
             # First, try to copy from local repository if available
-            script_dir = Path(__file__).parent
-            source_patch_dir = script_dir.parent / "Patch" / "AffinityPatcherSettings"
+            root = checkout_root()
+            source_patch_dir = ((root / "Patch" / "AffinityPatcherSettings")
+                                if root else None)
 
             files_copied = False
             files_downloaded = False
@@ -16751,20 +16796,14 @@ Would you like to continue with {distro_name} anyway?"""
         )
 
         try:
-            # Same fast path as the icons: use the checkout when there is one, and
-            # download when this script was piped straight into python3, where
-            # __file__ does not exist.
+            # Same fast path as the icons: use the checkout when there is one,
+            # and download when this script was piped into python3.
             local_exe = None
-            try:
-                candidate = (
-                    Path(__file__).resolve().parent.parent
-                    / "AffinityHandler"
-                    / "affinity-on-linux.exe"
-                )
+            root = checkout_root()
+            if root:
+                candidate = root / "AffinityHandler" / "affinity-on-linux.exe"
                 if candidate.exists():
                     local_exe = candidate
-            except NameError:
-                pass
 
             if local_exe:
                 shutil.copy2(local_exe, dest)
@@ -16829,16 +16868,14 @@ Would you like to continue with {distro_name} anyway?"""
             mime_dir = Path.home() / ".local" / "share" / "mime" / "packages"
             mime_dir.mkdir(parents=True, exist_ok=True)
 
-            # Same fast path as the icons: use the checkout when the installer was
-            # run from one, and fall back to downloading when it was piped
-            # straight into python3, where __file__ does not exist.
+            # Same fast path as the icons: use the checkout when the installer
+            # was run from one, and download when it was piped into python3.
             local_mime_dir = None
-            try:
-                candidate = Path(__file__).resolve().parent.parent / "mime"
+            root = checkout_root()
+            if root:
+                candidate = root / "mime"
                 if candidate.is_dir():
                     local_mime_dir = candidate
-            except NameError:
-                pass
 
             # Install under a name winemenubuilder will never generate. It
             # writes x-wine-extension-<ext>.xml into this very directory for
