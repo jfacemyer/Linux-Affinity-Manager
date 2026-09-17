@@ -48,6 +48,17 @@ curl -sSL https://raw.githubusercontent.com/ryzendew/AffinityOnLinux/refs/heads/
 > Those three temporary URLs are listed, with what each must become before
 > merging, in [`AffinityHandler/README.md`](AffinityHandler/README.md#temporary-download-sources--must-be-repointed-before-merging).
 
+> **Several prefixes to keep track of?** [`AffinityManager/`](AffinityManager/README.md)
+> is optional and changes nothing about the above. The installer stays a single
+> file you run with `curl … | python3`; the manager is a separate window that
+> tracks a set of prefixes, hosts this installer as one of its pages, and keeps
+> two of them from provisioning at the same time. It needs PyQt6, which the
+> installer needs anyway.
+>
+> ```bash
+> ./AffinityManager/AffinityLinuxManager.py
+> ```
+
 <details>
 <summary><strong>Python GUI Dependencies</strong></summary>
 
