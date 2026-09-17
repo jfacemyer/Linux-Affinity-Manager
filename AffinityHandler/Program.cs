@@ -196,8 +196,19 @@ namespace AffinityOnLinux
             {
                 Log("clearing " + husks.Count + " husk process(es) left by a previous close");
                 foreach (Process h in husks)
-                    try { h.Kill(); } catch { }
-                Thread.Sleep(1500);
+                {
+                    // Wait for each one. A fixed sleep assumes the kill landed;
+                    // if it did not, Start() below adds a SECOND instance to a
+                    // still-running one, which is the thing this program exists
+                    // to prevent. Say so rather than continuing quietly.
+                    try
+                    {
+                        h.Kill();
+                        if (!h.WaitForExit(HuskKillWaitMs))
+                            Note("husk " + h.Id + " did not die; not starting a rival");
+                    }
+                    catch { }
+                }
             }
 
             Log("cold start: launcher=" + Path.GetFileName(launcher)
@@ -668,6 +679,9 @@ namespace AffinityOnLinux
         // will.
         private const int LiveThreadFloor = 40;
 
+        // How long to wait for a husk kill to land before saying so.
+        private const int HuskKillWaitMs = 10000;
+
         private static bool AnyLiveByThreads()
         {
             foreach (Process p in SafeGetProcesses("Affinity"))
@@ -704,8 +718,12 @@ namespace AffinityOnLinux
                 return false;
             }
 
+            // StartupGraceSeconds, not StallSeconds. This loop is what lets
+            // FindHusks call something a husk, so it has to outlast the window a
+            // start is allowed. At 45 against a 75s grace it gave up thirty
+            // seconds early and handed a starting Affinity over to be killed.
             Log("recently started processes with no window; waiting to see whether one is starting");
-            for (int i = 0; i < StallSeconds; i++)
+            for (int i = 0; i < StartupGraceSeconds; i++)
             {
                 Thread.Sleep(1000);
                 if (FindAffinityWindow() != IntPtr.Zero) return true;
@@ -749,21 +767,72 @@ namespace AffinityOnLinux
 
         // Husks left behind by a close. They hold Affinity's single-instance
         // registration, so a handoff reaches them instead of a live instance.
-        // Only ever called after IsAffinityRunning() has already waited out the
-        // startup window and concluded there is nothing alive here.
+        //
+        // This is the second of the two places that kill an Affinity, and it used
+        // to be the dangerous one. It took two GLOBAL tests -- FindAffinityWindow
+        // and AnyLiveByThreads -- and, if neither vouched for anything, returned
+        // EVERY Affinity and AffinityHook process for killing, with no per-process
+        // test at all. Two things were wrong with that:
+        //
+        //   * FindAffinityWindow is the rect test. It requires GetWindowRect to
+        //     report at least 600 pixels of width, and Affinity 3.3's main window
+        //     reports left = 22369618 and a NEGATIVE width under Wine. That test
+        //     is why the retry watchdog killed three live sessions (see RETIRED
+        //     above). Using it as the guard on a kill path repeated the mistake.
+        //   * the caller waited StallSeconds (45) before concluding nothing was
+        //     alive, while this file's own definition of a startup window is
+        //     StartupGraceSeconds (75). A genuine start could be declared a husk
+        //     thirty seconds before it was allowed to be.
+        //
+        // Now every candidate must clear the same bar the reaper uses: it owns no
+        // visible window, and it is older than a whole startup window. Anything
+        // that cannot be measured counts as alive. AnyLiveByThreads stays as a
+        // cheap global short-circuit, never as the deciding vote.
         private static List<Process> FindHusks()
         {
             var husks = new List<Process>();
-            if (FindAffinityWindow() != IntPtr.Zero) return husks;
             if (AnyLiveByThreads()) return husks;
+
             foreach (string name in new[] { "Affinity", "AffinityHook" })
-                husks.AddRange(SafeGetProcesses(name));
+                foreach (Process p in SafeGetProcesses(name))
+                {
+                    int pid;
+                    try { pid = p.Id; }
+                    catch { continue; }
+
+                    if (ProcessOwnsAVisibleWindow(pid))
+                    {
+                        Log("husk check: pid " + pid + " owns a visible window -- alive");
+                        continue;
+                    }
+
+                    double age;
+                    try { age = (DateTime.Now - p.StartTime).TotalSeconds; }
+                    catch
+                    {
+                        Log("husk check: pid " + pid + " has no readable start time -- assuming alive");
+                        continue;
+                    }
+
+                    if (age < StartupGraceSeconds)
+                    {
+                        Log("husk check: pid " + pid + " is " + (int)age + "s old, inside the "
+                            + StartupGraceSeconds + "s startup window -- assuming it is starting");
+                        continue;
+                    }
+
+                    husks.Add(p);
+                }
             return husks;
         }
 
+        // Only ever compared against LiveThreadFloor as PROOF OF LIFE, so a count
+        // that cannot be read must answer "alive". Returning 0 -- the obvious
+        // thing -- turns a failure to measure into proof of death, which is the
+        // one direction this file is not allowed to be wrong in.
         private static int ThreadCount(Process p)
         {
-            try { return p.Threads.Count; } catch { return 0; }
+            try { return p.Threads.Count; } catch { return int.MaxValue; }
         }
 
         private static Process[] SafeGetProcesses(string name)
