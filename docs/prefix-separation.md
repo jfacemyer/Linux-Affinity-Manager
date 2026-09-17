@@ -99,6 +99,8 @@ that has been shown.
 
 ## Removal plan
 
+**Built** — `affinity_manager/removal.py`, and `RemovalDialog`.
+
 Same shape as `maintenance.Plan`: computed, shown, and only then executed. Every
 row says what it is, where it is, how big it is, and why it is proposed.
 
@@ -117,6 +119,8 @@ Nothing is removed without the list having been shown. The confirmation is the
 list, not a yes/no on a summary.
 
 ## Settings snapshots
+
+**Built** — `affinity_manager/snapshots.py`, and `SnapshotsDialog`.
 
 A snapshot is the prefix's own configuration, not the prefix: the `Settings`
 directory, plus the loose `.dat` files beside it and `sess.db`.
