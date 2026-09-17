@@ -439,9 +439,16 @@ namespace AffinityOnLinux
         private static int ReapSpentInstances(bool dryRun)
         {
             DateTime exitedAt;
-            if (!TryReadLoggedExit(out exitedAt))
+            string why;
+            if (!TryReadLoggedExit(out exitedAt, out why))
             {
-                Log("reaper: the app log records no Exit -- nothing here can be spent");
+                // Say WHICH of these it was. One of these refusals was seen once
+                // and could not be reproduced -- six consecutive runs against the
+                // same corpse then succeeded -- and with a single message there
+                // was no way to tell a missing log from an unreadable one from a
+                // log with no Exit in it. The refusal is fail-safe either way: it
+                // declines to reap, it never kills on a bad read.
+                Log("reaper: " + why + " -- nothing here can be spent");
                 return 0;
             }
 
@@ -579,12 +586,12 @@ namespace AffinityOnLinux
 
         // The last "Exit" the application logged. The line looks like
         //     [2026-09-17T08:28:05.182-04:00] Exit
-        private static bool TryReadLoggedExit(out DateTime when)
+        private static bool TryReadLoggedExit(out DateTime when, out string why)
         {
             when = DateTime.MinValue;
 
             string log = FindAppLog();
-            if (log == null) return false;
+            if (log == null) { why = "no app log found under %APPDATA%"; return false; }
 
             string last = null;
             try
@@ -598,18 +605,23 @@ namespace AffinityOnLinux
                         if (line.IndexOf("] Exit", StringComparison.Ordinal) > 0) last = line;
                 }
             }
-            catch { return false; }
+            catch (Exception e) { why = "could not read " + log + " (" + e.Message + ")"; return false; }
 
-            if (last == null || last.Length == 0 || last[0] != '[') return false;
+            if (last == null) { why = "the app log records no Exit"; return false; }
+            if (last.Length == 0 || last[0] != '[') { why = "the Exit line has no timestamp"; return false; }
             int close = last.IndexOf(']');
-            if (close < 2) return false;
+            if (close < 2) { why = "the Exit line has no timestamp"; return false; }
 
             DateTimeOffset stamp;
             if (!DateTimeOffset.TryParse(last.Substring(1, close - 1), CultureInfo.InvariantCulture,
                                          DateTimeStyles.RoundtripKind, out stamp))
+            {
+                why = "could not parse the Exit stamp " + last.Substring(1, close - 1);
                 return false;
+            }
 
             when = stamp.LocalDateTime;
+            why = null;
             return true;
         }
 
