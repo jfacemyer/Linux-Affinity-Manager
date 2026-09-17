@@ -1,5 +1,10 @@
 // affinity-on-linux.exe -- open documents in Affinity from a Linux file manager.
 //
+// SOURCE OF TRUTH: affinity-linux/src/affinity-on-linux/Program.cs. The copy in
+// AffinityOnLinux/AffinityHandler/ is what the installer ships and is synced from
+// there. Edit one place: they drifted once, by 511 lines, and the shipped copy
+// kept a watchdog that killed live sessions.
+//
 // Replaces the affinity-open shell script. Set it as the .desktop Exec target:
 //
 //     Exec=<wine> "C:\Program Files\Affinity\Affinity\affinity-on-linux.exe" %F
@@ -18,6 +23,15 @@
 //     and lets Affinity's own single-instance handoff forward it
 //   * cold: goes through AffinityHook.exe when it is installed, so plugins load,
 //     and watches for the intermittent startup deadlock
+//   * clears a shutdown zombie first -- an Affinity 3.3 that logged "Exit" and
+//     then deadlocked in libnetwork.dll's process detach. See THE SHUTDOWN
+//     ZOMBIE below; it is why a launch can appear to do nothing at all.
+//
+// It also answers two subcommands, for when you want the reaper without a
+// launch:
+//
+//     affinity-on-linux.exe --reap            clear a spent leftover now
+//     affinity-on-linux.exe --reap-dry-run    say what that would do, kill nothing
 //
 // WHY WARM SKIPS AffinityHook.exe
 //
@@ -41,6 +55,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
@@ -83,6 +98,14 @@ namespace AffinityOnLinux
 
         private static int Run(string[] args)
         {
+            if (args.Length == 1 && (args[0] == "--reap" || args[0] == "--reap-dry-run"))
+            {
+                bool dryRun = args[0] == "--reap-dry-run";
+                int n = ReapSpentInstances(dryRun);
+                Log("reaper: " + n + (dryRun ? " process(es) would be reaped" : " process(es) reaped"));
+                return 0;
+            }
+
             string dir = FindAffinityDirectory();
             if (dir == null)
             {
@@ -107,6 +130,15 @@ namespace AffinityOnLinux
                 docs.Add(dos);
             }
             if (args.Length > 0 && docs.Count == 0) return failed;
+
+            // Clear a corpse BEFORE asking whether Affinity is running. A process
+            // that logged "Exit" and then hung still answers "running", and it
+            // cannot take a handoff -- so without this every launch is handed to
+            // a dead instance and silently does nothing. This supersedes
+            // FindHusks() for the 3.3 zombie: the log is evidence, a thread count
+            // is a guess. FindHusks stays as the fallback for a process that left
+            // no "Exit" behind, such as one that crashed.
+            ReapSpentInstances(false);
 
             if (IsAffinityRunning())
             {
@@ -171,34 +203,79 @@ namespace AffinityOnLinux
             Log("cold start: launcher=" + Path.GetFileName(launcher)
                 + " twoStage=" + needsTwoStage + " args=[" + arguments + "]");
 
-            for (int attempt = 1; attempt <= MaxTries; attempt++)
+            Process child = Start(launcher, arguments);
+            if (child == null) { Note("could not start " + launcher); return false; }
+
+            // The two-stage handoff has nothing to hand to until the window is
+            // up, so this path still waits for one. It no longer kills anything
+            // if the window never appears -- hand the document over regardless
+            // and let Affinity deal with it.
+            if (needsTwoStage)
             {
-                Process child = Start(launcher, arguments);
-                if (child == null) { Note("could not start " + launcher); return false; }
-
-                int outcome = WaitForStartup(child);
-                if (outcome == 1)
+                if (WaitForStartup(child) != 1)
+                    Note("no window after " + StallSeconds + "s; handing the document over anyway");
+                foreach (string d in docs)
                 {
-                    if (attempt > 1) Note("started on attempt " + attempt);
-                    if (needsTwoStage)
-                        foreach (string d in docs)
-                        {
-                            Log("cold two-stage handoff: " + d);
-                            HandOff(affinity, d, 3);
-                        }
-                    return true;
+                    Log("cold two-stage handoff: " + d);
+                    HandOff(affinity, d, 3);
                 }
-
-                Note(outcome == 2
-                    ? "exited during startup (attempt " + attempt + "/" + MaxTries + ") -- retrying"
-                    : "startup stalled (attempt " + attempt + "/" + MaxTries + ") -- retrying");
-                KillAffinity(child);
             }
-
-            Note("failed to start after " + MaxTries + " attempts; launching without the watchdog");
-            Start(launcher, arguments);
             return true;
         }
+
+        // RETIRED 2026-09-16 -- the retry watchdog, kept for reference.
+        //
+        // It was written for a startup deadlock that was real when it was
+        // measured: roughly one launch in three stalled during initialisation,
+        // vkd3d-proton creating the D3D12 device and then nothing, and a fresh
+        // launch always cleared it. bin/affinity-launch carries the numbers.
+        //
+        // It is retired because it stopped catching that and started causing
+        // harm. Every stall it has ever logged is in one prefix and on one day,
+        // and each time it failed all three attempts and gave up -- which an
+        // intermittent one-in-three hang does with probability 0.037, twice in
+        // a day with probability 0.0014. It was not detecting a hang. It was
+        // failing to recognise a window that was up, because FindAffinityWindow
+        // requires GetWindowRect to report at least 600 pixels of width and
+        // Affinity 3.3's main window reported left = 22369618 and a NEGATIVE
+        // width, while X reported a perfectly sane 3850x2101 for the same
+        // window. So it killed a running Affinity the user was working in,
+        // three times over, at exactly StallSeconds each.
+        //
+        // Score at retirement: 31 recorded cold starts in the working prefix
+        // with zero stalls, against at least two live sessions killed. If the
+        // old hang ever returns, bring this back -- but fix the detection
+        // first: do not trust the rect, and re-check that Affinity really is
+        // not running before killing anything.
+        //
+        //     for (int attempt = 1; attempt <= MaxTries; attempt++)
+        //     {
+        //         Process child = Start(launcher, arguments);
+        //         if (child == null) { Note("could not start " + launcher); return false; }
+        //
+        //         int outcome = WaitForStartup(child);
+        //         if (outcome == 1)
+        //         {
+        //             if (attempt > 1) Note("started on attempt " + attempt);
+        //             if (needsTwoStage)
+        //                 foreach (string d in docs)
+        //                 {
+        //                     Log("cold two-stage handoff: " + d);
+        //                     HandOff(affinity, d, 3);
+        //                 }
+        //             return true;
+        //         }
+        //
+        //         Note(outcome == 2
+        //             ? "exited during startup (attempt " + attempt + "/" + MaxTries + ") -- retrying"
+        //             : "startup stalled (attempt " + attempt + "/" + MaxTries + ") -- retrying");
+        //         KillAffinity(child);
+        //     }
+        //
+        //     Note("failed to start after " + MaxTries + " attempts; launching without the watchdog");
+        //     Start(launcher, arguments);
+        //     return true;
+
 
         // Hand a document over and confirm it arrived.
         //
@@ -213,10 +290,49 @@ namespace AffinityOnLinux
         // that file is the answer. Where one already exists -- a crash leaves
         // them behind -- there is nothing to watch for, and the handoff is made
         // once without confirmation rather than guessing.
-        private static bool HandOff(string affinity, string doc, int tries)
+        // Is this document open? Affinity marks one with a "<doc>~lock~" sidecar
+        // -- and then sets a Dropbox "ignore" attribute on that sidecar, which is
+        // an NTFS alternate data stream. Wine materialises a stream as a separate
+        // file named "<name>:<stream>", so what is actually on disk beside an open
+        // document is
+        //
+        //     <doc>~lock~:com.dropbox.ignored
+        //
+        // and no plain "<doc>~lock~" at all. Measured across this machine: 193
+        // files match "*~lock~*" and exactly one matches "*~lock~".
+        //
+        // So File.Exists(doc + "~lock~") answers "no" for a document that is open
+        // on screen. The handoff was retried until it ran out of attempts -- each
+        // retry asking Affinity to open the document again -- and the user was
+        // told "Affinity did not open <doc>" while looking at it.
+        //
+        // A stale marker (Wine leaves these behind when the base file goes) then
+        // reads as "already open", which is the case HandOff already handles by
+        // making one handoff and not retrying.
+        //
+        // The directory is listed rather than globbed: ":" is not legal in a
+        // search pattern and throws.
+        private static bool LockPresent(string doc)
         {
             string lockFile = doc + "~lock~";
-            bool preexisting = File.Exists(lockFile);
+            if (File.Exists(lockFile)) return true;
+
+            try
+            {
+                string dir = Path.GetDirectoryName(lockFile);
+                if (dir == null) return false;
+                string prefix = Path.GetFileName(lockFile) + ":";
+                foreach (string f in Directory.GetFiles(dir))
+                    if (Path.GetFileName(f).StartsWith(prefix, StringComparison.Ordinal))
+                        return true;
+            }
+            catch { }
+            return false;
+        }
+
+        private static bool HandOff(string affinity, string doc, int tries)
+        {
+            bool preexisting = LockPresent(doc);
 
             for (int attempt = 1; attempt <= tries; attempt++)
             {
@@ -226,7 +342,7 @@ namespace AffinityOnLinux
                 for (int i = 0; i < 20; i++)
                 {
                     Thread.Sleep(1000);
-                    if (File.Exists(lockFile))
+                    if (LockPresent(doc))
                     {
                         if (attempt > 1) Log("opened on attempt " + attempt);
                         return true;
@@ -255,13 +371,251 @@ namespace AffinityOnLinux
         // Only ever this prefix's processes: inside Wine, Process.GetProcesses()
         // cannot see anything else. That is also why this program can never fall
         // into the `pgrep -f Affinity.exe matches my own shell` trap.
-        private static void KillAffinity(Process child)
+        // RETIRED with the watchdog above -- nothing calls this now.
+        // private static void KillAffinity(Process child)
+        // {
+        //     try { if (!child.HasExited) child.Kill(); } catch { }
+        //     foreach (string name in new[] { "Affinity", "AffinityHook" })
+        //         foreach (Process p in SafeGetProcesses(name))
+        //             try { p.Kill(); } catch { }
+        //     Thread.Sleep(2000);
+        // }
+
+        // ------------------------------------------------------------- the reaper
+
+        // THE SHUTDOWN ZOMBIE
+        //
+        // Affinity 3.3 does not exit. It closes its windows, flushes its
+        // settings, logs "Exit" -- and then deadlocks in libnetwork.dll's
+        // DllMain(DLL_PROCESS_DETACH) and sits there with ~2GB resident and 0%
+        // CPU until the machine reboots. IsAffinityRunning() answers "running"
+        // for that corpse, and the corpse cannot take a handoff, so every launch
+        // after it is handed over and appears to do nothing at all. "Affinity
+        // won't start" is nearly always this.
+        //
+        // 3.2.3 does not do it. WINEDEBUG=+module prints a CALL and a RETURN
+        // around every DllMain: 3.2.3 gives 517 detach calls and 517 returns,
+        // 3.3.0.4850 gives 190 and 189, and the missing return is libnetwork's.
+        // It is Affinity's own DLL and no Wine-side setting influences it. Full
+        // workings, and three explanations that fit and are wrong, in
+        // docs/shutdown-zombie-libnetwork.md.
+        //
+        // Killing such a process loses nothing. Settings\*.xml, studios3.dat,
+        // sess.db, preferences.dat and the IPC shutdown all complete BEFORE the
+        // hang, and the "Exit" line is written 0.2-1s after them. "Exit" is the
+        // application's own statement that it has finished.
+        //
+        // A process is spent only if ALL THREE of these hold:
+        //
+        //   1. it is an Affinity.exe. Running inside the prefix,
+        //      Process.GetProcessesByName sees only this prefix's processes --
+        //      so unlike a host-side reaper there is no WINEPREFIX to parse and
+        //      no way to stray into another prefix. The condition is structural.
+        //   2. it owns no visible top-level window. Invisible ones outlive the
+        //      UI -- see ProcessOwnsAVisibleWindow for what a corpse still holds.
+        //   3. the app log records "Exit" at or after the moment that process
+        //      started.
+        //
+        // Condition 3 is the one that is easy to leave out and expensive to get
+        // wrong. Log.txt is truncated at startup, so a running instance has no
+        // "Exit" in it at all -- but between a process appearing and the log
+        // being rewritten, the PREVIOUS run's "Exit" is still on disk and the new
+        // process has no window yet. Conditions 1 and 2 alone kill a healthy
+        // Affinity during its own startup.
+        //
+        // It also makes the two-process case come out right on its own: with a
+        // corpse and a live instance side by side, the corpse started before the
+        // logged "Exit" and the live one after it, so exactly the corpse is
+        // reaped. That only holds because reaping happens BEFORE anything is
+        // started -- a new Affinity truncates Log.txt and takes the evidence
+        // with it.
+        //
+        // Everything undeterminable -- an unreadable log, an unparseable stamp,
+        // a process that will not give its start time -- counts as "leave it
+        // alone".
+
+        private const int ReapWaitMs = 10000;   // for the kill to take effect
+
+        private static int ReapSpentInstances(bool dryRun)
         {
-            try { if (!child.HasExited) child.Kill(); } catch { }
-            foreach (string name in new[] { "Affinity", "AffinityHook" })
-                foreach (Process p in SafeGetProcesses(name))
-                    try { p.Kill(); } catch { }
-            Thread.Sleep(2000);
+            DateTime exitedAt;
+            if (!TryReadLoggedExit(out exitedAt))
+            {
+                Log("reaper: the app log records no Exit -- nothing here can be spent");
+                return 0;
+            }
+
+            int reaped = 0;
+            foreach (Process p in SafeGetProcesses("Affinity"))
+            {
+                int pid;
+                try { pid = p.Id; }
+                catch { continue; }
+
+                if (ProcessOwnsAVisibleWindow(pid))
+                {
+                    Log("reaper: pid " + pid + " owns a visible window -- leaving it alone");
+                    continue;
+                }
+
+                DateTime startedAt;
+                try { startedAt = p.StartTime; }
+                catch (Exception e)
+                {
+                    Log("reaper: pid " + pid + " start time unreadable (" + e.Message + ") -- leaving it alone");
+                    continue;
+                }
+
+                if (exitedAt < startedAt)
+                {
+                    Log("reaper: pid " + pid + " started at " + Stamp(startedAt) + ", after the Exit at "
+                        + Stamp(exitedAt) + " -- it is still starting up, leaving it alone");
+                    continue;
+                }
+
+                if (dryRun)
+                {
+                    Log("reaper: would reap pid " + pid + " -- no windows, started " + Stamp(startedAt)
+                        + ", logged Exit " + Stamp(exitedAt));
+                    reaped++;
+                    continue;
+                }
+
+                Note("clearing a leftover Affinity (pid " + pid + ") that logged Exit and then failed to leave");
+                try
+                {
+                    // WaitForExit returning true is the in-prefix truth: the
+                    // wineserver has released the process and Affinity's
+                    // singleton is free, which is all the next launch needs. The
+                    // underlying Unix task can linger a moment longer -- it is
+                    // blocked in a futex inside a DllMain, and that is the whole
+                    // bug -- so a check made immediately afterwards from outside
+                    // the prefix can still see it. Measured: gone within seconds.
+                    p.Kill();
+                    if (p.WaitForExit(ReapWaitMs)) reaped++;
+                    else Note("pid " + pid + " did not die within " + (ReapWaitMs / 1000) + "s");
+                }
+                catch (Exception e)
+                {
+                    Note("could not clear pid " + pid + ": " + e.Message);
+                }
+            }
+            return reaped;
+        }
+
+        // Does this process own a VISIBLE top-level window?
+        //
+        // Deliberately not FindAffinityWindow(). That one requires GetWindowRect
+        // to report at least 600 pixels of width, and Affinity 3.3's main window
+        // reports left = 22369618 and a NEGATIVE width under Wine while X reports
+        // a perfectly sane 3850x2101 for the same window. Trusting the rect is
+        // exactly what made the retired watchdog kill three live sessions.
+        //
+        // Nor is it "any window at all", which was the first attempt here and is
+        // useless: measured against a real corpse, a spent Affinity still owns
+        // three top-level windows, all of them invisible infrastructure that
+        // outlives the UI --
+        //
+        //     .NET-BroadcastEventWindow.4.0.0.0.<hash>   WPF's message sink
+        //     "Wine IME"          1x1
+        //     "Default IME"       1x1
+        //
+        // -- so that test never reaps anything. WS_VISIBLE is what separates
+        // them: the same measurement on a healthy instance shows a visible
+        // HwndWrapper[Affinity.exe;;<guid>], and a corpse shows none.
+        //
+        // Visibility, not a title and not a size. The healthy window measured
+        // here was UNTITLED (587x450, the welcome window), so requiring a title
+        // would have called a live session spent. A minimised or off-desktop
+        // window keeps WS_VISIBLE, so neither of those is mistaken for a corpse
+        // either. And a process in the first seconds of startup, before its
+        // first window is shown, is covered by condition 3 rather than this one.
+        //
+        // A failed enumeration counts as "yes, it has one".
+        private static bool ProcessOwnsAVisibleWindow(int pid)
+        {
+            bool found = false;
+            bool complete = EnumWindows((hwnd, lp) =>
+            {
+                if (!IsWindowVisible(hwnd)) return true;
+                int owner;
+                GetWindowThreadProcessId(hwnd, out owner);
+                if (owner != pid) return true;
+                found = true;
+                return false;               // stop; one is enough
+            }, IntPtr.Zero);
+
+            // EnumWindows returns false both when the callback stopped it and
+            // when it failed. Only the second is ambiguous, and it must not read
+            // as "this process has no windows".
+            if (!complete && !found) return true;
+            return found;
+        }
+
+        // %APPDATA%\Affinity\Affinity\<version>\Log.txt. The version folder is
+        // 3.0 today and will not always be, so take the most recently written.
+        private static string FindAppLog()
+        {
+            try
+            {
+                string root = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                    "Affinity", "Affinity");
+                if (!Directory.Exists(root)) return null;
+
+                string newest = null;
+                DateTime newestAt = DateTime.MinValue;
+                foreach (string dir in Directory.GetDirectories(root))
+                {
+                    string log = Path.Combine(dir, "Log.txt");
+                    if (!File.Exists(log)) continue;
+                    DateTime at = File.GetLastWriteTime(log);
+                    if (newest == null || at > newestAt) { newest = log; newestAt = at; }
+                }
+                return newest;
+            }
+            catch { return null; }
+        }
+
+        // The last "Exit" the application logged. The line looks like
+        //     [2026-09-17T08:28:05.182-04:00] Exit
+        private static bool TryReadLoggedExit(out DateTime when)
+        {
+            when = DateTime.MinValue;
+
+            string log = FindAppLog();
+            if (log == null) return false;
+
+            string last = null;
+            try
+            {
+                // Share it: a running Affinity holds this file open for writing.
+                using (var fs = new FileStream(log, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                using (var reader = new StreamReader(fs))
+                {
+                    string line;
+                    while ((line = reader.ReadLine()) != null)
+                        if (line.IndexOf("] Exit", StringComparison.Ordinal) > 0) last = line;
+                }
+            }
+            catch { return false; }
+
+            if (last == null || last.Length == 0 || last[0] != '[') return false;
+            int close = last.IndexOf(']');
+            if (close < 2) return false;
+
+            DateTimeOffset stamp;
+            if (!DateTimeOffset.TryParse(last.Substring(1, close - 1), CultureInfo.InvariantCulture,
+                                         DateTimeStyles.RoundtripKind, out stamp))
+                return false;
+
+            when = stamp.LocalDateTime;
+            return true;
+        }
+
+        private static string Stamp(DateTime t)
+        {
+            return t.ToString("HH:mm:ss", CultureInfo.InvariantCulture);
         }
 
         // -------------------------------------------------------------- helpers
@@ -512,6 +866,7 @@ namespace AffinityOnLinux
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
         private static extern int GetWindowTextW(IntPtr hwnd, StringBuilder buf, int max);
         [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr hwnd, out RECT r);
+        [DllImport("user32.dll")] private static extern int GetWindowThreadProcessId(IntPtr hwnd, out int pid);
 
         [StructLayout(LayoutKind.Sequential)]
         private struct RECT { public int Left, Top, Right, Bottom; }
