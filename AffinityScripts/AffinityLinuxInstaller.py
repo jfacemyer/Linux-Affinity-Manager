@@ -11057,6 +11057,24 @@ class AffinityInstallerGUI(QMainWindow):
         installs OpenCL packages and vkd3d-proton, which is a different thing
         from letting Affinity load opencl.dll and hang."""
         if not self.wine_deadlocks_on_opencl(wine_version):
+            # Remove it rather than just not adding it. The override is written
+            # into the prefix registry, and the version-switch path swaps only
+            # the Wine directory -- so moving to a build that predates the
+            # regression left opencl disabled forever, with no way back short
+            # of editing the registry by hand.
+            try:
+                wine = self.get_wine_path("wine")
+                if wine.exists():
+                    env = os.environ.copy()
+                    env["WINEPREFIX"] = self.directory
+                    subprocess.run(
+                        [str(wine), "reg", "delete",
+                         "HKCU\\Software\\Wine\\DllOverrides", "/v", "opencl", "/f"],
+                        env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        timeout=120, check=False,
+                    )
+            except Exception:
+                pass
             return False
         try:
             wine = self.get_wine_path("wine")
@@ -13955,14 +13973,18 @@ Would you like to continue with {distro_name} anyway?"""
                 for rel in added[:5]:
                     self.log(f"  + {rel}", "info")
 
-                # Set permissions (make sure files are readable)
+                # Permissions on the files we added, and nothing else. Walking
+                # target_dir chmod'd every settings file in the prefix --
+                # including the ones _seed_settings had just deliberately left
+                # alone, three lines after logging that they were untouched.
                 try:
-                    for root, dirs, files in os.walk(target_dir):
-                        for d in dirs:
-                            os.chmod(os.path.join(root, d), 0o755)
-                        for f in files:
-                            os.chmod(os.path.join(root, f), 0o644)
-                    self.log("File permissions set correctly", "success")
+                    os.chmod(target_dir, 0o755)
+                    for rel in added:
+                        path = target_dir / rel
+                        os.chmod(path, 0o755 if path.is_dir() else 0o644)
+                    self.log(
+                        f"Permissions set on the {len(added)} file(s) added", "success"
+                    )
                 except Exception as e:
                     self.log(f"Note: Could not set permissions: {e}", "warning")
 
@@ -18445,6 +18467,11 @@ Would you like to continue with {distro_name} anyway?"""
             # future launch should fall back to the default ~/.AffinityLinux.
             self._clear_persisted_install_location()
             self.directory = str(Path.home() / ".AffinityLinux")
+            # And drop the pin. Leaving _forced_directory set meant the next
+            # install in the same window skipped the custom-location prompt
+            # entirely and landed on ~/.AffinityLinux -- the working prefix --
+            # without asking.
+            self._forced_directory = None
 
             self.show_message(
                 "Uninstall Complete",
