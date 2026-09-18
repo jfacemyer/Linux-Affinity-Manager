@@ -19544,9 +19544,23 @@ def kill_stalled_wine_processes(prefix=None):
 
     Now each candidate has to name the target prefix in its own environment, and
     if the target prefix has a live Affinity in it nothing is killed at all --
-    the point is to clear a stall, not to end a session."""
-    target = prefix or cleanup_target_prefix()
+    the point is to clear a stall, not to end a session.
 
+    Returns the lines it would have printed, so a caller that is not a terminal
+    can put them where its user will see them. main() prints them; the manager
+    puts them in that prefix's log. It used to print unconditionally, which
+    meant the hosted installer had to redirect sys.stdout -- process-wide, and
+    therefore capturing whatever other threads happened to write at the same
+    moment."""
+    # Resolved, because _prefix_of_pid resolves what it reads out of
+    # /proc/<pid>/environ. Comparing a resolved path with an unresolved one
+    # never matches, so with ~/.AffinityLinux reached through any symlinked
+    # component this found nothing, killed nothing, and cheerfully reported
+    # "no stale Wine processes - starting clean".
+    target = os.path.realpath(os.path.expanduser(
+        prefix or cleanup_target_prefix()))
+
+    said = []
     live = []
     stale = []
     for entry in os.listdir("/proc"):
@@ -19566,22 +19580,23 @@ def kill_stalled_wine_processes(prefix=None):
             stale.append((pid, comm))
 
     if live:
-        print(
+        said.append(
             f"[Cleanup] Affinity is running in {target} (pid {live[0]}) - "
             "leaving its Wine processes alone. Close it before installing."
         )
-        return
+        return said
 
     if not stale:
-        print(f"[Cleanup] No stale Wine processes in {target} - starting clean")
-        return
+        said.append(f"[Cleanup] No stale Wine processes in {target} - starting clean")
+        return said
 
     for pid, comm in stale:
         try:
             os.kill(pid, signal.SIGKILL)
-            print(f"[Cleanup] Killed leftover {comm} (pid {pid}) in {target}")
+            said.append(f"[Cleanup] Killed leftover {comm} (pid {pid}) in {target}")
         except OSError:
             pass
+    return said
 
 
 def parse_overrides(argv):
@@ -19650,7 +19665,8 @@ def main():
         )
         return
 
-    kill_stalled_wine_processes()
+    for line in kill_stalled_wine_processes() or []:
+        print(line)
 
     # Enable proper HiDPI / fractional display scaling support
     try:
