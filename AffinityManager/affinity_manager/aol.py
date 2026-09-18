@@ -58,17 +58,45 @@ class NotAvailable(RuntimeError):
     """The installer could not be loaded, and the manager should say why."""
 
 
+class NeedsRestart(NotAvailable):
+    """A different installer was chosen after one had already been loaded.
+
+    Not a failure so much as a limit. The module is cached because loading it
+    twice would build a second set of Qt classes with the same names, and
+    nothing good comes of two AffinityInstallerGUI types in one process --
+    isinstance checks stop agreeing, stylesheets attach to the wrong class,
+    and the second import re-runs 19,000 lines of module-level code.
+
+    So a change of installer path is honoured at the next start, and said out
+    loud. Before this, Settings reported the new path everywhere while the
+    manager went on running the old one -- the one thing the installer
+    reporting exists to prevent."""
+
+
 def module(script: Path | None = None):
     """The installer, imported. Cached: loading twice would build a second set
-    of Qt classes with the same names, and no good comes of that."""
+    of Qt classes with the same names, and no good comes of that.
+
+    If the resolved path has changed since the cached one was loaded -- the
+    user picked a different installer in Settings, or fetched the managed
+    checkout -- this raises NeedsRestart rather than quietly continuing to run
+    the old one."""
     global _module, _source
-    if _module is not None:
-        return _module
 
     try:
         path = installer.check_installer(script)
     except Exception as exc:                      # InstallerNotFound/TooOld
+        if _module is not None:
+            return _module            # a loaded installer beats a broken path
         raise NotAvailable(str(exc)) from exc
+
+    if _module is not None:
+        if _source is not None and path.resolve() != _source.resolve():
+            raise NeedsRestart(
+                f"{path} was chosen, but {_source} is already loaded and cannot "
+                "be swapped out while the application is running. Restart the "
+                "manager to use the new one.")
+        return _module
 
     spec = importlib.util.spec_from_file_location(MODULE_NAME, path)
     if spec is None or spec.loader is None:

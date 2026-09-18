@@ -210,10 +210,31 @@ class Registry:
 
     # ── mutation ─────────────────────────────────────────────────────────────
 
+    def _check_slug(self, name: str, *, allow=None) -> None:
+        """Two names must not reduce to one directory name.
+
+        dir_name() substitutes rather than strips, so "Affinity 33" and
+        "Affinity_33" are different names that produce the SAME slug -- and the
+        slug is what names this prefix's snapshots directory, its log file, its
+        MIME package and its icon. Removing one of the two would delete the
+        other's, which is the collision every other check here exists to
+        prevent, reached by the one route nothing was checking."""
+        slug = dir_name(name).lower()
+        for entry in self.entries:
+            if allow is not None and entry["name"] == allow:
+                continue
+            if dir_name(entry["name"]).lower() == slug:
+                raise DuplicateName(
+                    f"{name!r} and {entry['name']!r} both become {dir_name(name)!r}, "
+                    "which is the directory name used for snapshots, logs and "
+                    "menu entries. Pick a name that differs by more than "
+                    "punctuation.")
+
     def add(self, name: str, path, *, installer_file=None, notes="") -> dict:
         name = validate_name(name)
         if self.by_name(name):
             raise DuplicateName(f"A prefix named {name!r} is already managed.")
+        self._check_slug(name)
         resolved = Path(path).expanduser()
         if self.by_path(resolved):
             raise PathInUse(f"{resolved} is already managed.")
@@ -260,6 +281,7 @@ class Registry:
         clash = self.by_name(new)
         if clash and clash is not entry:
             raise DuplicateName(f"A prefix named {new!r} is already managed.")
+        self._check_slug(new, allow=old)
         entry["name"] = new
         self.save()
         return entry

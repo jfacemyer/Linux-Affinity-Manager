@@ -70,6 +70,21 @@ def _data_home() -> Path:
     return Path(value).expanduser() if value else Path.home() / ".local" / "share"
 
 
+def _config_home() -> Path:
+    value = os.environ.get("XDG_CONFIG_HOME", "").strip()
+    return Path(value).expanduser() if value else Path.home() / ".config"
+
+
+def mimeapps_files() -> list[Path]:
+    """Where a default handler is actually recorded.
+
+    The current location and the one that still works. xdg-mime writes the
+    first; plenty of systems have the second from older tools, and a stale
+    entry there wins on some desktops, so both are read and both are cleaned."""
+    return [_config_home() / "mimeapps.list",
+            _data_home() / "applications" / "mimeapps.list"]
+
+
 def applications_dir() -> Path:
     return desktopentry.applications_dir()
 
@@ -293,6 +308,63 @@ def delete(artifact: Artifact, *, force: bool = False) -> Path | None:
     kept = registry.aside_path(artifact.path)
     artifact.path.rename(kept)
     return kept
+
+
+def clear_handlers(entry_name: str, types=DOCUMENT_TYPES) -> list[str]:
+    """Stop these document types being opened by one .desktop entry.
+
+    There is no `xdg-mime unset`. Setting a default is a command; removing one
+    is editing the file the command writes, so that is what this does -- the
+    [Default Applications] section of mimeapps.list, dropping this entry from
+    each type's list and dropping the line when nothing is left.
+
+    This matters at removal time. Deleting a prefix whose entry holds the
+    association leaves mimeapps.list naming a .desktop that no longer exists,
+    and the symptom is that double-clicking a document does nothing at all,
+    with nothing to indicate why.
+
+    Only lines naming this entry are touched, so a type somebody else's
+    application holds is left exactly as it was."""
+    changed: list[str] = []
+    wanted = set(types)
+
+    for path in mimeapps_files():
+        try:
+            lines = path.read_text().splitlines()
+        except OSError:
+            continue
+
+        out, section, edited = [], "", False
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("[") and stripped.endswith("]"):
+                section = stripped
+                out.append(line)
+                continue
+            if section != "[Default Applications]" or "=" not in line:
+                out.append(line)
+                continue
+            mime, _, value = line.partition("=")
+            if mime.strip() not in wanted:
+                out.append(line)
+                continue
+            kept = [e for e in value.split(";") if e.strip() and e.strip() != entry_name]
+            if len(kept) == len([e for e in value.split(";") if e.strip()]):
+                out.append(line)                    # this entry was not named
+                continue
+            edited = True
+            if kept:
+                out.append("%s=%s;" % (mime.strip(), ";".join(kept)))
+                changed.append("%s no longer opens with %s" % (mime.strip(), entry_name))
+            else:
+                changed.append("%s has no default handler now" % mime.strip())
+
+        if edited:
+            try:
+                path.write_text("\n".join(out) + "\n")
+            except OSError as exc:
+                changed.append("could not rewrite %s: %s" % (path, exc))
+    return changed
 
 
 # ───────────────────────────────────────────── who opens Affinity documents

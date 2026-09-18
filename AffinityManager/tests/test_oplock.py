@@ -109,12 +109,21 @@ def test_an_oracle_that_raises_counts_as_finished(clock):
     assert lock.sweep() is not None and lock.held is None
 
 
-def test_a_thread_claimed_for_but_not_yet_started_is_not_swept():
+def test_a_thread_claimed_for_but_not_yet_started_is_not_swept(clock):
     """claim() comes before start() -- the alternative is beginning work the
-    lock might refuse -- and isRunning() is False in between."""
+    lock might refuse -- and isRunning() is False in between.
+
+    Takes the clock fixture. Without it this read the real monotonic clock and
+    passed only because SWEEP_GRACE had not elapsed in the microseconds since
+    the claim: a true statement about the machine, not about the code, and one
+    that would have gone green with the grace deleted."""
     lock = oplock.OperationLock()
     lock.claim("3.3 Test", "Install", alive=lambda: False)
     assert lock.sweep() is None and lock.held is not None
+    clock(oplock.OperationLock.SWEEP_GRACE - 1)
+    assert lock.sweep() is None, "swept before the grace was up"
+    clock(2)
+    assert lock.sweep() is not None, "the grace never expires"
 
 
 # -- what the pages are told ------------------------------------------------
@@ -164,3 +173,55 @@ def test_elapsed_crosses_the_minute(clock):
     assert op.elapsed == "1m 00s"
     clock(125)
     assert op.elapsed == "3m 05s"
+
+
+# -- reentrancy and threads -------------------------------------------------
+
+def test_hold_keeps_a_claim_the_same_prefix_already_has():
+    """The installer's operations nest: _one_click_setup_thread claims, then
+    calls setup_wine, whose first statement claims again. claim() refused that
+    and killed the worker thread."""
+    lock = oplock.OperationLock()
+    first = lock.hold("3.3 Test", "One-Click Full Setup")
+    again = lock.hold("3.3 Test", "Setting up Wine environment")
+    assert again is first
+    assert lock.held.label == "Setting up Wine environment"
+
+
+def test_hold_still_refuses_another_prefix():
+    lock = oplock.OperationLock()
+    lock.hold("3.3 Test", "Install")
+    with pytest.raises(oplock.InUse):
+        lock.hold("Working", "Clean")
+
+
+def test_hold_updates_the_oracle_when_one_is_given():
+    lock = oplock.OperationLock()
+    lock.hold("3.3 Test", "One-Click", alive=lambda: True)
+    lock.hold("3.3 Test", "Setup Wine", alive=lambda: False)
+    assert lock.held.finished() is True
+
+
+def test_only_one_of_many_threads_gets_the_lock():
+    """The hosted installer claims from its own worker threads. An
+    unsynchronised "if free then take" is a race with exactly the outcome this
+    class exists to prevent."""
+    import threading
+
+    lock = oplock.OperationLock()
+    winners, barrier = [], threading.Barrier(8)
+
+    def contend(n):
+        barrier.wait()
+        try:
+            lock.claim("prefix-%d" % n, "Install")
+            winners.append(n)
+        except oplock.InUse:
+            pass
+
+    threads = [threading.Thread(target=contend, args=(i,)) for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(winners) == 1

@@ -88,10 +88,27 @@ class ProbeThread(QThread):
         self.entries = list(entries)
 
     def run(self):
+        """One unreadable prefix must not cost the others, or the window.
+
+        probe.describe walks the prefix, and iterdir raises for a directory
+        that can be traversed but not listed: a prefix installed under sudo, a
+        mode-0111 directory, an sshfs or NFS mount whose connection has
+        dropped so is_dir() answers from cache and iterdir() returns ESTALE.
+        Unguarded, that exception left QThread.run and Qt aborted the process
+        -- the manager vanished, with no message, because one row in a list
+        could not be measured."""
         rows = []
         for entry in self.entries:
-            info = probe.describe(entry["path"])
-            info["size"] = probe.disk_usage(entry["path"]) if info["exists"] else 0
+            try:
+                info = probe.describe(entry["path"])
+                info["size"] = (probe.disk_usage(entry["path"])
+                                if info["exists"] else 0)
+            except Exception as exc:
+                info = {"path": entry["path"], "exists": False,
+                        "is_prefix": False, "has_affinity": False,
+                        "affinity_version": None, "wine": None,
+                        "wine_builds": [], "running": False, "pids": [],
+                        "size": 0, "unreadable": str(exc)}
             rows.append((entry, info))
         self.done.emit(rows)
 
@@ -322,25 +339,50 @@ class FirstRunDialog(SizedDialog):
         self.situation = situation
         self.install = situation.installs[0]
         self.choice = self.SKIP
+        self._sizes = {}
 
         layout = QVBoxLayout(self)
-        found = Path(self.install["path"])
+        several = len(situation.installs) > 1
         blurb = QLabel(
-            f"<b>{found}</b> is an Affinity install this manager did not create."
-            "<br><br>Nothing has been changed. Choose what should happen to it; "
-            "you can also do nothing now and decide later.")
+            ("These are Affinity installs this manager did not create."
+             if several else
+             f"<b>{Path(self.install['path'])}</b> is an Affinity install this "
+             "manager did not create.")
+            + "<br><br>Nothing has been changed. Choose what should happen"
+              + (" to the one you pick" if several else " to it")
+              + "; you can also do nothing now and decide later."
+              + ("<br>The rest stay where they are and are offered again under "
+                 "<i>Find installations</i>." if several else ""))
         blurb.setWordWrap(True)
         layout.addWidget(blurb)
 
+        form = QFormLayout()
+        # One dialog, one decision -- but say so by letting the user choose
+        # WHICH, rather than silently acting on whichever was modified most
+        # recently. Saying "3 installations found" and then only ever being
+        # able to act on installs[0] was the previous behaviour.
+        self.picker = None
+        if several:
+            self.picker = QComboBox()
+            for item in situation.installs:
+                self.picker.addItem(item["path"], item)
+            self.picker.currentIndexChanged.connect(self._install_changed)
+            form.addRow("Which one", self.picker)
+
         self.name_edit = QLineEdit(
             self.install.get("suggested_name") or "Affinity")
-        form = QFormLayout()
         form.addRow("Call it", self.name_edit)
         layout.addLayout(form)
 
         self.in_place_text = self._section("Manage it where it is")
         self.move_text = self._section(f"Move it into {situation.base}")
-        self.name_edit.textChanged.connect(self._retell)
+        # Debounced. _retell measures the prefix, and connecting it straight to
+        # textChanged ran a several-gigabyte du on every keystroke.
+        self._retell_timer = QTimer(self)
+        self._retell_timer.setSingleShot(True)
+        self._retell_timer.setInterval(350)
+        self._retell_timer.timeout.connect(self._retell)
+        self.name_edit.textChanged.connect(self._retell_timer.start)
         self._retell()
 
         row = QHBoxLayout()
@@ -366,13 +408,29 @@ class FirstRunDialog(SizedDialog):
         self.layout().addWidget(body)
         return body
 
+    def _install_changed(self):
+        chosen = self.picker.currentData()
+        if chosen is None:
+            return
+        self.install = chosen
+        self.name_edit.setText(chosen.get("suggested_name") or "Affinity")
+        self._retell()
+
+    def _size_of(self, install):
+        """Measured once per install, not once per keystroke."""
+        path = install["path"]
+        if path not in self._sizes:
+            self._sizes[path] = probe.disk_usage(Path(path))
+        return self._sizes[path]
+
     def _retell(self):
         name = self.name_edit.text().strip() or "Affinity"
         self.in_place_text.setText(
             " ".join(coldstart.explain_in_place(self.install)))
         self.move_text.setText(
             " ".join(coldstart.explain_move(self.install, name,
-                                            base=self.situation.base)))
+                                            base=self.situation.base,
+                                            size=self._size_of(self.install))))
 
     def _choose(self, choice):
         try:
@@ -409,15 +467,23 @@ class CarrySettingsDialog(SizedDialog):
         self.manual = None
 
         layout = QVBoxLayout(self)
+        # "A new prefix starts with the stock settings" was said whatever was
+        # there. Choosing "use it anyway" for a directory that already existed
+        # reaches this dialog too, and that prefix may hold a year of somebody
+        # else's preferences.
+        populated = bool(prefsseed.settings_in(self.destination.parents[3])) \
+            if len(self.destination.parents) > 3 else False
+        opening = ("This prefix already has Affinity settings in it."
+                   if populated else
+                   "A new prefix starts with the stock settings.")
         blurb = QLabel(
-            "A new prefix starts with the stock settings. If you already use "
-            "Affinity, its preferences, shortcuts and recent files can be "
-            "copied across instead."
-            if self.sources else
-            "A new prefix starts with the stock settings. No other managed "
-            "prefix has any to copy, but if you have them somewhere else — a "
-            "backup, another disk, a prefix this manager does not know about — "
-            "they can come from there.")
+            opening + (
+                " If you already use Affinity, its preferences, shortcuts and "
+                "recent files can be copied across instead."
+                if self.sources else
+                " No other managed prefix has any to copy, but if you have "
+                "them somewhere else — a backup, another disk, a prefix this "
+                "manager does not know about — they can come from there."))
         blurb.setWordWrap(True)
         layout.addWidget(blurb)
 
@@ -466,9 +532,10 @@ class CarrySettingsDialog(SizedDialog):
 
     def _describe(self, source):
         plan = prefsseed.plan(source, self.destination)
+        extras = (", plus " + ", ".join(plan.extras)) if plan.extras else ""
         self.chosen_label.setText(
-            "%s\n%d file(s) would be added, %d replaced. Recent files: %s."
-            % (source.path, len(plan.added), len(plan.replaced),
+            "%s\n%d file(s) would be added, %d replaced%s. Recent files: %s."
+            % (source.path, len(plan.added), len(plan.replaced), extras,
                "yes" if source.has_recents else "none in this source"))
 
     def _confirm(self):
@@ -526,7 +593,10 @@ class RemovalDialog(SizedDialog):
         layout = QVBoxLayout(self)
         blurb = QLabel(
             f"<b>{plan.name}</b> put all of this on this machine. Choose what "
-            "goes. There is no undo for any of it.")
+            "goes.<br><br>The prefix, its log and any snapshots are deleted "
+            "outright. The small host-side files — menu entries, document "
+            "type definitions, icons — are moved aside rather than deleted, "
+            "so those are recoverable; the rest is not.")
         blurb.setWordWrap(True)
         layout.addWidget(blurb)
 
@@ -587,11 +657,18 @@ class RemovalDialog(SizedDialog):
         self.tree.itemChanged.connect(lambda *_: self._retotal())
         self._retotal()
 
+    # Removing these actually frees the space. The rest are moved aside by
+    # hoststate.delete, which keeps a copy, so counting them in a figure
+    # labelled "freed" would be a promise the button does not keep.
+    FREES_SPACE = ("prefix", "log", "settings-backup")
+
     def _retotal(self):
         chosen = self.chosen()
-        total = probe.human_size(sum(i.size for i in chosen))
-        self.ok.setText(f"Remove {len(chosen)} item(s)  ({total})"
-                        if chosen else "Remove")
+        freed = sum(i.size for i in chosen if i.kind in self.FREES_SPACE)
+        label = f"Remove {len(chosen)} item(s)"
+        if freed:
+            label += f"  (frees {probe.human_size(freed)})"
+        self.ok.setText(label if chosen else "Remove")
         self.ok.setEnabled(bool(chosen) and self.arm.isChecked()
                            and not self.plan.running)
 
@@ -1316,6 +1393,7 @@ class FindDialog(SizedDialog):
     def __init__(self, parent, reg: registry.Registry):
         super().__init__(parent)
         self.reg = reg
+        self.manager = parent
         self.setWindowTitle("Find existing installations")
         self.setModal(True)
         ui.apply(self)
@@ -1338,9 +1416,9 @@ class FindDialog(SizedDialog):
         self.move_box = QCheckBox("Move them into the base directory")
         self.move_box.setToolTip(
             "A prefix is relocatable -- dosdevices/c: is relative and the "
-            "registries hold no absolute prefix paths -- but anything outside "
-            "pointing at the old path, such as a desktop entry, will need "
-            "updating."
+            "registries hold no absolute prefix paths. Absolute symlinks "
+            "inside it are repointed, and any launcher or desktop entry naming "
+            "the old path is rewritten, with a copy of each kept beside it."
         )
 
         self.status = QLabel("Searching…")
@@ -1367,7 +1445,12 @@ class FindDialog(SizedDialog):
         layout.addLayout(row)
 
         self.found = []
-        self._search()
+        # Searched after the dialog is on screen, not before it exists. The
+        # scan walks the home directory, /mnt, /opt and the removable-media
+        # roots, and running it here meant several seconds in which the
+        # application had simply stopped, with the window that explains what
+        # is happening still unbuilt.
+        self.status.setText("Searching…")
 
     @staticmethod
     def _what_it_is(item) -> str:
@@ -1378,7 +1461,21 @@ class FindDialog(SizedDialog):
             return "not installed yet"
         return "empty prefix"
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        if getattr(self, "_searched", False):
+            return
+        self._searched = True
+        QTimer.singleShot(0, self._search)
+
     def _search(self):
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            self._do_search()
+        finally:
+            QApplication.restoreOverrideCursor()
+
+    def _do_search(self):
         self.found = discover.find_installations()
         self.tree.clear()
         new = incomplete = 0
@@ -1458,7 +1555,7 @@ class FindDialog(SizedDialog):
 
     def _adopt(self):
         move = self.move_box.isChecked()
-        added, problems = 0, []
+        added, problems, moved = 0, [], []
         for i in range(self.tree.topLevelItemCount()):
             row = self.tree.topLevelItem(i)
             data = row.data(0, Qt.ItemDataRole.UserRole)
@@ -1467,15 +1564,33 @@ class FindDialog(SizedDialog):
             name = row.text(1).strip()
             path = Path(data["path"])
             if move:
-                ok, why = discover.can_move(path, registry.base_dir())
-                if not ok:
-                    problems.append(f"{path.name}: {why}")
+                # Through coldstart, which is the one place that knows how to
+                # move a prefix: a rename where it can be one, no
+                # copy-then-delete across filesystems unless it is asked for,
+                # absolute symlinks inside repointed, and the launchers that
+                # name the old path rewritten with a copy kept beside each.
+                # This used to call discover.move_into_base, which did none of
+                # that -- it did the copy-then-delete that maintenance.relocate
+                # exists to refuse, and left every desktop entry pointing at a
+                # directory that had gone.
+                try:
+                    self.manager.lock.claim(name, f"Move {path.name}")
+                except oplock.InUse as exc:
+                    problems.append(f"{name}: {exc}")
                     continue
                 try:
-                    path = discover.move_into_base(path, name)
-                except (OSError, FileExistsError) as e:
-                    problems.append(f"{path.name}: {e}")
-                    continue
+                    _, notes = coldstart.adopt_by_moving(
+                        self.reg, data, name, base=registry.base_dir())
+                    added += 1
+                    moved += notes
+                except (maintenance.NotAPrefix, maintenance.DestinationInUse,
+                        maintenance.NotEnoughSpace, maintenance.Busy,
+                        maintenance.CloneFailed, registry.InvalidName,
+                        registry.DuplicateName, registry.PathInUse, OSError) as e:
+                    problems.append(f"{name}: {e}")
+                finally:
+                    self.manager.lock.release(name)
+                continue
             try:
                 self.reg.add(name, path)
                 added += 1
@@ -1487,6 +1602,8 @@ class FindDialog(SizedDialog):
                 "Some were skipped" if added else "Nothing was added",
                 "\n".join(problems[:12]),
             )
+        if moved:
+            QMessageBox.information(self, "Moved", "\n".join(moved[:14]))
         if added:
             self.accept()
         else:
@@ -1681,14 +1798,19 @@ class ManagerWindow(QMainWindow):
     def _first_run(self):
         """Offer something sensible when the prefix list is empty.
 
-        Only when it is empty, so the search that backs this runs once in the
-        life of an installation. Nothing here acts on its own: an Affinity
+        Once, and then not again: coldstart records that the offer was made, so
+        a machine-wide walk does not come back every time somebody forgets
+        their last prefix. Nothing here acts on its own either -- an Affinity
         install that predates the manager is somebody's working setup, and the
         manager noticing it is not permission to change it."""
         if self.reg.entries:
             return
         self.status.setText("Looking for Affinity installations…")
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        # Painted before the walk, not after it. Both of the lines above only
+        # schedule; without this the cursor and the sentence appear when the
+        # search that they are there to explain has already finished.
+        QApplication.processEvents()
         try:
             situation = coldstart.look(self.reg)
         except OSError as exc:
@@ -1698,6 +1820,11 @@ class ManagerWindow(QMainWindow):
             QApplication.restoreOverrideCursor()
 
         if situation.state == coldstart.FRESH:
+            # Also recorded. Nothing was found, and walking the machine again
+            # on every start in case something appears is not a trade worth
+            # making -- "Find installations" is one click and is what somebody
+            # who has just installed Affinity elsewhere would reach for.
+            coldstart.mark_asked()
             self.status.setText(
                 "No Affinity installation found. 'New prefix' creates one under "
                 f"{situation.base}; 'Adopt existing' takes over one this search "
@@ -1708,6 +1835,11 @@ class ManagerWindow(QMainWindow):
         self._offer_adoption(situation)
 
     def _offer_adoption(self, situation):
+        # Recorded before the answer, not after: the point is that the offer
+        # was made. Whatever the user decides -- including "decide later", and
+        # including closing the window -- this must not reappear on the next
+        # start, and must not re-arm when the last prefix is forgotten.
+        coldstart.mark_asked()
         dialog = FirstRunDialog(self, situation)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             self.status.setText(
@@ -1715,7 +1847,7 @@ class ManagerWindow(QMainWindow):
                 "'Find installations' offers them again.")
             return
         name = dialog.chosen_name()
-        install = situation.installs[0]
+        install = dialog.install
 
         if dialog.choice == dialog.IN_PLACE:
             try:
@@ -1771,10 +1903,21 @@ class ManagerWindow(QMainWindow):
         try:
             result = prefsseed.seed(source, destination, mode=dialog.mode())
         except OSError as exc:
-            QMessageBox.critical(self, "Could not copy the settings", str(exc))
+            # Where the old settings went matters most when this fails: in
+            # REPLACE mode they have already been renamed aside, so the prefix
+            # is left with no Settings folder at all and the only copy is under
+            # a name the user has never seen.
+            aside = prefsseed.aside_of(destination)
+            where = (f"\n\nThe settings that were there are at {aside}. "
+                     "Rename it back to 'Settings' to undo this."
+                     if aside else "")
+            QMessageBox.critical(self, "Could not copy the settings",
+                                 f"{exc}{where}")
             return
         aside = (f"\n\nWhat was there is kept at {result.saved_aside.name}."
                  if result.saved_aside else "")
+        also = ("\n\nAlso copied: " + ", ".join(result.extras)
+                if result.extras else "")
         prefixlog.write(entry["name"],
                         "Settings copied from %s: %d added, %d replaced, %d kept"
                         % (source.path, len(result.added), len(result.replaced),
@@ -1782,7 +1925,7 @@ class ManagerWindow(QMainWindow):
         QMessageBox.information(
             self, "Settings copied",
             f"{len(result.added)} added and {len(result.replaced)} replaced in "
-            f"{destination}.{aside}")
+            f"{destination}.{also}{aside}")
 
     # ── recovery ─────────────────────────────────────────────────────────────
 
@@ -2193,6 +2336,18 @@ class ManagerWindow(QMainWindow):
     def _setup_page(self, entry):
         name = entry["name"]
         page = self._setup_pages.get(name)
+        # Keyed by name, but validated against the path. Forget a prefix and
+        # add a different directory under the same name -- or move one -- and
+        # the cached page still drives the OLD directory, with the installer
+        # already built and the WrongTarget check long past. The one guard
+        # against installing into the wrong prefix is a constructor check, so a
+        # page that skips the constructor skips the guard.
+        if page is not None and page.path != Path(entry["path"]).expanduser():
+            self.stack.removeWidget(page)
+            page.dispose()
+            page.deleteLater()
+            del self._setup_pages[name]
+            page = None
         if page is None:
             page = hosted.SetupPage(self, entry)
             self.stack.addWidget(page)
@@ -2239,7 +2394,7 @@ class ManagerWindow(QMainWindow):
                     "delete_button", "refresh_button")
 
     def _busy_start(self, message, maximum=0, *, prefix=None, operation=None,
-                    alive=None):
+                    alive=None, already_held=False):
         """Begin an operation, or refuse because another one is running.
 
         Two things happen before any work does. The lock is claimed, which can
@@ -2252,8 +2407,14 @@ class ManagerWindow(QMainWindow):
 
         `alive` is the watchdog's oracle -- a QThread's isRunning for work that
         outlives this call, None for work that does not, which is read as
-        still running for as long as the lock is held."""
-        if prefix:
+        still running for as long as the lock is held.
+
+        `already_held` is for the hosted Setup page. Its claim is taken on the
+        installer's own worker thread, where the answer is needed immediately
+        and nothing may touch a widget; this then runs on the GUI thread to do
+        the recording and the painting. Claiming twice would refuse the
+        operation that had already been allowed."""
+        if prefix and not already_held:
             self.lock.claim(prefix, operation or message, alive=alive)
         self._busy_prefix = prefix
         if prefix:
@@ -2264,8 +2425,13 @@ class ManagerWindow(QMainWindow):
                 if entry is not None:
                     entry["log"] = str(prefixlog.path_for(prefix))
                 self.reg.set_working(prefix, label, log_offset=offset)
-            except (KeyError, OSError):
-                pass                     # never block the work on bookkeeping
+            except (KeyError, OSError) as exc:
+                # Never block the work on bookkeeping -- but say so. This used
+                # to be a bare pass, and it swallowed the one case that
+                # mattered: set_working raises KeyError for a prefix the
+                # registry does not know, which was every clone, because the
+                # destination was not registered until the copy finished.
+                prefixlog.write(prefix, f"Could not record the operation: {exc}")
         self.status.setText(message)
         self.progress.setRange(0, maximum)      # 0,0 == indeterminate
         self.progress.setValue(0)
@@ -2282,13 +2448,27 @@ class ManagerWindow(QMainWindow):
             self.progress.setValue(value)
         QApplication.processEvents()
 
-    def _busy_done(self, message=""):
+    def _busy_done(self, message="", owner=None):
+        """End an operation, and give up the lock it took.
+
+        `owner` names the prefix whose lock this is entitled to release, and
+        defaults to whatever _busy_prefix says. That default is the dangerous
+        one: _busy_prefix is a single piece of window state, so a late
+        end_operation arriving from prefix A after the watchdog already swept
+        it and prefix B took the lock would release B's claim mid-clone.
+        OperationLock.release has the owner check that stops it; it was never
+        being given anything to check against."""
         prefix = getattr(self, "_busy_prefix", None)
+        if owner is not None and prefix is not None and owner != prefix:
+            # Somebody else's operation finished late. Release only what is
+            # actually theirs, and leave the current operation alone.
+            self.lock.release(owner)
+            return
         if prefix:
             # Released first, so that everything downstream -- _sync_lock_ui,
             # and _selection_changed under it -- sees a free lock and re-enables
             # what it disabled.
-            self.lock.release(prefix)
+            self.lock.release(owner or prefix)
             if message:
                 prefixlog.write(prefix, message)
             try:
@@ -2490,6 +2670,12 @@ class ManagerWindow(QMainWindow):
             tip = condition.detail
             if condition.suggestion:
                 tip = f"{tip}\n\n{condition.suggestion}"
+            # A prefix that could not be read reports as though it were not
+            # there, which is a different problem with a different fix. Say
+            # which it was.
+            if info.get("unreadable"):
+                tip = (f"{tip}\n\nThis prefix could not be read: "
+                       f"{info['unreadable']}")
             for column in range(len(self.COLUMNS)):
                 item.setToolTip(column, tip)
         for i in range(len(self.COLUMNS) - 1):
@@ -2524,6 +2710,11 @@ class ManagerWindow(QMainWindow):
             self.snapshots_button,
             self.protect_button,
             self.delete_button,
+            # Clone and Clean act on the selection too, and refresh() rebuilds
+            # the tree without restoring it -- so these were clickable with
+            # nothing selected and did nothing at all when clicked.
+            self.clone_button,
+            self.clean_button,
         ):
             b.setEnabled(entry is not None)
         if entry is None:
@@ -2616,11 +2807,32 @@ class ManagerWindow(QMainWindow):
         SnapshotsDialog(self, entry).exec()
 
     def show_commands(self):
+        """One dialog at a time, and not while the prefix is being worked on.
+
+        It is modeless on purpose -- copying a command while looking at the
+        list is the point -- which also meant a fresh one per double-click,
+        each of them live, and every one of them able to run winecfg or
+        wineserver -k against a prefix in the middle of a clone or an install.
+        The lock covers the manager's own buttons and knew nothing about
+        these."""
         entry = self.selected_entry()
         if not entry:
             return
-        dialog = CommandsDialog(self, entry)
-        dialog.show()
+        held = self.lock.held
+        if held is not None:
+            QMessageBox.information(
+                self, "Something is running",
+                f"{held.label} is running on {held.prefix} ({held.elapsed}).\n\n"
+                "The commands here start Wine processes and end Wine sessions, "
+                "which is not safe against a prefix being worked on. Wait for "
+                "it to finish.")
+            return
+        existing = getattr(self, "_commands_dialog", None)
+        if existing is not None:
+            existing.close()
+            existing.deleteLater()
+        self._commands_dialog = CommandsDialog(self, entry)
+        self._commands_dialog.show()
 
     def find_installations(self):
         dialog = FindDialog(self, self.reg)
@@ -2723,6 +2935,33 @@ class ManagerWindow(QMainWindow):
         # refused. isRunning is bound to this thread object, not to the
         # attribute, so a later clone replacing it cannot make this operation
         # look alive.
+        #
+        # The lock refuses a second clone, but only once _busy_start is
+        # reached -- and these three attributes are overwritten above it. A
+        # second clone therefore dropped the first CloneThread's only Python
+        # reference before finding out it was not allowed to run, and Qt
+        # deleted a running QThread.
+        running = getattr(self, "_clone_thread", None)
+        if running is not None and running.isRunning():
+            QMessageBox.information(
+                self, "Already copying",
+                f"{getattr(self, '_clone_name', 'A prefix')} is still being "
+                "copied. Wait for that to finish before starting another.")
+            return
+        # Registered BEFORE the copy starts, not after it finishes. A clone
+        # that was interrupted -- and this is the operation most likely to be,
+        # since it is the long one -- left a partial multi-gigabyte tree at the
+        # destination that nothing knew about: set_working raised KeyError for
+        # a name the registry had never heard of, so there was no "working" row
+        # for the next startup to recover, and no row to tell the user that the
+        # directory sitting there is not a prefix.
+        try:
+            self.reg.add(new_name, dest)
+        except (registry.InvalidName, registry.DuplicateName,
+                registry.PathInUse) as exc:
+            QMessageBox.warning(self, "Cannot clone", str(exc))
+            return
+
         self._clone_name = new_name
         self._clone_dest = dest
         self._clone_thread = CloneThread(plan)
@@ -2732,6 +2971,7 @@ class ManagerWindow(QMainWindow):
                 100, prefix=new_name, operation=f"Clone from {name}",
                 alive=self._clone_thread.isRunning)
         except oplock.InUse as exc:
+            self.reg.forget(new_name)    # nothing was copied; leave no row
             self._refuse(exc)
             return
         self._clone_thread.progress.connect(
@@ -2741,14 +2981,28 @@ class ManagerWindow(QMainWindow):
 
     def _clone_finished(self, problems, error):
         if error:
-            self._busy_done("Clone failed")
-            QMessageBox.critical(self, "Clone failed", error)
+            # The row stays, and stays marked, so the partial copy at the
+            # destination is visible in the list as something to deal with
+            # rather than an unexplained directory.
+            self._busy_done("Clone failed", owner=self._clone_name)
+            try:
+                self.reg.set_working(self._clone_name, "Clone (failed)")
+            except KeyError:
+                pass
+            self.refresh()
+            QMessageBox.critical(
+                self, "Clone failed",
+                f"{error}\n\nWhatever was copied is still at "
+                f"{self._clone_dest}. {self._clone_name} is in the list, marked "
+                "unfinished, so you can look at it or remove it.")
             return
 
         repointed = [p for p in problems if "->" in p]
         failures = [p for p in problems if "->" not in p]
-        self.reg.add(self._clone_name, self._clone_dest)
-        self._busy_done(f"Cloned to {self._clone_name}")
+        # Already in the list -- it was added before the copy began, so an
+        # interruption leaves something to recover. Nothing to add here, and
+        # therefore nothing that can raise in a slot.
+        self._busy_done(f"Cloned to {self._clone_name}", owner=self._clone_name)
         self.refresh()
 
         detail = ""

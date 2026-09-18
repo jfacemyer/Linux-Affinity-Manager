@@ -10,6 +10,7 @@ real registry, real lock, real _busy_* methods.
 """
 import inspect
 import types
+from pathlib import Path
 
 import pytest
 
@@ -208,3 +209,130 @@ def test_the_status_row_sits_outside_the_stack():
     assert "middle_layout.addWidget(status_row" not in source
     assert source.index("shell_layout.addWidget(self.stack") < \
            source.index("shell_layout.addWidget(status_row")
+
+
+# ── a late finish must not release somebody else's lock ────────────────────
+
+def test_a_late_finish_from_another_prefix_releases_nothing(two_prefixes):
+    """_busy_prefix is one piece of window state, so without an owner the
+    sequence is: prefix A's operation is swept, prefix B takes the lock, A's
+    thread finally reaches end_operation -- and releases B's claim mid-clone.
+    That is the collision the lock exists to prevent, performed by the lock."""
+    w, reg, _ = two_prefixes
+    w._busy_start("Cloning Other", 100, prefix="Other", operation="Clone")
+    held = w.lock.held
+
+    w._busy_done("Managed — finished", owner="Managed")   # A, arriving late
+
+    assert w.lock.held is held, "another prefix's operation was released"
+    assert reg.by_name("Other")["state"] == "working"
+    assert w._busy_prefix == "Other"
+
+
+def test_a_finish_naming_its_own_prefix_still_releases(two_prefixes):
+    """The other half, so the test above cannot pass by never releasing."""
+    w, _, _ = two_prefixes
+    w._busy_start("Cloning Other", 100, prefix="Other", operation="Clone")
+    w._busy_done("Other — finished", owner="Other")
+    assert w.lock.held is None
+
+
+# ── one unreadable prefix must not cost the window ─────────────────────────
+
+def test_a_prefix_that_cannot_be_read_does_not_abort_the_probe():
+    """iterdir raises for a directory that can be traversed but not listed: a
+    prefix installed under sudo, mode 0111, an sshfs mount whose connection
+    dropped. Unguarded that left QThread.run and Qt aborted the process -- the
+    manager vanished, with no message, because one row could not be measured."""
+    import AffinityLinuxManager as app
+
+    thread = app.ProbeThread([{"name": "Broken", "path": "/does/not/matter"},
+                              {"name": "Fine", "path": "/also/not"}])
+    emitted = []
+    thread.done = types.SimpleNamespace(emit=emitted.append)
+
+    def explode(path):
+        raise PermissionError(13, "Permission denied")
+
+    original = app.probe.describe
+    app.probe.describe = explode
+    try:
+        thread.run()                      # must not raise
+    finally:
+        app.probe.describe = original
+
+    assert len(emitted) == 1 and len(emitted[0]) == 2
+    entry, info = emitted[0][0]
+    assert info["exists"] is False and "Permission denied" in info["unreadable"]
+    assert info["size"] == 0
+
+
+# ── a cached Setup page belongs to the directory it was built for ──────────
+
+def test_a_reused_prefix_name_does_not_reuse_the_old_setup_page(tmp_path):
+    """The only guard against installing into the wrong prefix is a check in
+    SetupPage's constructor. A page taken from the cache skips the constructor,
+    so it skips the guard -- and forget-then-add under the same name is enough
+    to get one."""
+    import AffinityLinuxManager as app
+
+    built, disposed = [], []
+
+    class FakePage:
+        def __init__(self, manager, entry):
+            self.name = entry["name"]
+            self.path = Path(entry["path"])
+            built.append(self.path)
+
+        def dispose(self):
+            disposed.append(self.path)
+
+        def deleteLater(self):
+            pass
+
+    stub = types.SimpleNamespace(
+        _setup_pages={},
+        lock=oplock.OperationLock(),
+        stack=types.SimpleNamespace(addWidget=lambda w: None,
+                                    removeWidget=lambda w: None),
+    )
+    stub._drop_spare_setup_pages = types.MethodType(
+        app.ManagerWindow._drop_spare_setup_pages, stub)
+    setup_page = types.MethodType(app.ManagerWindow._setup_page, stub)
+
+    original = app.hosted.SetupPage
+    app.hosted.SetupPage = FakePage
+    try:
+        first = setup_page({"name": "Working", "path": str(tmp_path / "one")})
+        again = setup_page({"name": "Working", "path": str(tmp_path / "one")})
+        assert again is first, "the cache should still work for the same path"
+
+        moved = setup_page({"name": "Working", "path": str(tmp_path / "two")})
+    finally:
+        app.hosted.SetupPage = original
+
+    assert moved is not first
+    assert moved.path == tmp_path / "two"
+    assert disposed == [tmp_path / "one"]
+
+
+# ── an interrupted clone leaves something to recover ───────────────────────
+
+def test_the_clone_destination_is_recorded_before_the_copy_starts(window):
+    """set_working raises KeyError for a prefix the registry does not know,
+    and that was every clone: the destination was only added when the copy
+    finished. So an interrupted 40GB clone left a partial multi-gigabyte tree
+    that nothing knew about -- no working row for the next startup to recover,
+    and no row to say the directory sitting there is not a prefix."""
+    w, reg, _ = window
+    reg.add("Copy of Managed", str(reg.path.parent / "Copy"))
+
+    w._busy_start("Copying", 100, prefix="Copy of Managed", operation="Clone")
+    row = reg.by_name("Copy of Managed")
+    assert row["state"] == "working" and row["operation"] == "Clone"
+
+
+def test_recording_failure_is_written_to_the_log_not_swallowed(window):
+    w, reg, prefixlog = window
+    w._busy_start("Copying", 100, prefix="Nonexistent", operation="Clone")
+    assert "Could not record the operation" in prefixlog.tail("Nonexistent")
