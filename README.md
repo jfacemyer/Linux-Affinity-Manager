@@ -37,15 +37,22 @@ AffinityOnLinux provides an easy way to install and run Affinity Photo, Designer
 curl -sSL https://raw.githubusercontent.com/ryzendew/AffinityOnLinux/refs/heads/main/AffinityScripts/AffinityLinuxInstaller.py | python3
 ```
 
-> **Testing the file-manager branch?** `main` does not have it yet. Install from
-> the branch instead — it pulls Wine 11.16, the handler and the MIME definitions
-> from a personal mirror, because none of them exist upstream until this merges:
+> **Testing this branch?** `main` does not have any of it. Install from a
+> **clone**, not from a pipe:
 >
 > ```bash
-> curl -sSL https://forgejo.facemyer.net/facemyer/AffinityOnLinux/raw/branch/feature/open-documents-from-file-manager/AffinityScripts/AffinityLinuxInstaller.py | python3
+> git clone -b experimental/affinity-3.3 https://forgejo.facemyer.net/facemyer/AffinityOnLinux.git
+> python3 AffinityOnLinux/AffinityScripts/AffinityLinuxInstaller.py
 > ```
 >
-> Those three temporary URLs are listed, with what each must become before
+> The pipe used to be the instruction here and it named an older branch, whose
+> `affinity-on-linux.exe` is eight commits behind this one — including *"stop
+> shipping the watchdog that kills sessions"*. The installer now pins that
+> binary by SHA-256 and declines to install a different one, so a piped install
+> sets up everything except file-manager integration and says why. A clone has
+> the file beside it and needs no download at all.
+>
+> The temporary mirror URLs are listed, with what each must become before
 > merging, in [`AffinityHandler/README.md`](AffinityHandler/README.md#temporary-download-sources--must-be-repointed-before-merging).
 
 > **Several prefixes to keep track of?** [`AffinityManager/`](AffinityManager/README.md)

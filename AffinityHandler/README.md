@@ -94,7 +94,7 @@ committed binary is built from the `Program.cs` beside it.
 Three downloads in `AffinityScripts/AffinityLinuxInstaller.py` point at a
 personal Forgejo mirror rather than upstream. They have to be *downloads* at all
 because the documented install pipes the installer straight into `python3`,
-where `__file__` does not exist and there is no checkout to copy from; and they
+where there is no checkout to copy from; and they
 have to point somewhere other than upstream because none of these files exist
 upstream until this branch is merged.
 
@@ -115,9 +115,36 @@ built with the Affinity patch set, from the matching branch of
 `Affinity-Wine-Builder`. Publishing that release is a prerequisite for merging
 this, not a follow-up.
 
-The handler and MIME downloads are only reached when the installer was piped
-into `python3`. Run from a checkout it copies the files from there, so a
-reviewer testing from a clone exercises everything except the URLs themselves.
+The handler and MIME downloads are only reached when the installer was NOT run
+from a checkout of this repository. Run from one it copies the files from
+there, so a reviewer testing from a clone exercises everything except the URLs
+themselves.
+
+`__file__` is not the test for that, and used to be. Python sets it to the
+string `"<stdin>"` when a script is read from stdin rather than leaving it
+unset, so `Path(__file__).parent` was the *current working directory* and the
+`except NameError` guards written for the piped case never fired. It is now
+`script_dir()`, which requires the file to be a real file in a directory named
+`AffinityScripts` -- the second half matters because the other documented
+install is `curl ... -o install.py && python3 install.py`, which people run
+from `~/Downloads`.
+
+### The handler binary is pinned by content
+
+`HANDLER_SHA256` in the installer is the SHA-256 of the
+`affinity-on-linux.exe` committed beside this README, and a download that does
+not match it is refused rather than installed.
+
+That is not theoretical. The branch the URL above names is **eight handler
+commits behind** the branch this installer ships on, and the two binaries
+differ -- one of the commits in between is *"stop shipping the watchdog that
+kills sessions"*. So a piped install fetched and ran a handler with a known
+session-killing watchdog in it, silently, while a checkout install got the
+current one.
+
+**Pushing the current handler to the branch the URL names is a prerequisite for
+this working from a pipe at all.** Until that happens, a piped install declines
+file-manager integration and says why, which is the right failure.
 
 ## Installing from this branch
 

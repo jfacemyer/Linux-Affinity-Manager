@@ -236,6 +236,20 @@ ENV_INSTALL_DIR = "AFFINITY_INSTALL_DIR"
 ENV_INSTALLER_FILE = "AFFINITY_INSTALLER_FILE"
 
 
+def _sha256_of(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1024 * 256), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+# The handler this installer is meant to install, by content. The piped install
+# fetches it over the network from a branch that can be older than this file,
+# and "it starts with MZ and is over 4KB" does not tell those apart.
+HANDLER_SHA256 = "f26d7d744be4ce6c9272907b3e9e0d19ffd4c4c47d5faf8356a5e4bd6eec2be5"
+
+
 def script_dir():
     """The checkout directory this file was run from, or None if there is none.
 
@@ -254,8 +268,13 @@ def script_dir():
     written to cover the piped case never fired, because there is no NameError
     to catch.
 
-    So the test is not "is __file__ defined" but "is it a file". Only a real
-    checkout is a fast path. Everything else downloads, which is what the piped
+    So the test is not "is __file__ defined" but "is it a file". And being a
+    file is not enough either: the documented alternative to the pipe is
+    `curl ... -o install.py && python3 install.py`, which people run from
+    ~/Downloads -- and then checkout_root() would be the home directory, so
+    ~/AffinityHandler/affinity-on-linux.exe and ~/mime would be treated as this
+    project's. The directory therefore has to BE this project's AffinityScripts
+    directory, by name. Anything else downloads, which is what the piped
     install has always actually been doing."""
     try:
         here = __file__
@@ -267,7 +286,9 @@ def script_dir():
         resolved = Path(here).resolve()
     except (OSError, ValueError):
         return None
-    return resolved.parent if resolved.is_file() else None
+    if not resolved.is_file():
+        return None
+    return resolved.parent if resolved.parent.name == "AffinityScripts" else None
 
 
 def checkout_root():
@@ -9792,15 +9813,22 @@ class AffinityInstallerGUI(QMainWindow):
             self.log("Failed to clone winetricks repository", "error")
             return False
 
-        # Change to winetricks directory and install
-        os.chdir("winetricks")
-        success, _, _ = self.run_command(["sudo", "make", "install"])
+        # Change to winetricks directory and install.
+        #
+        # The chdir back sat after an early return, so a failed `make install`
+        # left the whole process in ./winetricks -- for ever, since this is a
+        # GUI that keeps running. Every later relative path in the run then
+        # resolved somewhere the user never chose, including the rmtree below
+        # on a subsequent attempt.
+        was = os.getcwd()
+        try:
+            os.chdir("winetricks")
+            success, _, _ = self.run_command(["sudo", "make", "install"])
+        finally:
+            os.chdir(was)
         if not success:
             self.log("Failed to install winetricks", "error")
             return False
-
-        # Go back to original directory
-        os.chdir("..")
 
         # Clean up
         shutil.rmtree("winetricks")
@@ -16797,6 +16825,14 @@ Would you like to continue with {distro_name} anyway?"""
         # upstream raw URL before merging; the file has to be fetchable because
         # the documented install pipes this script straight into python3, where
         # there is no checkout to copy from.
+        #
+        # The branch named here is EIGHT handler commits behind the branch this
+        # installer ships on, and the two binaries genuinely differ -- one of
+        # the commits in between is "stop shipping the watchdog that kills
+        # sessions". So a piped install used to fetch, and run, a handler with
+        # a known session-killing watchdog in it, silently, while a checkout
+        # install got the current one. HANDLER_SHA256 below is what this
+        # installer expects; anything else is refused rather than installed.
         raw_url = (
             "https://forgejo.facemyer.net/facemyer/AffinityOnLinux/raw/branch/"
             "feature/open-documents-from-file-manager/"
@@ -16814,6 +16850,14 @@ Would you like to continue with {distro_name} anyway?"""
                     local_exe = candidate
 
             if local_exe:
+                got = _sha256_of(local_exe)
+                if got != HANDLER_SHA256:
+                    raise RuntimeError(
+                        f"{local_exe} is not the handler this installer expects "
+                        f"(got {got[:16]}..., wanted {HANDLER_SHA256[:16]}...). "
+                        "The checkout and this script are out of step; rebuild "
+                        "the handler or update the checkout."
+                    )
                 shutil.copy2(local_exe, dest)
             else:
                 # Download beside the destination and rename into place, rather
@@ -16832,6 +16876,18 @@ Would you like to continue with {distro_name} anyway?"""
                         raise RuntimeError(
                             f"downloaded handler is not a PE image ({size} bytes, "
                             f"starts {head!r})"
+                        )
+                    got = _sha256_of(part)
+                    if got != HANDLER_SHA256:
+                        raise RuntimeError(
+                            "the handler that was downloaded is not the one this "
+                            "installer expects.\n"
+                            f"  expected {HANDLER_SHA256}\n"
+                            f"  got      {got}\n"
+                            "The branch it comes from is behind this installer. "
+                            "Install from a checkout of this repository instead, "
+                            "and file-manager integration will use the copy "
+                            "beside it."
                         )
                     os.replace(str(part), str(dest))
                 finally:
