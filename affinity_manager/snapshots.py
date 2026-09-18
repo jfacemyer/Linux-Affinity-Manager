@@ -19,6 +19,7 @@ one is the expensive mistake.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import shutil
 import time
@@ -27,14 +28,13 @@ from pathlib import Path
 
 from . import maintenance, prefsseed, registry
 
-# What belongs to a snapshot, relative to the version directory that holds
-# Settings. Affinity keeps some state beside the directory rather than in it,
-# and a "settings backup" that lost sess.db would be a surprise later.
-SIBLING_FILES = ("sess.db",)
-SIBLING_SUFFIXES = (".dat",)
-
 MANIFEST = "snapshot.json"
 STAMP = "%Y%m%d-%H%M%S"
+
+# Directories a take() or a restore() is halfway through. Named so they sort
+# beside the thing they will become, and skipped by listing() so a snapshot
+# that never finished is never offered as one that did.
+STAGING_SUFFIXES = (".taking", ".restoring")
 
 
 class NoSettings(RuntimeError):
@@ -101,15 +101,24 @@ def _source(prefix) -> prefsseed.Settings:
 
 
 def _siblings(version_dir: Path) -> list[Path]:
-    """The loose state beside Settings that belongs with it."""
+    """Everything in the version folder except Settings itself.
+
+    Was a list of known names and suffixes -- sess.db, anything .dat -- and it
+    admitted only files. Affinity keeps the user's keyboard shortcuts and
+    workspace layouts in DIRECTORIES beside Settings, so a snapshot the dialog
+    promised contained "preferences, shortcuts, recent files and the session
+    state" contained neither the shortcuts nor the workspaces.
+
+    The version folder is configuration and nothing else, so the safe rule is
+    the inclusive one: take all of it. Anything unrecognised is more likely to
+    be something new that matters than something large that does not."""
     out = []
     if not version_dir.is_dir():
         return out
-    for f in sorted(version_dir.iterdir()):
-        if not f.is_file():
+    for entry in sorted(version_dir.iterdir()):
+        if entry.name == "Settings":
             continue
-        if f.name in SIBLING_FILES or f.suffix.lower() in SIBLING_SUFFIXES:
-            out.append(f)
+        out.append(entry)
     return out
 
 
@@ -128,39 +137,62 @@ def _safe_label(label: str) -> str:
     return cleaned.strip("-.")[:60]
 
 
-def take(prefix_name, prefix_path, label="") -> Snapshot:
+def take(prefix_name, prefix_path, label="", settings=None) -> Snapshot:
     """Copy a prefix's settings aside, under a dated name.
+
+    `settings` names which Settings directory to take, for a prefix carried
+    across Affinity versions and holding more than one. Without it the newest
+    is used -- which is right when the user asks for a snapshot, and wrong for
+    restore()'s safety net, where what must be preserved is the folder about to
+    be overwritten and not whichever was touched most recently.
 
     Does not require the prefix to be idle. Reading settings from a running
     Affinity can catch a half-written preferences file, which is a reason to
     prefer taking these when it is closed -- but refusing outright would make
     the snapshot unavailable at exactly the moment somebody wants one, just
-    before doing something they are unsure about."""
-    source = _source(prefix_path)
+    before doing something they are unsure about.
+
+    Built in a staging directory and renamed into place. An interrupted take --
+    the disk filling, the manager being killed -- used to leave a half-copied
+    directory that listing() presented as a finished snapshot, which is the
+    worst possible thing for a backup to be."""
+    source = settings or _source(prefix_path)
     stamp = _stamp()
     safe = _safe_label(label)
     dest = dir_for(prefix_name) / (f"{stamp}-{safe}" if safe else stamp)
     if dest.exists():
         raise NotASnapshot(f"{dest} already exists.")
-    dest.mkdir(parents=True)
 
-    shutil.copytree(source.path, dest / "Settings", symlinks=True)
-    siblings = _siblings(source.path.parent)
-    for f in siblings:
-        shutil.copy2(f, dest / f.name)
+    staging = dest.with_name(dest.name + ".taking")
+    if staging.exists():
+        shutil.rmtree(staging)
+    staging.mkdir(parents=True)
+    try:
+        shutil.copytree(source.path, staging / "Settings", symlinks=True)
+        siblings = _siblings(source.path.parent)
+        for entry in siblings:
+            target = staging / entry.name
+            if entry.is_dir() and not entry.is_symlink():
+                shutil.copytree(entry, target, symlinks=True)
+            else:
+                shutil.copy2(entry, target, follow_symlinks=False)
+
+        (staging / MANIFEST).write_text(json.dumps({
+            "prefix": prefix_name,
+            "source": str(source.path),
+            "version": source.version,
+            "label": safe,
+            "taken": stamp,
+            "siblings": [e.name for e in siblings],
+        }, indent=2) + "\n")
+        staging.rename(dest)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            shutil.rmtree(staging)
+        raise
 
     files, size, _ = prefsseed._measure(dest)
-    snapshot = Snapshot(dest, prefix_name, safe, stamp, source.version,
-                        files, size)
-    (dest / MANIFEST).write_text(json.dumps({
-        "prefix": prefix_name,
-        "source": str(source.path),
-        "version": source.version,
-        "label": safe,
-        "taken": stamp,
-        "siblings": [f.name for f in siblings],
-    }, indent=2) + "\n")
-    return snapshot
+    return Snapshot(dest, prefix_name, safe, stamp, source.version, files, size)
 
 
 def read_manifest(path: Path) -> Snapshot:
@@ -172,14 +204,25 @@ def read_manifest(path: Path) -> Snapshot:
         data = json.loads((path / MANIFEST).read_text())
     except (OSError, ValueError):
         pass                    # an unreadable manifest is not a lost snapshot
+    # A file on disk, so it says whatever somebody last wrote in it. Valid JSON
+    # that is not an object -- a list, a number, "null" -- passed the except
+    # above and then met .get(), and the AttributeError took the snapshots
+    # dialog AND the removal plan with it, because both call listing().
+    if not isinstance(data, dict):
+        data = {}
+
     files, size, _ = prefsseed._measure(path)
     notes = []
     if not data:
-        notes.append("no manifest; which prefix this came from is unknown")
-    stamp = data.get("taken") or path.name.split("-")[0]
-    return Snapshot(path, data.get("prefix") or "unknown",
-                    data.get("label") or "", stamp,
-                    data.get("version") or "unknown", files, size, notes)
+        notes.append("no usable manifest; which prefix this came from is unknown")
+
+    def text(key, fallback):
+        value = data.get(key)
+        return value if isinstance(value, str) and value else fallback
+
+    return Snapshot(path, text("prefix", "unknown"), text("label", ""),
+                    text("taken", path.name.split("-")[0]),
+                    text("version", "unknown"), files, size, notes)
 
 
 def listing(prefix_name=None) -> list[Snapshot]:
@@ -191,9 +234,13 @@ def listing(prefix_name=None) -> list[Snapshot]:
         for path in sorted(_existing(root), reverse=True):
             if not path.is_dir():
                 continue
+            # A take() or a restore() that was interrupted. Never offered as a
+            # finished snapshot; the next take of the same prefix clears it.
+            if path.name.endswith(STAGING_SUFFIXES):
+                continue
             try:
                 out.append(read_manifest(path))
-            except NotASnapshot:
+            except (NotASnapshot, OSError):
                 continue
     out.sort(key=lambda s: s.taken, reverse=True)
     return out
@@ -250,43 +297,83 @@ def restore(plan: RestorePlan, *, snapshot_first=True) -> list[str]:
     Refuses on a running prefix -- reading settings from one is a risk, writing
     them into one is a corruption. Takes a snapshot of what is there first and
     defaults to doing so, because the common way to lose a configuration is to
-    restore the wrong snapshot over it.
+    restore the wrong snapshot over it. That safety net is pointed at the
+    version folder about to be overwritten, not at whichever is newest: a
+    prefix carried from 3.0 to 3.3 has two, and backing up the wrong one is the
+    same as not backing up at all.
 
-    Written to a temporary directory beside the target and renamed into place,
-    so an interrupted restore cannot leave half of one configuration beside
-    half of another."""
+    The swap is of the WHOLE version folder, in two renames. An earlier version
+    renamed only Settings into place and then copied the loose state beside it
+    one file at a time, afterwards -- which is exactly the mixed configuration
+    this docstring claimed was impossible, and it also left stale siblings from
+    the old configuration sitting next to the restored one."""
     maintenance._require_idle(plan.into_path)
     notes: list[str] = []
 
+    destination = plan.destination          # <version>/Settings
+    version_dir = destination.parent
+
     if snapshot_first:
         try:
+            current = None
+            if destination.is_dir():
+                files, size, modified = prefsseed._measure(destination)
+                current = prefsseed.Settings(plan.into_path, destination,
+                                             version_dir.name, files, size,
+                                             modified)
             kept = take(plan.into_prefix, plan.into_path,
-                        label="before-restore")
+                        label="before-restore", settings=current)
             notes.append(f"Current settings snapshotted as {kept.name}")
         except NoSettings:
             notes.append("Nothing was there to snapshot first")
 
-    destination = plan.destination
-    staging = destination.with_name(destination.name + ".restoring")
+    # Built complete, beside the folder it will replace, and then swapped in.
+    staging = version_dir.with_name(version_dir.name + ".restoring")
     if staging.exists():
         shutil.rmtree(staging)
-    shutil.copytree(plan.snapshot.path / "Settings", staging, symlinks=True)
+    try:
+        # Whatever is there now, minus the parts the snapshot supplies. Copied
+        # rather than started empty so anything the snapshot does not know
+        # about survives the restore.
+        if version_dir.is_dir():
+            shutil.copytree(version_dir, staging, symlinks=True)
+        else:
+            staging.mkdir(parents=True)
+        if (staging / "Settings").exists():
+            shutil.rmtree(staging / "Settings")
+        shutil.copytree(plan.snapshot.path / "Settings", staging / "Settings",
+                        symlinks=True)
 
-    previous = destination.with_name(
-        destination.name + ".replaced-" + _stamp())
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    if destination.exists():
-        destination.rename(previous)
-        notes.append(f"Replaced settings kept at {previous.name}")
-    staging.rename(destination)
+        restored = []
+        for entry in sorted(plan.snapshot.path.iterdir()):
+            if entry.name in (MANIFEST, "Settings"):
+                continue
+            target = staging / entry.name
+            if target.exists() or target.is_symlink():
+                if target.is_dir() and not target.is_symlink():
+                    shutil.rmtree(target)
+                else:
+                    target.unlink()
+            if entry.is_dir() and not entry.is_symlink():
+                shutil.copytree(entry, target, symlinks=True)
+            else:
+                shutil.copy2(entry, target, follow_symlinks=False)
+            restored.append(entry.name)
+
+        previous = version_dir.with_name(version_dir.name + ".replaced-" + _stamp())
+        version_dir.parent.mkdir(parents=True, exist_ok=True)
+        if version_dir.exists():
+            version_dir.rename(previous)
+            notes.append(f"Replaced settings kept at {previous.name}")
+        staging.rename(version_dir)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            shutil.rmtree(staging)
+        raise
+
     notes.append(f"Restored into {destination}")
-
-    # The loose state beside Settings, if the snapshot carried any.
-    for f in sorted(plan.snapshot.path.iterdir()):
-        if not f.is_file() or f.name == MANIFEST:
-            continue
-        shutil.copy2(f, destination.parent / f.name)
-        notes.append(f"Restored {f.name}")
+    if restored:
+        notes.append("Also restored: " + ", ".join(restored))
     return notes
 
 

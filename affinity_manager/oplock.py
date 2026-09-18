@@ -19,10 +19,17 @@ disagree with the first. What survives a crash is not this: it is the registry
 row written before the work starts, which answers a different question. This
 one answers "is anything running now"; that one answers "what was running when
 the lights went out".
+
+In memory, but not in one thread. The hosted installer calls into this from its
+own worker threads -- _one_click_setup_thread's first statement is a claim --
+so every method that reads or writes the held operation takes a mutex. An
+unsynchronised "if free then take" is a race with exactly the outcome this
+class exists to prevent.
 """
 
 from __future__ import annotations
 
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Callable, Optional
@@ -47,14 +54,18 @@ class InUse(Exception):
     something quite different -- that a prefix has live Wine processes in it --
     and the two would sit next to each other in the same except clauses.
 
-    An ordinary Exception, deliberately. The temptation is BaseException, so
-    that the installer's `_handle_button_click` -- which wraps every command in
-    `except Exception` and turns it into a log line -- cannot quietly absorb a
-    refusal. But PyQt6 calls qFatal() on an exception that escapes a slot, so a
-    BaseException would leave the process aborting mid-install instead of
-    declining a click. The swallowing is handled by structure instead: the
-    claim is made in the hosted page's own override, before the installer's try
-    block is ever entered, so there is nothing there to swallow it."""
+    An ordinary Exception, deliberately, and the cost of that is real: the
+    installer's `_handle_button_click` wraps every command in
+    `except Exception` and turns it into a log line, so a refusal raised
+    beneath one IS absorbed there. The alternative is worse. PyQt6 calls
+    qFatal() on an exception that escapes a slot, so a BaseException would
+    abort the process mid-install rather than decline a click.
+
+    What stops the absorption mattering is that the hosted page shows the
+    refusal itself -- SetupPage.operation_started calls show_message before
+    re-raising -- so the user is told even when the log line is all that
+    survives. An earlier version of this docstring claimed the swallowing could
+    not happen at all, which was simply untrue."""
 
     def __init__(self, operation: "Operation"):
         super().__init__(str(operation))
@@ -126,10 +137,13 @@ class OperationLock:
 
     def __init__(self):
         self._held: Operation | None = None
+        # Reentrant, because hold() calls claim() while already inside it.
+        self._mutex = threading.RLock()
 
     @property
     def held(self) -> Operation | None:
-        return self._held
+        with self._mutex:
+            return self._held
 
     def claim(self, prefix: str, label: str, source: str = "manager",
               alive: Optional[Callable[[], bool]] = None) -> Operation:
@@ -139,10 +153,37 @@ class OperationLock:
         Two operations on one prefix is the collision this prevents in its
         purest form -- a clone reading a tree that a clean is deleting from --
         so there is no same-prefix exemption."""
-        if self._held is not None:
-            raise InUse(self._held)
-        self._held = Operation(prefix, label, source, alive=alive)
-        return self._held
+        with self._mutex:
+            if self._held is not None:
+                raise InUse(self._held)
+            self._held = Operation(prefix, label, source, alive=alive)
+            return self._held
+
+    def hold(self, prefix: str, label: str, source: str = "setup",
+             alive: Optional[Callable[[], bool]] = None) -> Operation:
+        """Claim, or keep a claim this prefix already has.
+
+        The reentrant door, and it exists because the installer's operations
+        nest. _one_click_setup_thread calls start_operation and then calls
+        setup_wine, whose own first statement is another start_operation. With
+        claim() that second call raised InUse naming the prefix's own
+        operation, killing the worker thread: One-Click Full Setup could never
+        install Wine inside the manager.
+
+        Counting the nesting instead was the obvious alternative and does not
+        work -- the installer's starts and ends are not balanced; one method
+        has one start and eleven ends. So this asks a question that needs no
+        bookkeeping: is the lock already ours? If it is, relabel it and carry
+        on. Another prefix still gets InUse, which is the case the lock is
+        for."""
+        with self._mutex:
+            current = self._held
+            if current is not None and current.prefix == prefix:
+                current.label = label
+                if alive is not None:
+                    current.alive = alive
+                return current
+            return self.claim(prefix, label, source, alive=alive)
 
     def release(self, prefix: str | None = None) -> Operation | None:
         """Give it up, and say what was given up.
@@ -153,13 +194,14 @@ class OperationLock:
         mismatch releases nothing and returns None rather than raising: the
         common caller is a `finally` on a path that may or may not have
         claimed, and it should not have to remember which."""
-        current = self._held
-        if current is None:
-            return None
-        if prefix is not None and current.prefix != prefix:
-            return None
-        self._held = None
-        return current
+        with self._mutex:
+            current = self._held
+            if current is None:
+                return None
+            if prefix is not None and current.prefix != prefix:
+                return None
+            self._held = None
+            return current
 
     def sweep(self) -> Operation | None:
         """Release a claim whose work has demonstrably stopped.
@@ -174,13 +216,14 @@ class OperationLock:
         Only an operation that vouched for itself can be swept, and only once
         it is past SWEEP_GRACE; see Operation.finished. Returns what was released, so the caller can say so
         rather than having the lock silently open."""
-        current = self._held
-        if current is None or current.seconds < self.SWEEP_GRACE:
-            return None
-        if not current.finished():
-            return None
-        self._held = None
-        return current
+        with self._mutex:
+            current = self._held
+            if current is None or current.seconds < self.SWEEP_GRACE:
+                return None
+            if not current.finished():
+                return None
+            self._held = None
+            return current
 
     def caution_for(self, prefix: str) -> str | None:
         """What to say on another prefix's page while this is held.
@@ -188,7 +231,7 @@ class OperationLock:
         None when there is nothing to say -- either nothing is running, or what
         is running belongs to the prefix being looked at, in which case it is
         not a caution about somebody else but that page's own status line."""
-        current = self._held
+        current = self.held
         if current is None or current.prefix == prefix:
             return None
         tail = ("Only one prefix can be worked on at a time, so actions here "
@@ -206,7 +249,7 @@ class OperationLock:
         line; they need different ones. 'Installing (4m 12s)' belongs to the
         prefix doing it, and caution_for's 'actions are unavailable' does
         not."""
-        current = self._held
+        current = self.held
         if current is None or current.prefix != prefix:
             return None
         return "%s (%s)" % (current.label, current.elapsed)

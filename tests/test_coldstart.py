@@ -69,7 +69,7 @@ def test_nothing_found_and_no_list_is_a_fresh_start(clean_home, monkeypatch):
 
 def test_an_unmanaged_install_makes_it_adoptable(clean_home, monkeypatch):
     found = [{"path": str(clean_home / ".AffinityLinux"), "managed_as": None,
-              "suggested_name": "AffinityLinux"}]
+              "has_affinity": True, "suggested_name": "AffinityLinux"}]
     monkeypatch.setattr(discover, "find_installations", lambda *a, **k: found)
     reg = registry.Registry(clean_home / "meta" / "prefixes.json")
     situation = coldstart.look(reg)
@@ -77,12 +77,50 @@ def test_an_unmanaged_install_makes_it_adoptable(clean_home, monkeypatch):
     assert situation.installs == found
 
 
+def test_a_wine_prefix_with_no_affinity_is_not_offered_on_first_run(clean_home,
+                                                                   monkeypatch):
+    """discover reports every Wine prefix, which is right for Find
+    installations -- the user went looking. It is wrong for an unasked-for
+    modal on somebody's first run: offering to MOVE ~/.wine while calling it
+    "an Affinity install" is untrue and is the sort of thing this application
+    exists not to do."""
+    monkeypatch.setattr(discover, "find_installations", lambda *a, **k: [
+        {"path": str(clean_home / ".wine"), "managed_as": None,
+         "has_affinity": False, "suggested_name": "wine"},
+        {"path": str(clean_home / ".illustratorCC17"), "managed_as": None,
+         "has_affinity": False, "suggested_name": "illustratorCC17"},
+    ])
+    reg = registry.Registry(clean_home / "meta" / "prefixes.json")
+    assert coldstart.look(reg).state == coldstart.FRESH
+
+
+def test_the_offer_is_made_once_and_not_again_after_forgetting(clean_home,
+                                                               monkeypatch):
+    """An empty registry is not by itself a first run. Forgetting the last
+    prefix would otherwise re-arm a machine-wide walk every time somebody
+    tidies up."""
+    from affinity_manager import settings
+
+    store = {}
+    monkeypatch.setattr(settings, "get", lambda k, d=None: store.get(k, d))
+    monkeypatch.setattr(settings, "set", lambda k, v: store.__setitem__(k, v))
+    monkeypatch.setattr(discover, "find_installations", lambda *a, **k: [
+        {"path": str(clean_home / ".AffinityLinux"), "managed_as": None,
+         "has_affinity": True, "suggested_name": "AffinityLinux"}])
+    reg = registry.Registry(clean_home / "meta" / "prefixes.json")
+
+    assert coldstart.look(reg).state == coldstart.ADOPTABLE
+    coldstart.mark_asked()
+    assert coldstart.look(reg).state == coldstart.MANAGED
+
+
 def test_an_install_already_managed_is_not_offered_for_adoption(clean_home, monkeypatch):
     """Belt and braces: with an empty list there should be none, but the search
     reads the registry itself and a hand-edited file should not produce an offer
     to adopt something already held."""
     monkeypatch.setattr(discover, "find_installations", lambda *a, **k: [
-        {"path": str(clean_home / ".AffinityLinux"), "managed_as": "Working"}])
+        {"path": str(clean_home / ".AffinityLinux"), "managed_as": "Working",
+         "has_affinity": True}])
     reg = registry.Registry(clean_home / "meta" / "prefixes.json")
     assert coldstart.look(reg).state == coldstart.FRESH
 
@@ -95,6 +133,19 @@ def test_managing_in_place_promises_to_touch_nothing(clean_home):
     assert str(prefix) in lines
     assert "stays exactly where it is" in lines
     assert "keeps working" in lines
+
+
+def test_a_given_size_skips_the_walk(clean_home, monkeypatch):
+    """The dialog re-renders on every keystroke in the name field, so a
+    several-gigabyte du ran per character typed."""
+    prefix = make_prefix(clean_home / ".AffinityLinux")
+    monkeypatch.setattr(coldstart.maintenance, "_du",
+                        lambda p: (_ for _ in ()).throw(
+                            AssertionError("walked the prefix anyway")))
+    lines = " ".join(coldstart.explain_move({"path": str(prefix)}, "Working",
+                                            base=clean_home / "base",
+                                            size=8 * 1024 ** 3))
+    assert "rename" in lines
 
 
 def test_a_move_on_one_filesystem_says_it_copies_nothing(clean_home):
@@ -313,3 +364,90 @@ def test_the_affinity_column_says_what_an_incomplete_prefix_is():
     assert what({"has_affinity": False, "wine": "ElementalWarrior-wine-11.16"}) \
         == "not installed yet"
     assert what({"has_affinity": False, "wine": None}) == "empty prefix"
+
+
+# ── what "carry my settings across" actually carries ───────────────────────
+
+def test_the_workspaces_and_shortcuts_come_across_too(tmp_path):
+    """They live BESIDE Settings, not inside it. Copying only Settings left
+    the new prefix with the source's preferences and recents next to its own
+    workspaces -- a configuration that had never existed anywhere."""
+    old, new = make_prefix(tmp_path / "Old"), make_prefix(tmp_path / "New")
+    make_settings(old)
+    version = prefsseed.settings_in(old)[0].path.parent
+    (version / "Workspaces").mkdir()
+    (version / "Workspaces" / "mine.xml").write_text("my layout")
+    (version / "sess.db").write_text("session")
+
+    source = prefsseed.settings_in(old)[0]
+    dest = prefsseed.destination_for(new)
+    result = prefsseed.seed(source, dest, mode=prefsseed.REPLACE)
+
+    assert (dest.parent / "Workspaces" / "mine.xml").read_text() == "my layout"
+    assert (dest.parent / "sess.db").read_text() == "session"
+    assert "Workspaces" in result.extras and "sess.db" in result.extras
+
+
+def test_filling_keeps_the_destinations_own_workspaces(tmp_path):
+    old, new = make_prefix(tmp_path / "Old"), make_prefix(tmp_path / "New")
+    make_settings(old)
+    make_settings(new)
+    for prefix, text in ((old, "theirs"), (new, "mine")):
+        version = prefsseed.settings_in(prefix)[0].path.parent
+        (version / "Workspaces").mkdir()
+        (version / "Workspaces" / "w.xml").write_text(text)
+
+    source = prefsseed.settings_in(old)[0]
+    dest = prefsseed.settings_in(new)[0].path
+    prefsseed.seed(source, dest, mode=prefsseed.FILL)
+    assert (dest.parent / "Workspaces" / "w.xml").read_text() == "mine"
+
+
+def test_the_plan_names_what_travels_beside_settings(tmp_path):
+    old, new = make_prefix(tmp_path / "Old"), make_prefix(tmp_path / "New")
+    make_settings(old)
+    version = prefsseed.settings_in(old)[0].path.parent
+    (version / "Workspaces").mkdir()
+    result = prefsseed.plan(prefsseed.settings_in(old)[0],
+                            prefsseed.destination_for(new))
+    assert "Workspaces" in result.extras
+
+
+# ── which Windows user ─────────────────────────────────────────────────────
+
+def test_the_login_user_wins_over_an_alphabetically_earlier_one(tmp_path, monkeypatch):
+    """Wine makes a Default directory. Taking the alphabetically first meant
+    settings were written where nothing would ever read them."""
+    monkeypatch.setattr(prefsseed.getpass, "getuser", lambda: "joshua")
+    new = make_prefix(tmp_path / "New")
+    # "alice" is a real account and sorts first, so the skip list alone does
+    # not decide this -- only preferring the login name does.
+    for name in ("Default", "Public", "alice", "joshua"):
+        (new / "drive_c" / "users" / name).mkdir(parents=True)
+    assert "/joshua/" in str(prefsseed.destination_for(new))
+
+
+def test_the_wine_placeholder_accounts_are_never_chosen(tmp_path, monkeypatch):
+    """The other half: with no directory for the login name, anything is
+    better than Default."""
+    monkeypatch.setattr(prefsseed.getpass, "getuser", lambda: "nobody-here")
+    new = make_prefix(tmp_path / "New")
+    for name in ("Default", "Default User", "Public", "All Users", "zoe"):
+        (new / "drive_c" / "users" / name).mkdir(parents=True)
+    assert "/zoe/" in str(prefsseed.destination_for(new))
+
+
+def test_the_aside_copy_can_be_found_again(tmp_path):
+    """When a copy fails, REPLACE has already renamed the old settings aside
+    and the prefix has no Settings folder at all."""
+    new = make_prefix(tmp_path / "New")
+    dest = make_settings(new)
+    (dest.parent / (dest.name + ".before-copy-20260101-000000")).mkdir()
+    (dest.parent / (dest.name + ".before-copy-20260202-000000")).mkdir()
+    found = prefsseed.aside_of(dest)
+    assert found is not None and found.name.endswith("20260202-000000")
+
+
+def test_no_aside_copy_is_not_an_error(tmp_path):
+    new = make_prefix(tmp_path / "New")
+    assert prefsseed.aside_of(make_settings(new)) is None

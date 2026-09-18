@@ -21,7 +21,6 @@ Describing what each one is and letting the user decide costs a column.
 from __future__ import annotations
 
 import os
-import shutil
 from pathlib import Path
 
 from . import probe, registry
@@ -148,44 +147,14 @@ def suggest_name_for(path) -> str:
     return name or "Affinity"
 
 
-def can_move(src, dest_base) -> tuple[bool, str]:
-    """Whether moving this prefix is safe, and why not if it is not."""
-    src = Path(src).expanduser()
-    dest_base = Path(dest_base).expanduser()
-    if probe.running_pids(src):
-        return False, "It is running. Close Affinity in it first."
-    try:
-        if dest_base.resolve() in src.resolve().parents or src.resolve() == dest_base.resolve():
-            return False, "It is already inside the base directory."
-    except OSError:
-        pass
-    if not os.access(src.parent, os.W_OK):
-        return False, f"{src.parent} is not writable, so it cannot be moved out of."
-    return True, ""
-
-
-def move_into_base(src, name, base=None) -> Path:
-    """Move a prefix under the base directory, keeping it working.
-
-    Safe to move: a prefix's dosdevices/c: is a relative symlink and the
-    registries hold no absolute prefix paths, so nothing inside it refers to
-    where it used to be. What does break is anything outside pointing at the old
-    path -- desktop entries and AffinityOnLinux's own install_location -- so
-    those are the caller's problem to fix afterwards.
-
-    Falls back to copy-then-delete across filesystems, where rename cannot work.
-    """
-    src = Path(src).expanduser()
-    base = Path(base).expanduser() if base else registry.base_dir()
-    dest = base / registry.dir_name(name)
-    if dest.exists():
-        raise FileExistsError(f"{dest} already exists")
-    base.mkdir(parents=True, exist_ok=True)
-    try:
-        src.rename(dest)
-    except OSError:
-        # Different filesystem. copytree with symlinks preserved: dosdevices is
-        # nothing but symlinks, and following them would copy whole drives.
-        shutil.copytree(src, dest, symlinks=True)
-        shutil.rmtree(src)
-    return dest
+# can_move() and move_into_base() used to live here and are deliberately gone.
+# move_into_base did the one thing maintenance.relocate() exists to refuse: a
+# cross-filesystem copy followed by rmtree of the original, with no space check
+# and no way to say "copy but keep the original". It also left every launcher
+# and desktop entry pointing at a directory that no longer existed, and did not
+# repoint absolute symlinks inside the prefix -- so a moved prefix could still
+# be running Wine out of its old location, or out of nothing.
+#
+# maintenance.plan_relocate / relocate / repoint_launchers replace them, and
+# coldstart.adopt_by_moving is the one place that composes the three in the
+# right order. Nothing should grow a second way to move a prefix.

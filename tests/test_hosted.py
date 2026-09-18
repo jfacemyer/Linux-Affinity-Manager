@@ -86,14 +86,15 @@ def hosting(qapp, tmp_path, monkeypatch):
     """A manager stand-in, a fake installer, and a prefix to point at."""
     monkeypatch.setattr(registry, "manager_dir", lambda: tmp_path)
     monkeypatch.setattr(hosted, "_hosted_cls", None)
-    monkeypatch.setattr(hosted, "_hook_owner", None)
+    monkeypatch.setattr(hosted, "_live_pages", [])
     FakeInstaller.settle_at = None
 
     killed = []
     fake_module = types.SimpleNamespace(
         ENV_INSTALL_DIR="AFFINITY_INSTALL_DIR",
         ENV_INSTALLER_FILE="AFFINITY_INSTALLER_FILE",
-        kill_stalled_wine_processes=lambda prefix=None: killed.append(prefix),
+        kill_stalled_wine_processes=lambda prefix=None: (killed.append(prefix),
+                                                        ["[Cleanup] nothing to do"])[1],
     )
     monkeypatch.setattr(aol, "module", lambda script=None: fake_module)
     monkeypatch.setattr(aol, "cls", lambda: FakeInstaller)
@@ -112,12 +113,14 @@ def hosting(qapp, tmp_path, monkeypatch):
     )
     started, finished = [], []
 
-    def busy_start(message, maximum=0, *, prefix=None, operation=None, alive=None):
-        manager.lock.claim(prefix, operation or message, alive=alive)
+    def busy_start(message, maximum=0, *, prefix=None, operation=None, alive=None,
+                   already_held=False):
+        if not already_held:
+            manager.lock.claim(prefix, operation or message, alive=alive)
         started.append((prefix, operation))
 
-    def busy_done(message=""):
-        manager.lock.release()
+    def busy_done(message="", owner=None):
+        manager.lock.release(owner)
         finished.append(message)
 
     manager._busy_start = busy_start
@@ -181,9 +184,10 @@ def test_the_installer_stops_being_a_window(hosting):
 
 def test_the_dxvk_check_waits_for_the_page_to_be_entered(hosting):
     page = page_for(hosting)
-    page.installer._check_and_update_dxvk_vkd3d()
+    page.installer._check_and_update_dxvk_vkd3d()   # the constructor's timer
     assert page.installer.dxvk_checks == 0
     page.entered()
+    page.installer._check_and_update_dxvk_vkd3d()
     assert page.installer.dxvk_checks == 1
 
 
@@ -196,10 +200,41 @@ def test_the_automatic_donation_dialog_is_suppressed_once(hosting):
     assert page.installer.donations == 1
 
 
-def test_entering_clears_stalled_wine_in_this_prefix_only(hosting):
+def test_entering_a_page_kills_nothing(hosting):
+    """Looking is not doing. This used to SIGKILL every Wine helper in the
+    prefix, so opening a page closed a winecfg the user had left open."""
     page = page_for(hosting)
     page.entered()
+    assert hosting.killed == []
+
+
+def test_starting_an_operation_clears_stalled_wine_in_this_prefix_only(hosting, qapp):
+    page = page_for(hosting)
+    page.entered()
+    page.installer.start_operation("Setup Wine Environment")
+    qapp.processEvents()
     assert hosting.killed == [str(hosting.prefix)]
+
+
+def test_a_nested_step_does_not_clear_again(hosting, qapp):
+    page = page_for(hosting)
+    page.installer.start_operation("One-Click Full Setup")
+    page.installer.start_operation("Setting up Wine environment")
+    qapp.processEvents()
+    assert hosting.killed == [str(hosting.prefix)]
+
+
+def test_the_dxvk_check_runs_once_on_the_first_entry(hosting):
+    """The constructor arms a 500ms timer for it and nothing returns to the
+    event loop before the page is entered, so calling it on entry as well ran
+    it twice."""
+    page = page_for(hosting)
+    page.entered()
+    assert page.installer.dxvk_checks == 0      # the timer will do it
+    page.installer._check_and_update_dxvk_vkd3d()
+    assert page.installer.dxvk_checks == 1
+    page.entered()                              # coming back later
+    assert page.installer.dxvk_checks == 2
 
 
 def test_the_install_location_is_not_persisted(hosting):
@@ -227,12 +262,65 @@ def test_an_operation_is_refused_while_another_prefix_works(hosting):
     assert page.installer.messages and "running" in page.installer.messages[0][0]
 
 
-def test_finishing_an_operation_releases_the_lock(hosting):
+def test_finishing_an_operation_releases_the_lock_after_the_settle(hosting):
+    """Not immediately. The installer's ends do not pair with its starts, so
+    releasing on the first one would open the lock between two halves of a
+    One-Click Full Setup."""
     page = page_for(hosting)
     page.installer.start_operation("Setup Wine Environment")
     page.installer.end_operation()
-    assert hosting.manager.lock.held is None
     assert page.installer.operation_in_progress is False
+    assert hosting.manager.lock.held is not None      # settle pending
+    assert page._settle.isActive()
+
+    page._release_after_settle()
+    assert hosting.manager.lock.held is None
+
+
+def test_a_nested_operation_does_not_re_claim_and_does_not_refuse(hosting):
+    """This is the bug that made One-Click Full Setup unable to install Wine.
+
+    _one_click_setup_thread claims, then calls setup_wine, whose own first
+    statement claims again. claim() raised InUse naming the prefix's own
+    operation, and the raise killed the worker thread."""
+    page = page_for(hosting)
+    page.installer.start_operation("One-Click Full Setup")
+    page.installer.start_operation("Setting up Wine environment")
+    held = hosting.manager.lock.held
+    assert held is not None and held.prefix == "Scratch"
+    assert held.label == "Setting up Wine environment"
+    assert page.installer.operations == ["One-Click Full Setup",
+                                         "Setting up Wine environment"]
+
+
+def test_a_nested_end_does_not_open_the_lock_to_another_prefix(hosting, qapp):
+    """setup_wine ends its own operation with four one-click steps still to
+    run. If that released, a clone of another prefix could start mid-install."""
+    page = page_for(hosting)
+    page.installer.start_operation("One-Click Full Setup")
+    page.installer.start_operation("Setting up Wine environment")
+    page.installer.end_operation()                # setup_wine's own end
+    qapp.processEvents()
+    assert hosting.manager.lock.held is not None
+
+    page.installer.start_operation("Installing Winetricks dependencies")
+    qapp.processEvents()
+    assert not page._settle.isActive(), "a further start must cancel the settle"
+    assert hosting.manager.lock.held.label == "Installing Winetricks dependencies"
+
+
+def test_a_slot_that_raises_does_not_abort_the_process(hosting, qapp):
+    """PyQt6 calls qFatal() on an exception escaping a slot. Adding one keyword
+    argument to a manager method once aborted the whole test suite this way."""
+    page = page_for(hosting)
+
+    def explode(*a, **k):
+        raise TypeError("unexpected keyword argument")
+
+    hosting.manager._busy_start = explode
+    page.installer.start_operation("Setup Wine Environment")   # must not abort
+    qapp.processEvents()
+    assert any("failed" in line for line, _ in page.installer.logged)
 
 
 def test_the_watchdog_oracle_follows_the_installers_own_flag(hosting):
@@ -252,17 +340,34 @@ def test_another_prefix_working_greys_this_pages_buttons(hosting):
     assert all(not b.isEnabled() for b in page.installer._all_action_buttons)
 
 
-def test_re_enabling_asks_the_installer_rather_than_switching_them_all_on(hosting, qapp):
-    """The installer disables buttons for its own reasons -- no Wine yet,
-    nothing installed to update -- so turning them all back on would offer
-    actions it had already ruled out."""
+def test_re_enabling_puts_every_button_back_as_it_was(hosting, qapp):
+    """check_installation_status manages only a handful of these. Handing
+    re-enabling to it left every other action button dead for the life of the
+    page, so one clone of another prefix permanently disabled most of Setup."""
     page = page_for(hosting)
-    page.installer._all_action_buttons[0].setEnabled(False)   # its own decision
+    one, two = page.installer._all_action_buttons
+    one.setEnabled(False)               # the installer's own decision
+    two.setEnabled(True)
+
     page.set_actions_enabled(False)
+    assert not one.isEnabled() and not two.isEnabled()
+
     page.set_actions_enabled(True)
     qapp.processEvents()
+    assert not one.isEnabled(), "the installer's own decision was overridden"
+    assert two.isEnabled(), "a button the installer does not manage stayed dead"
     assert page.installer.refreshes == 1
-    assert not page.installer._all_action_buttons[0].isEnabled()
+
+
+def test_disabling_twice_does_not_lose_the_original_state(hosting, qapp):
+    page = page_for(hosting)
+    one, two = page.installer._all_action_buttons
+    one.setEnabled(False)
+    page.set_actions_enabled(False)
+    page.set_actions_enabled(False)     # a second prefix starts working too
+    page.set_actions_enabled(True)
+    qapp.processEvents()
+    assert not one.isEnabled() and two.isEnabled()
 
 
 def test_re_enabling_does_nothing_when_nothing_was_disabled(hosting, qapp):
@@ -300,6 +405,7 @@ def test_a_thread_exception_after_disposal_reaches_nobody(hosting):
     page = page_for(hosting)
     hosted.own_thread_exceptions(page)
     page.dispose()
+    assert page not in hosted._live_pages
     args = threading.ExceptHookArgs(
         (RuntimeError, RuntimeError("too late"), None, None))
     try:
@@ -309,3 +415,32 @@ def test_a_thread_exception_after_disposal_reaches_nobody(hosting):
     finally:
         hosted._previous_excepthook = previous
     assert "too late" not in prefixlog.tail("Scratch")
+
+
+def test_a_thread_still_running_after_disposal_cannot_reach_the_page(hosting, qapp):
+    """The installer starts daemon threads in its CONSTRUCTOR -- background
+    probing, the patcher fetch, the icon download -- and those have nothing to
+    do with the lock that decides whether a page may be dropped. One of them
+    calling start_operation after dispose() would claim the lock for a prefix
+    with no page, and touch a widget Qt has been told to delete."""
+    page = page_for(hosting)
+    installer = page.installer
+    page.dispose()
+    qapp.processEvents()
+
+    assert installer._page is None
+    installer.start_operation("Late arrival")     # must not raise, must not claim
+    installer.end_operation()
+    qapp.processEvents()
+    assert hosting.manager.lock.held is None
+    assert hosting.started == []
+
+
+def test_disposal_disconnects_the_progress_signals(hosting, qapp):
+    page = page_for(hosting)
+    installer = page.installer
+    page.dispose()
+    qapp.processEvents()
+    installer.progress_text_signal.emit("still going")   # must reach nobody
+    installer.progress_signal.emit(0.5)
+    qapp.processEvents()

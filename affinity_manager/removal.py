@@ -47,6 +47,7 @@ class Item:
     default: bool = True
     artifact: object = None     # a hoststate.Artifact, where there is one
     snapshot: object = None     # a snapshots.Snapshot, where there is one
+    value: str = ""             # for a default-handler: the .desktop it names
 
 
 @dataclass
@@ -107,8 +108,9 @@ def plan(reg, name: str) -> Plan:
             continue
         out.items.append(Item(
             "default-handler", handler.detail,
-            "After this, nothing opens that type until you set a handler",
-            None, 0, artifact=handler))
+            "Removes the association from mimeapps.list. After this, nothing "
+            "opens that type until you set a handler",
+            None, 0, artifact=handler, value=handler.value))
 
     out.items.append(Item(
         "registry", "The row in prefixes.json",
@@ -148,8 +150,15 @@ def apply(reg, plan_: Plan, chosen) -> list[str]:
     kinds = {i.kind for i in chosen}
     done: list[str] = []
 
-    if plan_.running:
-        return [f"Affinity is running in {plan_.name} (pid {plan_.running[0]}). "
+    # Asked again, now. plan_.running was read when the dialog was built, and
+    # the dialog can sit open for as long as somebody reads it -- long enough
+    # to double-click a document and have the desktop start Affinity in the
+    # very prefix being removed, which is not far-fetched when the plan's own
+    # default-handler rows say this prefix is what opens them.
+    live = probe.running_pids(plan_.path) if plan_.path.exists() else []
+    if live or plan_.running:
+        pid = (live or plan_.running)[0]
+        return [f"Affinity is running in {plan_.name} (pid {pid}). "
                 "Nothing was removed."]
 
     for item in chosen:
@@ -161,15 +170,30 @@ def apply(reg, plan_: Plan, chosen) -> list[str]:
         except OSError as exc:
             done.append(f"Could not remove {item.path}: {exc}")
 
+    # The document defaults, which are not files and cannot be deleted like
+    # one. hoststate.delete raises ValueError for a path-less artifact, and
+    # that ValueError used to escape this function entirely -- after the
+    # prefix directory had already been removed, so the registry row survived
+    # and the manager still listed a prefix that was no longer there.
     for item in chosen:
-        if item.kind in ("prefix", "registry", "settings-backup"):
+        if item.kind != "default-handler":
+            continue
+        try:
+            notes = hoststate.clear_handlers(item.value) if item.value else []
+            done += notes or [f"{item.label} was not recorded anywhere"]
+        except Exception as exc:                 # apply() does not raise
+            done.append(f"Could not clear {item.label}: {exc}")
+
+    for item in chosen:
+        if item.kind in ("prefix", "registry", "settings-backup",
+                         "default-handler"):
             continue
         if item.artifact is not None:
             try:
                 removed = hoststate.delete(item.artifact)
-                done.append(f"Removed {removed}" if removed
+                done.append(f"Kept a copy and removed {item.label}" if removed
                             else f"{item.label} was already gone")
-            except (hoststate.NotOurs, OSError) as exc:
+            except Exception as exc:             # apply() does not raise
                 done.append(f"Left {item.label}: {exc}")
             continue
         if item.path is not None:
@@ -188,9 +212,12 @@ def apply(reg, plan_: Plan, chosen) -> list[str]:
         except OSError as exc:
             done.append(f"Could not remove {item.path}: {exc}")
 
-    if "menu" in kinds or "mime" in kinds:
-        desktopentry.refresh_menu()
-        done.append("Rebuilt the desktop and MIME databases")
+    if kinds & {"menu", "mime", "default-handler"}:
+        try:
+            desktopentry.refresh_menu()
+            done.append("Rebuilt the desktop and MIME databases")
+        except Exception as exc:                 # apply() does not raise
+            done.append(f"Could not rebuild the desktop databases: {exc}")
 
     if "registry" in kinds:
         try:
@@ -198,6 +225,8 @@ def apply(reg, plan_: Plan, chosen) -> list[str]:
             done.append(f"Removed {plan_.name} from the list")
         except KeyError:
             done.append(f"{plan_.name} was no longer in the list")
+        except Exception as exc:                 # apply() does not raise
+            done.append(f"Could not update the list: {exc}")
 
     for artifact in plan_.left_alone:
         done.append(f"Left alone, not ours: {artifact.path or artifact.detail}")

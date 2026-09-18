@@ -26,6 +26,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -674,26 +675,80 @@ def launchers_naming(prefix, dirs=None) -> list[Path]:
     return out
 
 
-def _path_pattern(path: str):
-    """Match this path, and not a longer one that merely starts with it.
+# What ends a path in a launcher or a desktop entry when it is not quoted.
+# Everything except "/" and NUL is legal in a POSIX filename, so this is a list
+# of what a shell or a .desktop file uses to separate things, not a list of
+# what a filename may not contain.
+_DELIMITERS = " \t\n\r\f\v\"';:=,|&<>()"
 
-    ~/.AffinityLinux is a prefix of ~/.AffinityLinuxManager and of
-    ~/.AffinityLinux-winetest, and rewriting those would break two other things
-    to fix one. A real reference is followed by a separator, a quote, or
-    nothing -- never by another name character."""
-    return re.compile(re.escape(path) + r"(?![A-Za-z0-9._\-])")
+
+def _token_at(text: str, at: int) -> str:
+    """The whole path token containing the match that starts at `at`.
+
+    This is the part a lookahead cannot do. ~/.AffinityLinux is a prefix of
+    ~/.AffinityLinuxManager, of ~/.AffinityLinux-winetest, AND of
+    "~/.AffinityLinux 3.3" -- and the last one defeats any rule about the next
+    character, because a space is both a perfectly legal filename character and
+    the usual separator. The only way to tell them apart is to read the token
+    whole and compare it.
+
+    A match sitting immediately after a quote runs to the closing quote, which
+    is how a path with a space in it is written. Otherwise it runs to the first
+    delimiter."""
+    quote = text[at - 1] if at > 0 else ""
+    if quote in ("'", '"'):
+        end = text.find(quote, at)
+        return text[at:end if end >= 0 else len(text)]
+    end = at
+    while end < len(text) and text[end] not in _DELIMITERS:
+        end += 1
+    return text[at:end]
+
+
+def _references(text: str, path: str):
+    """Every place `text` really names `path` or something inside it.
+
+    Yields (start, token). A token that merely begins with the path -- a
+    sibling directory, a longer name -- is not a reference and is skipped."""
+    at = 0
+    while True:
+        at = text.find(path, at)
+        if at < 0:
+            return
+        token = _token_at(text, at)
+        if token == path or token.startswith(path + "/"):
+            yield at, token
+        at += 1
 
 
 def _names_path(text: str, path: str) -> bool:
-    return _path_pattern(path).search(text) is not None
+    return any(True for _ in _references(text, path))
 
 
-def plan_relocate(source, dest) -> RelocatePlan:
-    """What relocate() would do. Touches nothing."""
+def plan_relocate(source, dest, *, size=None) -> RelocatePlan:
+    """What relocate() would do. Touches nothing.
+
+    `size` lets a caller that already measured the prefix skip the walk. A
+    prefix is several gigabytes and du is not free, which matters when the
+    caller is a dialog rebuilding its text as somebody types."""
     src = Path(source).expanduser()
     dst = Path(dest).expanduser()
     if not probe.is_prefix(src):
         raise NotAPrefix(f"{src} does not look like a Wine prefix.")
+    # A symlinked source is refused, not followed. os.rename on a symlink
+    # renames the LINK: the prefix would not move at all, the old location
+    # would keep working, and the manager would report a move that did not
+    # happen. Everything else here follows links -- probe.is_prefix through
+    # is_dir(), the device check through os.stat -- so nothing else notices.
+    if src.is_symlink():
+        raise NotAPrefix(
+            f"{src} is a symlink to {os.path.realpath(src)}. Moving it would "
+            f"move the link and leave the prefix where it is. Move "
+            f"{os.path.realpath(src)} instead, or manage this one in place.")
+    if dst.is_symlink():
+        raise DestinationInUse(
+            f"{dst} is a symlink. Remove it, or choose another name: moving "
+            "onto it would write through it to somewhere unexpected.")
     if dst.exists() and not dst.is_dir():
         raise DestinationInUse(f"{dst} exists and is not a directory.")
     if dst.exists() and any(dst.iterdir()):
@@ -702,7 +757,7 @@ def plan_relocate(source, dest) -> RelocatePlan:
         raise DestinationInUse(f"{dst} is inside {src}.")
 
     same = _device_of_nearest_existing(src) == _device_of_nearest_existing(dst)
-    size = _du(src)
+    size = _du(src) if size is None else size
     if not same:
         free = shutil.disk_usage(
             dst if dst.exists() else dst.parent if dst.parent.exists()
@@ -733,17 +788,26 @@ def relocate(plan: RelocatePlan, *, progress=None, remove_source=False) -> list[
     _require_idle(src)
     if not probe.is_prefix(src):
         raise NotAPrefix(f"{src} does not look like a Wine prefix.")
+    # Re-checked, because the plan may be minutes old: a dialog was open.
+    if src.is_symlink():
+        raise NotAPrefix(f"{src} is a symlink; moving it would move the link.")
+    if dst.is_symlink():
+        raise DestinationInUse(f"{dst} is a symlink.")
     if dst.exists() and any(dst.iterdir()):
         raise DestinationInUse(f"{dst} exists and is not empty.")
 
     notes: list[str] = []
     if plan.same_filesystem:
         dst.parent.mkdir(parents=True, exist_ok=True)
-        if dst.exists():
-            dst.rmdir()                  # empty, checked above; rename needs it gone
         try:
+            if dst.exists():
+                dst.rmdir()          # empty, checked above; rename needs it gone
             os.rename(src, dst)
         except OSError as exc:
+            # Including the rmdir. It used to sit outside this try, so a
+            # destination that was not the directory it looked like raised a
+            # bare NotADirectoryError all the way out through the Qt slot that
+            # called it -- which aborts the process.
             raise CloneFailed(f"could not move {src} to {dst}: {exc}") from exc
         if progress:
             progress(100)
@@ -777,7 +841,6 @@ def repoint_launchers(old, new, *, dirs=None, dry_run=False) -> list[str]:
     of them is not something this application should make unrecoverable."""
     old_s = str(Path(old).expanduser())
     new_s = str(Path(new).expanduser())
-    pattern = _path_pattern(old_s)
     changed: list[str] = []
 
     for f in launchers_naming(old_s, dirs):
@@ -786,14 +849,32 @@ def repoint_launchers(old, new, *, dirs=None, dry_run=False) -> list[str]:
         except (OSError, UnicodeError) as exc:
             changed.append(f"could not read {f}: {exc}")
             continue
-        updated, count = pattern.subn(new_s, text)
-        if not count:
+
+        # Sliced, not substituted. re.sub treats the replacement as a TEMPLATE,
+        # so a base directory containing a backslash -- which the user types
+        # freely into the settings field, and which is created verbatim -- had
+        # its escapes interpreted: \\P became a bad-escape error and \\1 became
+        # a group reference. Nothing here is a pattern.
+        spots = list(_references(text, old_s))
+        if not spots:
             continue
+        pieces, cursor = [], 0
+        for at, _token in spots:
+            pieces.append(text[cursor:at])
+            pieces.append(new_s)
+            cursor = at + len(old_s)
+        pieces.append(text[cursor:])
+        updated, count = "".join(pieces), len(spots)
+
         if dry_run:
             changed.append(f"{f}: {count} reference(s) would be updated")
             continue
         try:
-            backup = f.with_name(f.name + ".before-move")
+            # A stamped name, like registry.aside_path. A fixed
+            # ".before-move" was truncated by the second move of the same
+            # prefix, so the copy of the launcher as the user originally wrote
+            # it was destroyed by the very mechanism meant to preserve it.
+            backup = _unused_backup(f)
             backup.write_text(text)
             shutil.copymode(f, backup)
             f.write_text(updated)
@@ -802,3 +883,13 @@ def repoint_launchers(old, new, *, dirs=None, dry_run=False) -> list[str]:
             continue
         changed.append(f"{f}: {count} reference(s) updated (kept {backup.name})")
     return changed
+
+
+def _unused_backup(path: Path) -> Path:
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    candidate = path.with_name(f"{path.name}.before-move-{stamp}")
+    n = 2
+    while candidate.exists():
+        candidate = path.with_name(f"{path.name}.before-move-{stamp}-{n}")
+        n += 1
+    return candidate

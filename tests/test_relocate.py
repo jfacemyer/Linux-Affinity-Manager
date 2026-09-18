@@ -140,7 +140,7 @@ def test_the_original_is_kept_beside_the_launcher(tmp_path, launcher_dir):
     original = 'PFX="%s"\n' % old
     script.write_text(original)
     maintenance.repoint_launchers(old, tmp_path / "Moved", dirs=[launcher_dir])
-    backups = [f for f in launcher_dir.iterdir() if f.name.endswith(".before-move")]
+    backups = [f for f in launcher_dir.iterdir() if ".before-move" in f.name]
     assert len(backups) == 1 and backups[0].read_text() == original
 
 
@@ -165,11 +165,29 @@ def test_a_launcher_that_does_not_name_the_prefix_is_not_touched(tmp_path, launc
 
 
 def test_a_binary_in_the_launcher_directory_is_skipped(tmp_path, launcher_dir):
-    """~/bin here holds 107MB of binaries. Reading them all cost 3.98s once."""
+    """Skipped because it is not decodable text, whatever its size."""
     old = tmp_path / ".AffinityLinux"
     blob = launcher_dir / "some-binary"
-    blob.write_bytes(b"\x00\x01\x02" + str(old).encode() + b"\xff\xfe")
+    blob.write_bytes(b"\x00\x01\x02\xff\xfe" + str(old).encode() + b"\xc3\x28")
     assert maintenance.launchers_naming(old, dirs=[launcher_dir]) == []
+
+
+def test_a_large_text_file_is_skipped_by_the_size_cap(tmp_path, launcher_dir,
+                                                      monkeypatch):
+    """~/bin here holds 107MB of files. Reading them all whole cost 3.98s per
+    call, once per selected item, on the GUI thread.
+
+    The old version of this test wrote 36 bytes and proved nothing about the
+    cap: deleting LAUNCHER_MAX_BYTES entirely left the suite green."""
+    old = tmp_path / ".AffinityLinux"
+    monkeypatch.setattr(maintenance, "LAUNCHER_MAX_BYTES", 4096)
+    big = launcher_dir / "enormous"
+    big.write_text('PFX="%s"\n' % old + "x" * 8192)
+    assert maintenance.launchers_naming(old, dirs=[launcher_dir]) == []
+
+    small = launcher_dir / "small"
+    small.write_text('PFX="%s"\n' % old)
+    assert maintenance.launchers_naming(old, dirs=[launcher_dir]) == [small]
 
 
 # -- the registry follows too ------------------------------------------------
@@ -192,3 +210,93 @@ def test_repointing_onto_another_prefixs_path_is_refused(tmp_path, monkeypatch):
     with pytest.raises(registry.PathInUse):
         reg.repoint("Test", tmp_path / "one")
     assert reg.by_name("Test")["path"] == str(tmp_path / "two")
+
+
+# ── the boundary, the template, and the backup ─────────────────────────────
+
+def test_a_quoted_path_with_a_space_is_not_a_reference(tmp_path, launcher_dir):
+    """The case no lookahead can decide. A space is both a perfectly legal
+    filename character and the usual separator, so ~/.AffinityLinux appears to
+    be followed by a delimiter inside "~/.AffinityLinux 3.3" -- and rewriting
+    it there renames somebody else's prefix in their launcher."""
+    old = tmp_path / ".AffinityLinux"
+    sibling = tmp_path / ".AffinityLinux 3.3"
+    script = launcher_dir / "affinity"
+    script.write_text('PFX="%s"\nALT="%s"\n' % (sibling, old))
+
+    maintenance.repoint_launchers(old, tmp_path / "Moved", dirs=[launcher_dir])
+    text = script.read_text()
+    assert 'PFX="%s"' % sibling in text, "a longer quoted path was rewritten"
+    assert 'ALT="%s"' % (tmp_path / "Moved") in text
+
+
+def test_an_unquoted_path_ending_at_a_separator_is_a_reference(tmp_path, launcher_dir):
+    old = tmp_path / ".AffinityLinux"
+    script = launcher_dir / "affinity.desktop"
+    script.write_text("Exec=env WINEPREFIX=%s wine app.exe\n" % old)
+    maintenance.repoint_launchers(old, tmp_path / "Moved", dirs=[launcher_dir])
+    assert "WINEPREFIX=%s wine" % (tmp_path / "Moved") in script.read_text()
+
+
+def test_a_path_inside_the_prefix_is_a_reference(tmp_path, launcher_dir):
+    old = tmp_path / ".AffinityLinux"
+    script = launcher_dir / "affinity"
+    script.write_text('exec "%s/ElementalWarriorWine/bin/wine"\n' % old)
+    maintenance.repoint_launchers(old, tmp_path / "Moved", dirs=[launcher_dir])
+    assert str(tmp_path / "Moved") + "/ElementalWarriorWine/bin/wine" \
+        in script.read_text()
+
+
+def test_a_backslash_in_the_new_path_is_not_a_regex_escape(tmp_path, launcher_dir):
+    r"""The base directory is typed freely into the settings field and created
+    verbatim. re.sub treats the replacement as a template, so \P raised
+    bad escape and \1 became a group reference."""
+    old = tmp_path / ".AffinityLinux"
+    new = tmp_path / "Wine\\Prefixes" / "Working"
+    script = launcher_dir / "affinity"
+    script.write_text('PFX="%s"\n' % old)
+    maintenance.repoint_launchers(old, new, dirs=[launcher_dir])
+    assert str(new) in script.read_text()
+
+
+def test_a_second_move_does_not_destroy_the_first_backup(tmp_path, launcher_dir):
+    """The copy of the launcher as the user originally wrote it was destroyed
+    by the very mechanism meant to preserve it."""
+    first = tmp_path / ".AffinityLinux"
+    script = launcher_dir / "affinity"
+    original = 'PFX="%s"\n' % first
+    script.write_text(original)
+
+    maintenance.repoint_launchers(first, tmp_path / "B", dirs=[launcher_dir])
+    maintenance.repoint_launchers(tmp_path / "B", tmp_path / "C", dirs=[launcher_dir])
+
+    backups = sorted(f for f in launcher_dir.iterdir() if ".before-move" in f.name)
+    assert len(backups) == 2
+    assert any(b.read_text() == original for b in backups), \
+        "the pre-first-move original was overwritten"
+
+
+# ── symlinks ───────────────────────────────────────────────────────────────
+
+def test_a_symlinked_source_prefix_is_refused(tmp_path):
+    """os.rename on a symlink renames the LINK. The prefix would not move, the
+    old location would keep working, and the manager would say it had moved."""
+    real = make_prefix(tmp_path / "real")
+    link = tmp_path / ".AffinityLinux"
+    link.symlink_to(real)
+    with pytest.raises(maintenance.NotAPrefix) as caught:
+        maintenance.plan_relocate(link, tmp_path / "Managed" / "Working")
+    assert str(real) in str(caught.value)
+    assert link.is_symlink() and (link / "system.reg").is_file()
+
+
+def test_a_symlinked_destination_is_refused(prefix, tmp_path):
+    """rmdir on a symlink is ENOTDIR, and that NotADirectoryError escaped all
+    the way out through the Qt slot that called it."""
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    dest = tmp_path / "Managed" / "Working"
+    dest.parent.mkdir(parents=True)
+    dest.symlink_to(elsewhere)
+    with pytest.raises(maintenance.DestinationInUse):
+        maintenance.plan_relocate(prefix, dest)

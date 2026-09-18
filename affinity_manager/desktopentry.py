@@ -141,18 +141,33 @@ def remove(prefix_name: str, command) -> bool:
     return True
 
 
+def owner_of(path: Path) -> str | None:
+    """The prefix a desktop entry names, exactly, or None."""
+    try:
+        text = path.read_text(errors="replace")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        key, sep, value = line.partition("=")
+        if sep and key.strip() == MARKER:
+            return value.strip()
+    return None
+
+
 def entries_for(prefix_name: str) -> list[Path]:
-    prefix_token = f"{MARKER}={prefix_name}"
+    """Every entry this application wrote for ONE prefix.
+
+    The whole line has to be read. Testing for the substring
+    "X-AffinityManager-Prefix=Test" matched a file whose value is "Test 33",
+    and prefix names may contain spaces -- so removing "Test" offered, and
+    deleted, the menu entries belonging to "Test 33"."""
     out = []
     directory = applications_dir()
     if not directory.is_dir():
         return out
     for path in directory.glob("affinity-manager-*.desktop"):
-        try:
-            if prefix_token in path.read_text(errors="replace"):
-                out.append(path)
-        except OSError:
-            continue
+        if owner_of(path) == prefix_name:
+            out.append(path)
     return sorted(out)
 
 

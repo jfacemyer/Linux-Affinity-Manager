@@ -25,6 +25,7 @@ without being asked for.
 
 from __future__ import annotations
 
+import getpass
 import shutil
 import time
 from dataclasses import dataclass
@@ -51,6 +52,20 @@ class Settings:
     @property
     def has_recents(self) -> bool:
         return (self.path / "RecentFiles.xml").is_file()
+
+    @property
+    def extras(self) -> list:
+        """What sits beside Settings in the version folder.
+
+        Affinity keeps the user's workspace layouts and keyboard shortcuts
+        here, not inside Settings. Copying only Settings across produced a
+        MIXED configuration in the new prefix -- the source's preferences and
+        recents next to the destination's workspaces -- which is worse than
+        either of them on its own."""
+        version = self.path.parent
+        if not version.is_dir():
+            return []
+        return [e for e in sorted(version.iterdir()) if e.name != "Settings"]
 
 
 def _measure(path: Path) -> tuple[int, int, float]:
@@ -137,13 +152,26 @@ def resolve_source(path) -> Settings | None:
     return found[0] if found else None
 
 
+# The accounts Wine creates that are never the person using it. The installer
+# has its own copy of this list; both are here so the two agree about which
+# user's AppData an Affinity install lives under.
+NOT_A_PERSON = ("Public", "Default", "All Users", "Default User")
+
+
 def destination_for(prefix, version=None) -> Path:
     """Where settings go in a prefix that may not have any yet.
 
     An existing Settings directory wins, because a prefix that has been started
-    once has already decided its user name and version folder. Otherwise this
-    falls back to the current user and 3.0 -- and the directory is not created
-    here, so a caller that only wanted to look has not changed anything."""
+    once has already decided its user name and version folder. Otherwise the
+    current login name is preferred if Wine made a directory for it -- which it
+    does -- and only then does this fall back to whatever else is there.
+
+    The skip list matches the installer's. They used to differ: this one let
+    "Default" and "Default User" through and then took the alphabetically
+    first, so on a prefix holding both Default and joshua it chose Default,
+    and settings were written where nothing would ever read them. The directory
+    is not created here, so a caller that only wanted to look has changed
+    nothing."""
     p = Path(prefix).expanduser()
     existing = settings_in(p)
     if existing:
@@ -157,10 +185,10 @@ def destination_for(prefix, version=None) -> Path:
     user = None
     if users.is_dir():
         names = [d for d in sorted(users.iterdir())
-                 if d.is_dir() and d.name not in ("Public", "All Users")]
-        user = names[0] if names else None
+                 if d.is_dir() and d.name not in NOT_A_PERSON]
+        me = getpass.getuser()
+        user = next((d for d in names if d.name == me), names[0] if names else None)
     if user is None:
-        import getpass
         user = users / getpass.getuser()
     return user.joinpath(*APPDATA_TAIL) / (version or "3.0") / "Settings"
 
@@ -171,17 +199,47 @@ class SeedResult:
     replaced: list
     kept: list
     saved_aside: Path | None
+    extras: list = None
+
+    def __post_init__(self):
+        if self.extras is None:
+            self.extras = []
 
 
 def plan(source: Settings, destination: Path) -> SeedResult:
-    """What seed() would do in REPLACE mode. Writes nothing."""
+    """What the user will end up with. Writes nothing.
+
+    "replaced" means the destination has a file of that name today and will
+    have the source's afterwards. It does NOT describe seed()'s mechanism: in
+    REPLACE mode the whole destination folder is renamed aside first, so
+    nothing is overwritten in place and nothing is lost. The old docstring
+    called this "what seed() would do in REPLACE mode", which was wrong in a
+    way that mattered -- it made the count look like a count of destroyed
+    files."""
     added, replaced = [], []
     for src in sorted(source.path.rglob("*")):
         if src.is_dir():
             continue
         rel = src.relative_to(source.path)
         (replaced if (destination / rel).exists() else added).append(rel)
-    return SeedResult(added, replaced, [], None)
+    return SeedResult(added, replaced, [], None,
+                      [e.name for e in source.extras])
+
+
+def aside_of(destination) -> Path | None:
+    """The most recent .before-copy- directory beside this Settings folder.
+
+    For the message shown when a copy fails. By then REPLACE has already
+    renamed the old settings aside, so the prefix has no Settings folder and
+    the only copy is under a name the user has never seen -- which is not
+    something to leave them to work out."""
+    dest = Path(destination).expanduser()
+    try:
+        found = [p for p in dest.parent.iterdir()
+                 if p.name.startswith(dest.name + ".before-copy-")]
+    except OSError:
+        return None
+    return max(found, key=lambda p: p.name) if found else None
 
 
 def seed(source: Settings, destination, *, mode=REPLACE) -> SeedResult:
@@ -215,4 +273,28 @@ def seed(source: Settings, destination, *, mode=REPLACE) -> SeedResult:
             added.append(rel)
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, target)
-    return SeedResult(added, replaced, kept, saved_aside)
+
+    # And the workspaces and shortcuts, which live beside Settings rather than
+    # inside it. Copying only Settings left the new prefix with the source's
+    # preferences and recents next to its own workspaces -- a configuration
+    # that had never existed anywhere.
+    extras = []
+    version_dir = dest.parent
+    for entry in source.extras:
+        target = version_dir / entry.name
+        if target.exists() or target.is_symlink():
+            if mode == FILL:
+                kept.append(Path("..") / entry.name)
+                continue
+            if target.is_dir() and not target.is_symlink():
+                shutil.rmtree(target)
+            else:
+                target.unlink()
+        version_dir.mkdir(parents=True, exist_ok=True)
+        if entry.is_dir() and not entry.is_symlink():
+            shutil.copytree(entry, target, symlinks=True)
+        else:
+            shutil.copy2(entry, target, follow_symlinks=False)
+        extras.append(entry.name)
+
+    return SeedResult(added, replaced, kept, saved_aside, extras)

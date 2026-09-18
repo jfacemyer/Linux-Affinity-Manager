@@ -42,6 +42,9 @@ class Situation:
         return self.state != MANAGED
 
 
+FIRST_RUN_DONE = "first_run_done"
+
+
 def look(reg=None, *, search=True) -> Situation:
     """Decide which of the three this is.
 
@@ -54,11 +57,27 @@ def look(reg=None, *, search=True) -> Situation:
     if reg.entries:
         return Situation(MANAGED, [], base, configured)
 
+    # Asked once. The registry going empty again -- forgetting the last prefix,
+    # or removing it -- is not a first run, and re-arming the search every time
+    # it happens would mean an unasked-for machine-wide walk whenever somebody
+    # tidies up.
+    from . import settings
+
+    if settings.get(FIRST_RUN_DONE):
+        return Situation(MANAGED, [], base, configured)
+
     installs = [i for i in discover.find_installations()] if search else []
     # Anything already managed is not adoptable, and with an empty list there
     # should be none -- but the search reads the registry itself, so a race or
     # a hand-edited file should not produce an offer to adopt what is held.
     installs = [i for i in installs if not i.get("managed_as")]
+    # And it has to have Affinity in it. discover now reports every Wine
+    # prefix, which is right for "Find installations" -- the user went looking,
+    # and an interrupted install is exactly what they need to see. It is wrong
+    # here: this is an unasked-for modal on somebody's first run, and offering
+    # to MOVE ~/.wine while calling it "an Affinity install" is both untrue and
+    # the kind of thing this application must never do.
+    installs = [i for i in installs if i.get("has_affinity")]
     if installs:
         return Situation(ADOPTABLE, installs, base, configured)
     return Situation(FRESH, [], base, configured)
@@ -84,12 +103,24 @@ def explain_in_place(install) -> list[str]:
     ]
 
 
-def explain_move(install, name, base=None) -> list[str]:
+def mark_asked() -> None:
+    """Record that the first-run offer has been made, whatever came of it."""
+    from . import settings
+
+    settings.set(FIRST_RUN_DONE, True)
+
+
+def explain_move(install, name, base=None, size=None) -> list[str]:
+    """`size`, when the caller already measured it.
+
+    Without it this walks the whole prefix, and the caller is a dialog that
+    re-renders on every keystroke in the name field -- so a several-gigabyte
+    du ran per character typed."""
     src = Path(install["path"])
     dest = Path(base or registry.base_dir()) / registry.dir_name(name)
     lines = [f"{src} is moved to {dest}."]
     try:
-        plan = maintenance.plan_relocate(src, dest)
+        plan = maintenance.plan_relocate(src, dest, size=size)
     except (maintenance.NotAPrefix, maintenance.DestinationInUse,
             maintenance.NotEnoughSpace) as exc:
         lines.append(f"This cannot be done right now: {exc}")
