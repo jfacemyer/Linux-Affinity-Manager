@@ -6478,10 +6478,14 @@ class AffinityInstallerGUI(QMainWindow):
         try:
             # Always use the standard location in user's config directory
             # This ensures icons are available even when script is piped from curl
-            script_dir = Path.home() / ".config" / "AffinityOnLinux" / "AffinityScripts"
-            script_dir.mkdir(parents=True, exist_ok=True)
+            # Named cache_dir, not script_dir: there is a module-level
+            # script_dir() and a local of that name shadows it for the WHOLE
+            # function body, so the call below raised TypeError before this
+            # method could download anything.
+            cache_dir = Path.home() / ".config" / "AffinityOnLinux" / "AffinityScripts"
+            cache_dir.mkdir(parents=True, exist_ok=True)
 
-            icons_dir = script_dir / "icons"
+            icons_dir = cache_dir / "icons"
 
             # Ensure icons directory exists
             icons_dir.mkdir(parents=True, exist_ok=True)
@@ -15920,9 +15924,13 @@ Would you like to continue with {distro_name} anyway?"""
                     # File already exists, skip
                     continue
 
-                # Try to copy from local repository first
-                source_file = source_patch_dir / filename
-                if source_file.exists():
+                # Try to copy from local repository first. There is no local
+                # repository at all for the piped install, which is the
+                # documented one -- source_patch_dir is None there, and
+                # None / filename raises into this method's own except Exception,
+                # taking the download below with it.
+                source_file = (source_patch_dir / filename) if source_patch_dir else None
+                if source_file is not None and source_file.exists():
                     try:
                         shutil.copy2(source_file, dest_file)
                         files_copied = True
