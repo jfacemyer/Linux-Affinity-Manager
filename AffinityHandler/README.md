@@ -107,8 +107,8 @@ grep -n 'POC SOURCE' AffinityScripts/AffinityLinuxInstaller.py
 | What | Points at now | Should point at |
 |---|---|---|
 | Wine 11.16 tarball | `forgejo.facemyer.net/facemyer/Affinity-Wine-Builder/releases/download/11.16/ElementalWarrior-wine-11.16.tar.xz` | `github.com/ryzendew/Affinity-Wine-Builder/releases/download/11.16/ElementalWarrior-wine-11.16.tar.xz` |
-| `affinity-on-linux.exe` | `forgejo.facemyer.net/facemyer/AffinityOnLinux/raw/branch/feature/open-documents-from-file-manager/AffinityHandler/` | `raw.githubusercontent.com/ryzendew/AffinityOnLinux/main/AffinityHandler/` |
-| MIME definitions | `forgejo.facemyer.net/facemyer/AffinityOnLinux/raw/branch/feature/open-documents-from-file-manager/mime/` | `raw.githubusercontent.com/ryzendew/AffinityOnLinux/main/mime/` |
+| `affinity-on-linux.exe` | `forgejo.facemyer.net/facemyer/AffinityOnLinux/raw/branch/experimental/affinity-3.3/AffinityHandler/` | `raw.githubusercontent.com/ryzendew/AffinityOnLinux/main/AffinityHandler/` |
+| MIME definitions | `forgejo.facemyer.net/facemyer/AffinityOnLinux/raw/branch/experimental/affinity-3.3/mime/` | `raw.githubusercontent.com/ryzendew/AffinityOnLinux/main/mime/` |
 
 The Wine one also depends on a release that does not exist upstream yet: 11.16
 built with the Affinity patch set, from the matching branch of
@@ -135,16 +135,16 @@ from `~/Downloads`.
 `affinity-on-linux.exe` committed beside this README, and a download that does
 not match it is refused rather than installed.
 
-That is not theoretical. The branch the URL above names is **eight handler
-commits behind** the branch this installer ships on, and the two binaries
-differ -- one of the commits in between is *"stop shipping the watchdog that
-kills sessions"*. So a piped install fetched and ran a handler with a known
-session-killing watchdog in it, silently, while a checkout install got the
-current one.
+That is not theoretical. The URL used to name an older PR branch that was
+**eight handler commits behind** this one, and the two binaries differ -- one of
+the commits in between is *"stop shipping the watchdog that kills sessions"*. So
+a piped install fetched and ran a handler with a known session-killing watchdog
+in it, silently, while a checkout install got the current one.
 
-**Pushing the current handler to the branch the URL names is a prerequisite for
-this working from a pipe at all.** Until that happens, a piped install declines
-file-manager integration and says why, which is the right failure.
+Both are fixed: the URL names the branch this installer ships on, and that
+branch has been pushed, so the blob it serves is the one pinned here. The
+checksum stays regardless -- it is what turns "the branch drifted" from a silent
+substitution into a refusal.
 
 ## Installing from this branch
 
@@ -152,7 +152,7 @@ The published one-liner installs `main`, which has none of this. To test the
 branch, install from it instead:
 
 ```bash
-curl -sSL https://forgejo.facemyer.net/facemyer/AffinityOnLinux/raw/branch/feature/open-documents-from-file-manager/AffinityScripts/AffinityLinuxInstaller.py | python3
+curl -sSL https://forgejo.facemyer.net/facemyer/AffinityOnLinux/raw/branch/experimental/affinity-3.3/AffinityScripts/AffinityLinuxInstaller.py | python3
 ```
 
 Then in *Choose Wine Version* pick **Wine 11.16 (opens documents from the file
@@ -167,7 +167,7 @@ repairs just this part without reinstalling Affinity or Wine.
 Or from a clone, which skips the downloads above:
 
 ```bash
-git clone -b feature/open-documents-from-file-manager \
+git clone -b experimental/affinity-3.3 \
   https://forgejo.facemyer.net/facemyer/AffinityOnLinux.git
 python3 AffinityOnLinux/AffinityScripts/AffinityLinuxInstaller.py
 ```

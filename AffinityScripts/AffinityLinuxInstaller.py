@@ -16826,16 +16826,17 @@ Would you like to continue with {distro_name} anyway?"""
         # the documented install pipes this script straight into python3, where
         # there is no checkout to copy from.
         #
-        # The branch named here is EIGHT handler commits behind the branch this
-        # installer ships on, and the two binaries genuinely differ -- one of
-        # the commits in between is "stop shipping the watchdog that kills
-        # sessions". So a piped install used to fetch, and run, a handler with
-        # a known session-killing watchdog in it, silently, while a checkout
-        # install got the current one. HANDLER_SHA256 below is what this
-        # installer expects; anything else is refused rather than installed.
+        # The branch named here is the branch this installer ships on, and
+        # that is not cosmetic. It used to name an older PR branch that was
+        # eight handler commits behind, whose binary still contained the
+        # startup watchdog that kills sessions -- so a piped install fetched
+        # and ran that one, silently, while a checkout install got the current
+        # one. HANDLER_SHA256 below is what this installer expects, checked on
+        # the download and on the checkout copy alike; anything else is refused
+        # rather than installed.
         raw_url = (
             "https://forgejo.facemyer.net/facemyer/AffinityOnLinux/raw/branch/"
-            "feature/open-documents-from-file-manager/"
+            "experimental/affinity-3.3/"
             "AffinityHandler/affinity-on-linux.exe"
         )
 
@@ -16925,7 +16926,7 @@ Would you like to continue with {distro_name} anyway?"""
         # POC SOURCE -- see install_file_manager_handler().
         raw_base = (
             "https://forgejo.facemyer.net/facemyer/AffinityOnLinux/raw/branch/"
-            "feature/open-documents-from-file-manager/mime/"
+            "experimental/affinity-3.3/mime/"
         )
 
         try:
