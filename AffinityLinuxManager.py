@@ -36,6 +36,7 @@ from PyQt6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QHBoxLayout,
+    QButtonGroup,
     QHeaderView,
     QInputDialog,
     QLabel,
@@ -45,6 +46,7 @@ from PyQt6.QtWidgets import (
     QStackedWidget,
     QProgressBar,
     QPushButton,
+    QRadioButton,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -54,6 +56,7 @@ from PyQt6.QtWidgets import (
 from affinity_manager import (
     __version__,
     aol,
+    backups,
     coldstart,
     commands as commands_mod,
     desktopentry,
@@ -809,11 +812,15 @@ class SnapshotsDialog(SizedDialog):
         ui.apply(self)
 
         layout = QVBoxLayout(self)
+        layout.addWidget(kinds_legend("snapshot"))
+        layout.addSpacing(6)
         blurb = QLabel(
-            "Preferences, shortcuts, recent files and the session state — "
-            "copied aside under a dated name, and kept as a directory so you "
-            "can read one without restoring it.")
+            "Kept under a dated name, as a directory, so you can read one "
+            "without restoring it. A snapshot cannot undo an install -- it "
+            "holds no Wine, no Affinity and no desktop files. That is what a "
+            "backup is for.")
         blurb.setWordWrap(True)
+        blurb.setObjectName("descriptionLabel")
         layout.addWidget(blurb)
 
         self.tree = QTreeWidget()
@@ -1717,6 +1724,486 @@ class FindDialog(SizedDialog):
             self._search()
 
 
+# ── three kinds of copy ──────────────────────────────────────────────────────
+#
+# Snapshot, clone and backup all "copy a prefix", and picking the wrong one is
+# how somebody finds out after an upgrade that what they kept cannot bring back
+# what they lost. So every one of the three dialogs opens with the same table,
+# with its own row marked, and the buttons that start them sit together with a
+# line under each saying what it is for.
+
+COPY_KINDS = (
+    ("backup", "Back up",
+     "An exact copy of the whole prefix, plus the desktop files around it: "
+     "the menu entry, what opens .afphoto/.afdesign/.afpub, Wine's file-type "
+     "definitions, and launchers that name the prefix. Kept wherever you "
+     "choose. Never launched.",
+     "Before an install or an upgrade. Restoring puts all of it back.",
+     "The prefix's full size"),
+    ("clone", "Clone",
+     "A second prefix, added to the list, that you launch and change.",
+     "To try something without touching the original. It is live: using it "
+     "changes it, so it is not something to fall back to.",
+     "The prefix's full size, in the base directory"),
+    ("snapshot", "Snapshot",
+     "Just the settings: preferences, workspaces, shortcuts, recent files.",
+     "Before changing settings. Restores into the same or another prefix.",
+     "A few MB, kept by the manager"),
+)
+
+COPY_CAPTIONS = {
+    "backup": "Frozen copy of everything, kept where you choose. For undoing an install.",
+    "clone": "A second prefix to launch and experiment in.",
+    "snapshot": "Just the settings. Megabytes, not gigabytes.",
+}
+
+
+def kinds_legend(current: str) -> QLabel:
+    rows = []
+    for key, name, what, when, size in COPY_KINDS:
+        mark = "▶ " if key == current else ""
+        weight = "font-weight:600;" if key == current else "opacity:0.8;"
+        rows.append(
+            f"<tr style='{weight}'><td style='padding:4px 10px 4px 0;"
+            f"white-space:nowrap;vertical-align:top'>{mark}<b>{name}</b></td>"
+            f"<td style='padding:4px 0'>{what}<br><i>{when}</i> "
+            f"&nbsp;·&nbsp; {size}</td></tr>")
+    label = QLabel("<table>" + "".join(rows) + "</table>")
+    label.setWordWrap(True)
+    label.setTextFormat(Qt.TextFormat.RichText)
+    label.setObjectName("descriptionLabel")
+    return label
+
+
+class TaskThread(QThread):
+    """One long job off the UI thread: fn(progress) -> result."""
+
+    done = pyqtSignal(object, str)
+    progress = pyqtSignal(int)
+
+    def __init__(self, fn):
+        super().__init__()
+        self.fn = fn
+
+    def run(self):
+        try:
+            result = self.fn(self.progress.emit)
+        except Exception as exc:                  # surfaced, not swallowed
+            self.done.emit(None, str(exc))
+            return
+        self.done.emit(result, "")
+
+
+class KindConfirmDialog(SizedDialog):
+    """A yes/no that says which of the three kinds of copy is being made."""
+
+    FIT_MIN_WIDTH = 700
+
+    def __init__(self, parent, title, kind, body, confirm):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setModal(True)
+        ui.apply(self)
+        layout = QVBoxLayout(self)
+        layout.addWidget(kinds_legend(kind))
+        layout.addSpacing(8)
+        text = QLabel(body)
+        text.setWordWrap(True)
+        layout.addWidget(text)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText(confirm)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+
+class BackupDialog(SizedDialog):
+    """Choose where, then back up.
+
+    Every location is shown with its free space and with whether it is on the
+    same physical disk as the prefix. That second fact is the one people get
+    wrong: /home and /mnt/work can be two partitions of one drive, and a backup
+    that is "somewhere else" by filesystem is not somewhere else when that
+    drive fails."""
+
+    FIT_MIN_WIDTH = 760
+
+    def __init__(self, parent, entry):
+        super().__init__(parent)
+        self.entry = entry
+        self.prefix = Path(entry["path"])
+        self.setWindowTitle(f"Back up {entry['name']}")
+        self.setModal(True)
+        ui.apply(self)
+        self.plan = None
+
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            self.size = maintenance._du(self.prefix)
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(kinds_legend("backup"))
+        layout.addSpacing(8)
+
+        self.running = QLabel("")
+        self.running.setWordWrap(True)
+        self.running.setObjectName("cautionText")
+        layout.addWidget(self.running)
+
+        layout.addWidget(QLabel(
+            f"<b>Where</b> — {entry['name']} needs about "
+            f"{probe.human_size(self.size)}"))
+        self.group = QButtonGroup(self)
+        self.locations_box = QVBoxLayout()
+        layout.addLayout(self.locations_box)
+        for loc in backups.candidate_locations(self.prefix):
+            self._add_location(loc)
+        row = QHBoxLayout()
+        other = QPushButton("Another folder…")
+        other.clicked.connect(self._choose)
+        row.addWidget(other)
+        row.addStretch(1)
+        layout.addLayout(row)
+        self.make_default = QCheckBox("Make this the default backup location")
+        layout.addWidget(self.make_default)
+
+        layout.addSpacing(6)
+        form = QFormLayout()
+        self.label = QLineEdit()
+        self.label.setPlaceholderText("optional, e.g. before 3.3")
+        form.addRow("Label", self.label)
+        layout.addLayout(form)
+
+        self.host = QCheckBox(
+            "Include the desktop files — the menu entry, document "
+            "associations, Wine's file-type definitions and the launchers "
+            "naming this prefix. Restoring them is what undoes an install.")
+        self.host.setChecked(True)
+        layout.addWidget(self.host)
+
+        self.status = QLabel("")
+        self.status.setWordWrap(True)
+        self.status.setObjectName("descriptionLabel")
+        layout.addWidget(self.status)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        self.ok = buttons.button(QDialogButtonBox.StandardButton.Ok)
+        self.ok.setText("Back up")
+        buttons.accepted.connect(self._confirm)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self.group.buttonToggled.connect(lambda *_: self._check())
+        if self.group.buttons():
+            self.group.buttons()[0].setChecked(True)
+        self._check()
+
+    def _add_location(self, loc):
+        radio = QRadioButton(f"{loc.path}" + (f"   ({loc.why})" if loc.why else ""))
+        radio.setProperty("location", loc)
+        self.group.addButton(radio)
+        self.locations_box.addWidget(radio)
+        note = QLabel(loc.describe(self.size))
+        note.setWordWrap(True)
+        note.setObjectName("cautionText" if (loc.same_disk or not loc.usable
+                                             or loc.free < self.size * 1.05)
+                           else "descriptionLabel")
+        note.setContentsMargins(26, 0, 0, 4)
+        self.locations_box.addWidget(note)
+        return radio
+
+    def _choose(self):
+        chosen = QFileDialog.getExistingDirectory(
+            self, "Where should the backup go?", str(Path.home()))
+        if not chosen:
+            return
+        radio = self._add_location(
+            backups.describe_location(chosen, self.prefix, "chosen now"))
+        radio.setChecked(True)
+
+    def chosen_location(self):
+        button = self.group.checkedButton()
+        return button.property("location") if button else None
+
+    def _check(self):
+        pids = backups.wine_pids(self.prefix)
+        self.running.setText(
+            f"Wine is running in {self.entry['name']} (pid {pids[0]}). Close "
+            "Affinity first: a copy taken under a running Wine can capture a "
+            "registry half-written." if pids else "")
+        loc = self.chosen_location()
+        ok = bool(loc) and not pids and loc.usable and loc.free >= self.size * 1.05
+        self.ok.setEnabled(ok)
+        if loc and loc.same_disk:
+            self.status.setText(
+                "This location is on the same physical disk as the prefix. "
+                "Fine for undoing an install; it will not survive the disk "
+                "failing.")
+        elif loc and loc.same_disk is False:
+            self.status.setText(f"On a different disk ({loc.disk}): this also "
+                                "survives the prefix's disk failing.")
+        else:
+            self.status.setText("")
+
+    def _confirm(self):
+        loc = self.chosen_location()
+        if loc is None:
+            return
+        try:
+            self.plan = backups.plan_backup(
+                self.entry["name"], self.prefix, loc.path,
+                label=self.label.text(), include_host=self.host.isChecked(),
+                size=self.size)
+        except (backups.BackupError, maintenance.NotEnoughSpace, OSError) as exc:
+            QMessageBox.warning(self, "Cannot back up there", str(exc))
+            return
+        if self.make_default.isChecked():
+            backups.set_default_location(loc.path)
+        self.accept()
+
+
+class RestoreBackupDialog(SizedDialog):
+    """What a restore will do, spelled out, before anything happens."""
+
+    FIT_MIN_WIDTH = 720
+
+    def __init__(self, parent, backup):
+        super().__init__(parent)
+        self.backup = backup
+        self.plan = None
+        self.setWindowTitle(f"Restore {backup}")
+        self.setModal(True)
+        ui.apply(self)
+        layout = QVBoxLayout(self)
+
+        intro = QLabel(
+            f"<b>{backup}</b><br>{backup.path}<br>"
+            f"Back to <b>{backup.prefix_path}</b>. Nothing is deleted: "
+            "whatever is replaced is kept aside, so a restore can itself be "
+            "undone.")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        self.do_prefix = QCheckBox("The prefix")
+        self.do_prefix.setChecked(True)
+        self.do_host = QCheckBox(
+            "The desktop files — menu entry, document associations, Wine's "
+            "file-type definitions, launchers")
+        self.do_host.setChecked(bool(backup.host_files or backup.mimeapps))
+        self.do_host.setEnabled(bool(backup.host_files or backup.mimeapps))
+        for box in (self.do_prefix, self.do_host):
+            box.toggled.connect(self._replan)
+            layout.addWidget(box)
+
+        self.detail = QLabel("")
+        self.detail.setWordWrap(True)
+        self.detail.setObjectName("descriptionLabel")
+        layout.addWidget(self.detail)
+        self.caution = QLabel("")
+        self.caution.setWordWrap(True)
+        self.caution.setObjectName("cautionText")
+        layout.addWidget(self.caution)
+
+        self.arm = QCheckBox("Yes, restore this backup")
+        self.arm.toggled.connect(self._arm)
+        layout.addWidget(self.arm)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        self.ok = buttons.button(QDialogButtonBox.StandardButton.Ok)
+        self.ok.setText("Restore")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self._replan()
+
+    def _replan(self):
+        self.plan, problem = None, ""
+        if not (self.do_prefix.isChecked() or self.do_host.isChecked()):
+            problem = "Choose at least one of the two."
+        else:
+            try:
+                self.plan = backups.plan_restore(
+                    self.backup, restore_prefix=self.do_prefix.isChecked(),
+                    restore_host=self.do_host.isChecked())
+            except (backups.BackupError, maintenance.NotEnoughSpace, OSError) as exc:
+                problem = str(exc)
+        self.detail.setText("\n".join(self.plan.describe()) if self.plan else "")
+        pids = backups.wine_pids(self.backup.prefix_path) \
+            if self.do_prefix.isChecked() else []
+        if pids:
+            problem = (f"Wine is running in {self.backup.prefix_path} (pid "
+                       f"{pids[0]}). Close Affinity there first.")
+            self.plan = None
+        self.caution.setText(problem)
+        self._arm()
+
+    def _arm(self):
+        self.ok.setEnabled(self.plan is not None and self.arm.isChecked())
+
+
+class BackupsDialog(SizedDialog):
+    """Every backup the manager knows of -- including ones whose prefix is gone
+    and ones on a disk that is not plugged in right now."""
+
+    FIT_MIN_WIDTH = 900
+    COLUMNS = ["Taken", "Prefix", "Label", "Size", "Where", "Status"]
+
+    def __init__(self, parent, manager, prefix_name=None):
+        super().__init__(parent)
+        self.manager = manager
+        self.setWindowTitle("Backups")
+        self.setModal(True)
+        ui.apply(self)
+        layout = QVBoxLayout(self)
+        layout.addWidget(kinds_legend("backup"))
+        layout.addSpacing(6)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Show"))
+        self.filter = QComboBox()
+        self.filter.addItem("All prefixes", None)
+        for e in manager.reg.entries:
+            self.filter.addItem(e["name"], e["name"])
+        if prefix_name:
+            index = self.filter.findData(prefix_name)
+            if index >= 0:
+                self.filter.setCurrentIndex(index)
+        self.filter.currentIndexChanged.connect(self._reload)
+        row.addWidget(self.filter)
+        row.addStretch(1)
+        layout.addLayout(row)
+
+        self.tree = QTreeWidget()
+        self.tree.setColumnCount(len(self.COLUMNS))
+        self.tree.setHeaderLabels(self.COLUMNS)
+        self.tree.setRootIsDecorated(False)
+        self.tree.itemSelectionChanged.connect(self._selection_changed)
+        layout.addWidget(self.tree, 1)
+
+        self.detail = QLabel("")
+        self.detail.setWordWrap(True)
+        self.detail.setObjectName("descriptionLabel")
+        self.detail.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(self.detail)
+
+        buttons = QHBoxLayout()
+        self.restore_button = QPushButton("Restore…")
+        self.verify_button = QPushButton("Verify")
+        self.open_button = QPushButton("Show folder")
+        self.delete_button = QPushButton("Delete")
+        close = QPushButton("Close")
+        self.restore_button.clicked.connect(self._restore)
+        self.verify_button.clicked.connect(self._verify)
+        self.open_button.clicked.connect(self._open)
+        self.delete_button.clicked.connect(self._delete)
+        close.clicked.connect(self.reject)
+        for b in (self.restore_button, self.verify_button, self.open_button,
+                  self.delete_button):
+            buttons.addWidget(b)
+        buttons.addStretch(1)
+        buttons.addWidget(close)
+        layout.addLayout(buttons)
+        self._reload()
+
+    def _reload(self):
+        self.tree.clear()
+        for b in backups.listing(self.filter.currentData()):
+            status = {"ok": "ok", "partial": "did not finish",
+                      "unreachable": "not reachable", "damaged": "damaged"}[b.status]
+            row = QTreeWidgetItem([
+                b.when, b.prefix_name, b.label or "—",
+                probe.human_size(b.bytes) if b.bytes else "—",
+                str(b.location), status])
+            row.setData(0, Qt.ItemDataRole.UserRole, b)
+            self.tree.addTopLevelItem(row)
+        for i in range(len(self.COLUMNS)):
+            self.tree.resizeColumnToContents(i)
+        self._selection_changed()
+
+    def selected(self):
+        rows = self.tree.selectedItems()
+        return rows[0].data(0, Qt.ItemDataRole.UserRole) if rows else None
+
+    def _selection_changed(self):
+        b = self.selected()
+        self.restore_button.setEnabled(bool(b) and b.status == "ok")
+        self.verify_button.setEnabled(bool(b) and b.status == "ok")
+        self.open_button.setEnabled(bool(b) and b.path.exists())
+        self.delete_button.setEnabled(bool(b) and b.status != "unreachable")
+        if not b:
+            self.detail.setText("Nothing here yet." if not self.tree.topLevelItemCount()
+                                else "Choose a backup.")
+            return
+        bits = [str(b.path)]
+        if b.prefix_path:
+            bits.append(f"Of {b.prefix_path}" + (f", on {b.machine}" if b.machine else ""))
+        if b.host_files:
+            bits.append(f"Includes {len(b.host_files)} desktop file(s) and the "
+                        "Affinity document associations.")
+        elif b.status == "ok":
+            bits.append("The prefix only — no desktop files.")
+        if b.prefix_path and b.path.exists():
+            disk = backups.describe_location(b.location, b.prefix_path)
+            if disk.same_disk:
+                bits.append("On the same physical disk as the prefix.")
+        bits += b.notes
+        self.detail.setText("\n".join(bits))
+
+    def _restore(self):
+        b = self.selected()
+        if not b:
+            return
+        dialog = RestoreBackupDialog(self, b)
+        if dialog.exec() != QDialog.DialogCode.Accepted or dialog.plan is None:
+            return
+        self.accept()
+        self.manager.run_restore(dialog.plan)
+
+    def _verify(self):
+        b = self.selected()
+        if not b:
+            return
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            problems = backups.verify(b)
+        finally:
+            QApplication.restoreOverrideCursor()
+        if problems:
+            QMessageBox.warning(self, "This backup does not match its record",
+                                "\n".join(problems[:10]))
+        else:
+            QMessageBox.information(
+                self, "Verified",
+                f"{b.files} files and {probe.human_size(b.bytes)}, as recorded.")
+
+    def _open(self):
+        b = self.selected()
+        if b:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(b.path)))
+
+    def _delete(self):
+        b = self.selected()
+        if not b:
+            return
+        if not ConfirmDialog.ask(
+                self, "Delete this backup",
+                f"Permanently delete <b>{b}</b>?<br><br>{b.path}<br>"
+                f"{probe.human_size(b.bytes) if b.bytes else ''}<br><br>"
+                "There is no undo, and a backup is the thing you would undo "
+                "with.", confirm="Delete backup"):
+            return
+        try:
+            backups.remove(b)
+        except (backups.BackupError, OSError) as exc:
+            QMessageBox.warning(self, "Could not delete it", str(exc))
+        self._reload()
+
+
 class SettingsDialog(SizedDialog):
     FIT_MIN_WIDTH = 620
 
@@ -1775,6 +2262,26 @@ class SettingsDialog(SizedDialog):
         self.installer_state.setObjectName("descriptionLabel")
         self.installer_state.setWordWrap(True)
         form.addRow("", self.installer_state)
+
+        row3 = QHBoxLayout()
+        self._original_backups = backups.default_location()
+        self.backup_location = QLineEdit(str(self._original_backups))
+        pick_backups = QPushButton("Browse…")
+        pick_backups.setObjectName("actionButton")
+        pick_backups.clicked.connect(self._pick_backups)
+        row3.addWidget(self.backup_location, 1)
+        row3.addWidget(pick_backups)
+        holder3 = QWidget()
+        holder3.setLayout(row3)
+        form.addRow("Backup location", holder3)
+        backups_note = QLabel(
+            "Where 'Back up' offers first. Any folder can still be chosen for "
+            "a single backup. For a backup that survives a disk failing, pick "
+            "one on a different physical disk -- the Back up dialog says which "
+            "ones are.")
+        backups_note.setObjectName("descriptionLabel")
+        backups_note.setWordWrap(True)
+        form.addRow("", backups_note)
 
         self.theme = QComboBox()
         for name in ui.THEMES:
@@ -1857,11 +2364,21 @@ class SettingsDialog(SizedDialog):
                 return
             _settings.set("installer_script", str(Path(script).expanduser()))
 
+        chosen_backups = self.backup_location.text().strip()
+        if chosen_backups and Path(chosen_backups).expanduser() != self._original_backups:
+            backups.set_default_location(chosen_backups)
+
         theme = self.theme.currentData()
         if theme != self._original_theme:
             ui.set_theme(theme)
             self.theme_changed = True
         self.accept()
+
+    def _pick_backups(self):
+        chosen = QFileDialog.getExistingDirectory(
+            self, "Default backup location", self.backup_location.text())
+        if chosen:
+            self.backup_location.setText(chosen)
 
 
 class ManagerWindow(QMainWindow):
@@ -2224,6 +2741,18 @@ class ManagerWindow(QMainWindow):
             layout.addWidget(button)
         return card
 
+    def _captioned_card(self, title, pairs):
+        card = self._button_card(title, [])
+        layout = card.layout()
+        for button, caption in pairs:
+            layout.addWidget(button)
+            note = QLabel(caption)
+            note.setWordWrap(True)
+            note.setObjectName("cardCaption")
+            note.setContentsMargins(4, 0, 4, 6)
+            layout.addWidget(note)
+        return card
+
     def _build(self):
         central = QWidget()
         main_layout = QVBoxLayout(central)
@@ -2287,7 +2816,7 @@ class ManagerWindow(QMainWindow):
             "Bring preferences, workspaces, recent files and drive letters in "
             "from another prefix. Use after Setup, before first launch")
         self.snapshots_button = self._action(
-            "Snapshots", self.show_snapshots,
+            "Snapshots…", self.show_snapshots,
             "Dated copies of this prefix's preferences, shortcuts and recent "
             "files -- take one before anything risky")
         self.protect_button = self._action(
@@ -2296,8 +2825,17 @@ class ManagerWindow(QMainWindow):
             "Stop managing", self.forget_selected,
             "Remove from the list. The directory is left alone")
         self.clone_button = self._action(
-            "Clone", self.clone_selected,
-            "Copy this prefix to a new one, optionally dropping the Wine builds it is not using")
+            "Clone…", self.clone_selected,
+            "A second prefix you can launch and experiment in. Not a backup: "
+            "using it changes it")
+        self.backup_button = self._action(
+            "Back up…", self.backup_selected,
+            "An exact copy of the whole prefix and its desktop files, kept "
+            "wherever you choose and never launched. For undoing an install")
+        self.backups_button = self._action(
+            "Backups…", self.show_backups,
+            "Every backup: restore, verify, delete -- including ones whose "
+            "prefix has gone or whose disk is unplugged")
         self.clean_button = self._action(
             "Clean", self.clean_selected,
             "Reclaim space: Wine builds this prefix does not use, downloaded archives, saved-aside copies")
@@ -2312,13 +2850,26 @@ class ManagerWindow(QMainWindow):
         left_layout.setSpacing(16)
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.addWidget(self._button_card(
-            "Prefixes", [self.new_button, self.find_button, self.adopt_button]))
+            "Prefixes", [self.new_button, self.find_button, self.adopt_button,
+                         self.backups_button]))
         left_layout.addWidget(self._button_card(
             "Selected prefix",
-            [self.launch_button, self.commands_button, self.installer_button,
-             self.copy_settings_button, self.snapshots_button,
-             self.clone_button, self.clean_button,
-             self.protect_button, self.forget_button, self.delete_button]))
+            [self.launch_button, self.installer_button,
+             self.copy_settings_button, self.commands_button]))
+        # The three kinds of copy together, each with a line saying what it is
+        # for. They all "copy a prefix", and choosing the wrong one is found out
+        # at the worst moment. Above the maintenance card rather than below it:
+        # the first version put this third, under eight buttons, where Back up
+        # -- the thing to do before an install -- needed a scroll to find.
+        left_layout.addWidget(self._captioned_card(
+            "Copies of this prefix",
+            [(self.backup_button, COPY_CAPTIONS["backup"]),
+             (self.clone_button, COPY_CAPTIONS["clone"]),
+             (self.snapshots_button, COPY_CAPTIONS["snapshot"])]))
+        left_layout.addWidget(self._button_card(
+            "Maintenance",
+            [self.clean_button, self.protect_button, self.forget_button,
+             self.delete_button]))
         left_layout.addWidget(self._button_card("View", [self.refresh_button]))
         left_layout.addStretch(1)
 
@@ -2537,6 +3088,7 @@ class ManagerWindow(QMainWindow):
     BUSY_BUTTONS = ("new_button", "find_button", "adopt_button", "launch_button",
                     "commands_button", "installer_button", "clone_button",
                     "snapshots_button", "copy_settings_button",
+                    "backup_button", "backups_button",
                     "clean_button", "protect_button", "forget_button",
                     "delete_button", "refresh_button")
 
@@ -2856,6 +3408,7 @@ class ManagerWindow(QMainWindow):
             self.commands_button,
             self.snapshots_button,
             self.copy_settings_button,
+            self.backup_button,
             self.protect_button,
             self.delete_button,
             # Clone and Clean act on the selection too, and refresh() rebuilds
@@ -2949,6 +3502,112 @@ class ManagerWindow(QMainWindow):
         if not entry:
             return
         self.show_setup(entry)
+
+    def backup_selected(self):
+        entry = self.selected_entry()
+        if not entry:
+            return
+        dialog = BackupDialog(self, entry)
+        if dialog.exec() != QDialog.DialogCode.Accepted or dialog.plan is None:
+            return
+        plan = dialog.plan
+        self._run_task(
+            entry["name"], "Back up",
+            f"Backing up {entry['name']} to {plan.dest.parent}",
+            lambda progress: backups.create(plan, progress=progress),
+            self._backup_finished)
+
+    def _backup_finished(self, result, error):
+        if error:
+            QMessageBox.critical(
+                self, "Backup failed",
+                f"{error}\n\nWhat was copied so far is listed under Backups as "
+                "unfinished, and can be deleted from there.")
+            return
+        problems = backups.verify(result)
+        body = (f"{result}\n{result.path}\n\n{result.files} files, "
+                f"{probe.human_size(result.bytes)}")
+        if result.host_files:
+            body += f", and {len(result.host_files)} desktop file(s)"
+        if problems:
+            QMessageBox.warning(self, "Backed up, but it does not verify",
+                                body + ".\n\n" + "\n".join(problems[:8]))
+        else:
+            QMessageBox.information(self, "Backed up", body + ". Verified.")
+
+    def show_backups(self):
+        entry = self.selected_entry()
+        BackupsDialog(self, self, entry["name"] if entry else None).exec()
+
+    def run_restore(self, plan):
+        name = plan.backup.prefix_name
+        self._run_task(
+            name, "Restore",
+            f"Restoring {plan.backup}",
+            lambda progress: backups.restore(plan, progress=progress),
+            lambda result, error: self._restore_finished(plan, result, error))
+
+    def _restore_finished(self, plan, notes, error):
+        if error:
+            QMessageBox.critical(
+                self, "Restore failed",
+                f"{error}\n\nThe prefix that was there has not been moved.")
+            self.refresh()
+            return
+        # The prefix that was replaced goes into the list, so it can be
+        # launched if the restore turns out to be the wrong one, or removed
+        # with everything else it left on the host.
+        extra = []
+        if plan.moved_aside_to and plan.moved_aside_to.exists():
+            aside_name = backups.aside_name(plan.backup.prefix_name)
+            try:
+                self.reg.add(aside_name, plan.moved_aside_to)
+                extra.append(f"The prefix that was there is listed as "
+                             f"'{aside_name}'.")
+            except (registry.InvalidName, registry.DuplicateName,
+                    registry.PathInUse) as exc:
+                extra.append(f"The prefix that was there is at "
+                             f"{plan.moved_aside_to} ({exc}).")
+        if plan.restore_prefix and self.reg.by_path(plan.target) is None:
+            for candidate in (plan.backup.prefix_name,
+                              plan.backup.prefix_name + " restored"):
+                try:
+                    self.reg.add(candidate, plan.target)
+                    break
+                except (registry.InvalidName, registry.DuplicateName,
+                        registry.PathInUse):
+                    continue
+        self.refresh()
+        QMessageBox.information(self, "Restored",
+                                "\n".join((notes or [])[:16] + extra))
+
+    def _run_task(self, prefix, operation, message, fn, on_done):
+        """A long job for one prefix: under the lock, off the UI thread, with
+        the progress bar, and its result handed to on_done(result, error)."""
+        thread = TaskThread(fn)
+        try:
+            self._busy_start(message, 100, prefix=prefix, operation=operation,
+                             alive=thread.isRunning)
+        except oplock.InUse as exc:
+            self._refuse(exc)
+            return
+        self._task_thread = thread           # a live reference, or Qt deletes it
+        thread.progress.connect(lambda pct: self._busy_step(pct, f"{message} — {pct}%"))
+
+        def finished(result, error):
+            # A slot: anything escaping it aborts the process, and this one
+            # runs at the end of an eleven-gigabyte copy.
+            try:
+                self._busy_done(f"{operation} {'failed' if error else 'finished'}",
+                                owner=prefix)
+                on_done(result, error)
+            except Exception as exc:
+                prefixlog.write(prefix, f"{operation}: reporting failed: {exc}")
+                QMessageBox.warning(self, operation,
+                                    f"{operation} ended, but reporting it failed: {exc}")
+
+        thread.done.connect(finished)
+        thread.start()
 
     def show_snapshots(self):
         entry = self.selected_entry()
@@ -3069,15 +3728,17 @@ class ManagerWindow(QMainWindow):
             QMessageBox.warning(self, "Cannot clone", str(exc))
             return
 
-        dropped = f"\nLeaving out: {', '.join(plan.drop_builds)}" if plan.drop_builds else ""
-        if QMessageBox.question(
-            self, "Clone this prefix",
-            f"Copy {path}\n  to {dest}\n\n"
-            f"About {probe.human_size(plan.est_size)}.{dropped}\n\n"
-            "This reads the original and writes only to the copy.",
-            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Ok,
-        ) != QMessageBox.StandardButton.Ok:
+        dropped = (f"<br>Leaving out: {', '.join(plan.drop_builds)}"
+                   if plan.drop_builds else "")
+        if KindConfirmDialog(
+            self, "Clone this prefix", "clone",
+            f"Copy <b>{path}</b><br>to <b>{dest}</b><br><br>"
+            f"About {probe.human_size(plan.est_size)}.{dropped}<br><br>"
+            "This reads the original and writes only to the copy. The copy "
+            "joins the list as a prefix of its own. If what you want is "
+            "something to fall back to after an upgrade, use <b>Back up</b> "
+            "instead.", "Clone",
+        ).exec() != QDialog.DialogCode.Accepted:
             return
 
         # Built before the claim so the watchdog has something to ask about,

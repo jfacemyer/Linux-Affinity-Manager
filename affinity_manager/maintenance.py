@@ -438,9 +438,42 @@ def clone(plan: Plan, *, progress=None) -> list[str]:
         )
 
     problems: list[str] = []
-    cmd = ["rsync", "-a", "--delete", "--info=progress2"]
-    for b in plan.drop_builds:
-        cmd += ["--exclude", f"/{b}/"]
+    copy_tree(src, dst, progress=progress, exclude_top=plan.drop_builds,
+              delete=True)
+
+    problems += repoint_symlinks(src, dst)
+
+    # A dropped build can strand ElementalWarriorWine. Prefer whatever the
+    # source's launchers named, since that is what the prefix actually runs.
+    named = fix_wine_symlink(dst, prefer=sorted(builds_named_by_launchers(src)))
+    if named:
+        problems.append(f"ElementalWarriorWine -> {named}")
+    elif plan.keep_builds:
+        problems.append("ElementalWarriorWine could not be pointed at a build")
+    return problems
+
+
+def copy_tree(src, dst, *, progress=None, exclude_top=(), delete=False,
+              hard_links=False) -> None:
+    """Copy a directory tree exactly: symlinks as symlinks, modes and times kept.
+
+    The one copier, shared by clone and backup, so the fixes below live in one
+    place. Raises CloneFailed on any failure -- a copy that half-finished and
+    said nothing is how a truncated prefix got registered as a usable one.
+
+    `exclude_top` names entries directly inside `src` to leave out. Only at the
+    top: the fallback used to pass them to shutil.ignore_patterns, which
+    ignores a matching name at ANY depth, so a folder inside drive_c that
+    happened to share a Wine build's name would have been skipped too."""
+    src, dst = Path(src), Path(dst)
+    dst.mkdir(parents=True, exist_ok=True)
+    cmd = ["rsync", "-a", "--info=progress2"]
+    if hard_links:
+        cmd.append("-H")
+    if delete:
+        cmd.append("--delete")
+    for name in exclude_top:
+        cmd += ["--exclude", f"/{name}/", "--exclude", f"/{name}"]
     cmd += [f"{src}/", f"{dst}/"]
 
     if shutil.which("rsync"):
@@ -479,24 +512,19 @@ def clone(plan: Plan, *, progress=None) -> list[str]:
                     f"{err[-1] if err else 'no output'}"
                 )
     else:
+        top = str(src)
+        skip = set(exclude_top)
+
+        def ignore(directory, names):
+            return [n for n in names if directory == top and n in skip]
+
         try:
             shutil.copytree(src, dst, symlinks=True, dirs_exist_ok=True,
-                            ignore=shutil.ignore_patterns(*plan.drop_builds))
+                            ignore=ignore)
         except (OSError, shutil.Error) as exc:
             raise CloneFailed(f"copy failed: {exc}") from exc
     if progress:
         progress(100)
-
-    problems += repoint_symlinks(src, dst)
-
-    # A dropped build can strand ElementalWarriorWine. Prefer whatever the
-    # source's launchers named, since that is what the prefix actually runs.
-    named = fix_wine_symlink(dst, prefer=sorted(builds_named_by_launchers(src)))
-    if named:
-        problems.append(f"ElementalWarriorWine -> {named}")
-    elif plan.keep_builds:
-        problems.append("ElementalWarriorWine could not be pointed at a build")
-    return problems
 
 
 
