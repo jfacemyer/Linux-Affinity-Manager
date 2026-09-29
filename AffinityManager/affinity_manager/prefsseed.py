@@ -21,11 +21,26 @@ There are two ways to copy, and they are not interchangeable:
 Nothing here decides which. The caller asks, and the default offered is REPLACE
 only because the user reached for this deliberately; FILL is what happens
 without being asked for.
+
+Not everything beside Settings is a setting. The version folder also holds
+Affinity's crash-recovery autosaves (205 MB of them in the working prefix this
+was written against, the oldest from December), the WebView2 browser profile,
+temp directories, crash reports, logs, and a pid file that exists only while
+Affinity is running. An earlier version copied all of it on the claim that "the
+version folder is configuration and nothing else" -- a claim made without ever
+listing a real one. So every entry is now one of three kinds, and only one kind
+is carried.
+
+Drive letters travel too, because recent files are Windows paths. 89 of the 117
+recents in that prefix were paths on W:, and a fresh prefix has only C: and Z:.
 """
 
 from __future__ import annotations
 
+import collections
 import getpass
+import os
+import re
 import shutil
 import time
 from dataclasses import dataclass
@@ -36,6 +51,54 @@ REPLACE = "replace"
 
 # <prefix>/drive_c/users/<user>/AppData/Roaming/Affinity/Affinity/<version>/Settings
 APPDATA_TAIL = ("AppData", "Roaming", "Affinity", "Affinity")
+
+
+# ── what is in the version folder ────────────────────────────────────────────
+
+CONFIG = "config"         # carried into a new prefix, and kept in snapshots
+VOLATILE = "volatile"     # never carried, never snapshotted
+UNKNOWN = "unknown"       # kept in snapshots, left behind by a carry, and named
+
+# Known to be the user's configuration. Everything a person set up by hand:
+# workspace layouts, shortcuts, print presets, colour profiles, plugins, lens
+# profiles, fonts Affinity downloaded, the home-screen state, and the MCP
+# server config the Affinity scripting bridge reads.
+CONFIG_NAMES = frozenset({
+    "Workspaces", "user", "profiles", "printing", "Plugins", "LensProfiles",
+    "AffinityFonts", "preferences.dat", "studios3.dat", "home_favourites3.dat",
+    "home_newdocument.dat", "notificationoptions.dat", "mcp.json",
+})
+
+# Known to be state belonging to one prefix's running history, not to the user.
+#   autosave      crash-recovery files from sessions that did not end cleanly.
+#                 In a different prefix they are at best dead weight and at
+#                 worst an offer to "recover" documents on first launch.
+#   backup        Affinity's own document backups, likewise.
+#   pid           exists only while Affinity runs. Copied mid-session it would
+#                 start the new prefix with a pid from a process in another one.
+#   EBWebView     the WebView2 browser profile -- shader cache, crash dumps,
+#                 metrics, and the runtime version it was built against.
+#   temp, temp-critical, CrashReports, and logs: what the names say.
+VOLATILE_NAMES = frozenset({
+    "autosave", "backup", "pid", "EBWebView", "temp", "temp-critical",
+    "CrashReports", "Log.txt",
+})
+VOLATILE_SUFFIXES = (".log",)
+
+
+def kind_of(name: str) -> str:
+    """CONFIG, VOLATILE or UNKNOWN for one entry in a version folder.
+
+    UNKNOWN is deliberate rather than a gap. A carry that took unrecognised
+    entries would drag the next cache Affinity invents into every new prefix; a
+    snapshot that dropped them would lose the next setting it invents. So a
+    snapshot keeps them, a carry leaves them where they are and says so by
+    name, and nothing is lost either way -- the source is only ever read."""
+    if name in CONFIG_NAMES:
+        return CONFIG
+    if name in VOLATILE_NAMES or name.lower().endswith(VOLATILE_SUFFIXES):
+        return VOLATILE
+    return UNKNOWN
 
 
 @dataclass
@@ -53,19 +116,43 @@ class Settings:
     def has_recents(self) -> bool:
         return (self.path / "RecentFiles.xml").is_file()
 
-    @property
-    def extras(self) -> list:
-        """What sits beside Settings in the version folder.
-
-        Affinity keeps the user's workspace layouts and keyboard shortcuts
-        here, not inside Settings. Copying only Settings across produced a
-        MIXED configuration in the new prefix -- the source's preferences and
-        recents next to the destination's workspaces -- which is worse than
-        either of them on its own."""
+    def _beside(self) -> list:
         version = self.path.parent
         if not version.is_dir():
             return []
         return [e for e in sorted(version.iterdir()) if e.name != "Settings"]
+
+    @property
+    def extras(self) -> list:
+        """The configuration beside Settings -- and only that.
+
+        Affinity keeps workspace layouts and keyboard shortcuts here, not
+        inside Settings, so they have to travel; copying only Settings produced
+        the source's preferences next to the destination's workspaces. But the
+        same folder holds autosaves, a WebView2 profile and a live pid file,
+        and those must not. See kind_of."""
+        return [e for e in self._beside() if kind_of(e.name) == CONFIG]
+
+    @property
+    def left_behind(self) -> list:
+        """(entry, kind) for everything a carry does not take, so it can be
+        named to the user rather than silently dropped."""
+        return [(e, kind_of(e.name)) for e in self._beside()
+                if kind_of(e.name) != CONFIG]
+
+    def recents_by_drive(self) -> collections.Counter:
+        """How many recent files sit on each drive letter.
+
+        This is what makes the drive-letter import worth having: a count next
+        to W: says which mappings the recent-files list actually depends on."""
+        counts = collections.Counter()
+        try:
+            text = (self.path / "RecentFiles.xml").read_text(errors="replace")
+        except OSError:
+            return counts
+        for letter in re.findall(r"(?<![A-Za-z0-9])([A-Za-z]):\\", text):
+            counts[letter.upper()] += 1
+        return counts
 
 
 def _measure(path: Path) -> tuple[int, int, float]:
@@ -280,16 +367,17 @@ def seed(source: Settings, destination, *, mode=REPLACE) -> SeedResult:
     # that had never existed anywhere.
     extras = []
     version_dir = dest.parent
+    stamp = time.strftime("%Y-%m-%d-%H%M%S")
     for entry in source.extras:
         target = version_dir / entry.name
         if target.exists() or target.is_symlink():
             if mode == FILL:
                 kept.append(Path("..") / entry.name)
                 continue
-            if target.is_dir() and not target.is_symlink():
-                shutil.rmtree(target)
-            else:
-                target.unlink()
+            # Renamed aside, like Settings. This used to rmtree what it
+            # displaced, while the module docstring promised REPLACE deletes
+            # nothing -- true for Settings only.
+            target.rename(target.with_name("%s.before-copy-%s" % (entry.name, stamp)))
         version_dir.mkdir(parents=True, exist_ok=True)
         if entry.is_dir() and not entry.is_symlink():
             shutil.copytree(entry, target, symlinks=True)
@@ -298,3 +386,135 @@ def seed(source: Settings, destination, *, mode=REPLACE) -> SeedResult:
         extras.append(entry.name)
 
     return SeedResult(added, replaced, kept, saved_aside, extras)
+
+
+# ── drive letters ────────────────────────────────────────────────────────────
+#
+# A Wine drive letter is a symlink in <prefix>/dosdevices: "w:" -> /mnt/work.
+# Recent files, and paths stored inside documents, are Windows paths, so a new
+# prefix without the old prefix's letters has recents that point nowhere.
+
+
+class PrefixNotReady(RuntimeError):
+    """The destination has not been initialised by Wine yet."""
+
+
+@dataclass
+class DriveLetter:
+    letter: str           # lower case, no colon: "w"
+    target: str           # where it points: "/mnt/work"
+
+    @property
+    def label(self) -> str:
+        return self.letter.upper() + ":"
+
+    @property
+    def available(self) -> bool:
+        """False for removable media that is not plugged in right now. The
+        mapping is still worth carrying -- it is right again the moment the
+        disk is mounted -- but the user should see which ones are absent."""
+        return os.path.isdir(self.target)
+
+
+# Wine's own. C: is the prefix's drive_c and Z: is the host's root; a
+# different target for either is not a designation, it is a broken prefix.
+_WINE_OWNS = ("c", "z")
+_LETTER = re.compile(r"^([a-zA-Z]):$")
+
+
+def drive_letters(prefix) -> list[DriveLetter]:
+    """The user's drive designations in a prefix.
+
+    Only symlinks named with ONE colon. Wine also keeps "d::"-style entries
+    that point at raw block devices, for programs that open a drive directly;
+    those name hardware on this machine and are not designations anybody
+    made. Relative targets are skipped for a similar reason: they point inside
+    the prefix they came from."""
+    dosdevices = Path(prefix).expanduser() / "dosdevices"
+    out = []
+    try:
+        entries = sorted(dosdevices.iterdir())
+    except OSError:
+        return out
+    for entry in entries:
+        match = _LETTER.match(entry.name)
+        if not match or match.group(1).lower() in _WINE_OWNS:
+            continue
+        if not entry.is_symlink():
+            continue
+        try:
+            target = os.readlink(entry)
+        except OSError:
+            continue
+        if not os.path.isabs(target):
+            continue
+        out.append(DriveLetter(match.group(1).lower(), target))
+    return out
+
+
+def prefix_of(path) -> Path | None:
+    """The prefix a Settings folder lives in, found by walking up to the
+    directory that holds dosdevices. None for a Settings folder that has been
+    copied out of any prefix -- a backup on another disk."""
+    for parent in Path(path).expanduser().resolve().parents:
+        if (parent / "dosdevices").is_dir() and (parent / "drive_c").is_dir():
+            return parent
+    return None
+
+
+def is_initialised(prefix) -> bool:
+    """Has Wine created this prefix's drives?
+
+    The test is dosdevices/c:, and it is the only safe one. Wine creates C: and
+    Z: ONLY when it creates dosdevices itself -- dlls/ntdll/unix/server.c:
+
+        if (!mkdir( "dosdevices", 0777 ))
+        {
+            mkdir( "drive_c", 0777 );
+            symlink( "../drive_c", "dosdevices/c:" );
+            symlink( "/", "dosdevices/z:" );
+        }
+
+    so putting a drive letter into a prefix before Wine has run in it leaves a
+    prefix with no C: drive at all."""
+    return (Path(prefix).expanduser() / "dosdevices" / "c:").is_symlink()
+
+
+def import_drive_letters(prefix, letters) -> list[str]:
+    """Create these drive letters in an initialised prefix. Returns notes.
+
+    Never overwrites. A letter the destination already maps to the same place
+    is reported as already there; one it maps somewhere else is left exactly
+    as it is and reported, because which of the two the user meant is not
+    something this can know."""
+    root = Path(prefix).expanduser()
+    if not is_initialised(root):
+        raise PrefixNotReady(
+            f"{root} has not been set up by Wine yet, so it has no C: drive. "
+            "Adding a drive letter now would stop Wine ever creating one. Run "
+            "Setup first, then import the drive letters.")
+    dosdevices = root / "dosdevices"
+    notes = []
+    for d in letters:
+        if d.letter in _WINE_OWNS:
+            notes.append(f"{d.label} belongs to Wine; left alone")
+            continue
+        link = dosdevices / f"{d.letter}:"
+        if link.is_symlink() or link.exists():
+            try:
+                current = os.readlink(link)
+            except OSError:
+                current = None
+            if current == d.target:
+                notes.append(f"{d.label} is already {d.target}")
+            else:
+                notes.append(f"{d.label} is already {current or 'something else'}; "
+                             f"left alone rather than pointed at {d.target}")
+            continue
+        try:
+            link.symlink_to(d.target)
+            notes.append(f"{d.label} -> {d.target}"
+                         + ("" if d.available else "  (not mounted right now)"))
+        except OSError as exc:
+            notes.append(f"could not create {d.label}: {exc}")
+    return notes

@@ -101,22 +101,27 @@ def _source(prefix) -> prefsseed.Settings:
 
 
 def _siblings(version_dir: Path) -> list[Path]:
-    """Everything in the version folder except Settings itself.
+    """What beside Settings belongs in a snapshot: everything not volatile.
 
-    Was a list of known names and suffixes -- sess.db, anything .dat -- and it
-    admitted only files. Affinity keeps the user's keyboard shortcuts and
-    workspace layouts in DIRECTORIES beside Settings, so a snapshot the dialog
-    promised contained "preferences, shortcuts, recent files and the session
-    state" contained neither the shortcuts nor the workspaces.
+    The history matters here. This first admitted only sess.db and *.dat, and
+    missed the workspaces and shortcuts the dialog promises. Then it took
+    everything, on the claim that the version folder is configuration and
+    nothing else -- and the working prefix's folder turned out to hold 205 MB of
+    crash-recovery autosaves, a WebView2 profile, temp directories and a pid
+    file that exists only while Affinity runs. Every snapshot was 224 MB, most
+    of it other people's problems.
 
-    The version folder is configuration and nothing else, so the safe rule is
-    the inclusive one: take all of it. Anything unrecognised is more likely to
-    be something new that matters than something large that does not."""
+    So it follows prefsseed.kind_of: configuration and anything unrecognised
+    are kept, volatile state is not. A snapshot keeps the unrecognised because
+    it is a backup and losing a new kind of setting is the worse mistake; a
+    carry into a new prefix leaves them behind for the opposite reason."""
     out = []
     if not version_dir.is_dir():
         return out
     for entry in sorted(version_dir.iterdir()):
         if entry.name == "Settings":
+            continue
+        if prefsseed.kind_of(entry.name) == prefsseed.VOLATILE:
             continue
         out.append(entry)
     return out

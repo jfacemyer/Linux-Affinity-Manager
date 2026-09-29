@@ -7,6 +7,7 @@ drift. And that copying settings into a prefix never destroys what is there
 without leaving it recoverable: RecentFiles.xml is the one thing a reinstall
 cannot give back.
 """
+import os
 import sys
 import time
 from pathlib import Path
@@ -384,8 +385,11 @@ def test_the_workspaces_and_shortcuts_come_across_too(tmp_path):
     result = prefsseed.seed(source, dest, mode=prefsseed.REPLACE)
 
     assert (dest.parent / "Workspaces" / "mine.xml").read_text() == "my layout"
-    assert (dest.parent / "sess.db").read_text() == "session"
-    assert "Workspaces" in result.extras and "sess.db" in result.extras
+    assert "Workspaces" in result.extras
+    # sess.db is a session database, not a preference. It is not recognised as
+    # configuration, so a carry into a clean prefix leaves it where it is.
+    assert not (dest.parent / "sess.db").exists()
+    assert "sess.db" not in result.extras
 
 
 def test_filling_keeps_the_destinations_own_workspaces(tmp_path):
@@ -451,3 +455,186 @@ def test_the_aside_copy_can_be_found_again(tmp_path):
 def test_no_aside_copy_is_not_an_error(tmp_path):
     new = make_prefix(tmp_path / "New")
     assert prefsseed.aside_of(make_settings(new)) is None
+
+
+
+# ── what is and is not a setting ───────────────────────────────────────────
+#
+# The names below are the working prefix's version folder, listed on
+# 2026-09-29. The previous rule copied all of them.
+
+LIVE_FOLDER = {
+    "dirs": ["AffinityFonts", "autosave", "backup", "CrashReports", "EBWebView",
+             "LensProfiles", "Plugins", "printing", "profiles", "Samples",
+             "shunt", "temp", "temp-critical", "user", "welcome", "Workspaces"],
+    "files": ["cs.log", "home_favourites3.dat", "home_newdocument.dat",
+              "ipc.log", "lessons.json", "Log.txt", "mcp.json",
+              "notificationoptions.dat", "pid", "preferences.dat", "sess.db",
+              "studios3.dat"],
+}
+
+
+def build_live_shaped(prefix: Path) -> Path:
+    settings = make_settings(prefix)
+    version = settings.parent
+    for d in LIVE_FOLDER["dirs"]:
+        (version / d).mkdir(exist_ok=True)
+        (version / d / "x").write_text(d)
+    for f in LIVE_FOLDER["files"]:
+        (version / f).write_text(f)
+    return settings
+
+
+def test_autosaves_webview_pid_temp_and_logs_are_never_carried(tmp_path):
+    """Crash-recovery autosaves (205 MB in the working prefix), the WebView2
+    profile, a pid that exists only while Affinity runs, temp, crash reports,
+    logs. None of it is a setting, and in a clean prefix the autosaves would
+    be offered back as documents to recover."""
+    old, new = make_prefix(tmp_path / "Old"), make_prefix(tmp_path / "New")
+    build_live_shaped(old)
+    source = prefsseed.settings_in(old)[0]
+    dest = prefsseed.destination_for(new)
+    prefsseed.seed(source, dest, mode=prefsseed.REPLACE)
+
+    for name in ("autosave", "backup", "EBWebView", "pid", "temp",
+                 "temp-critical", "CrashReports", "Log.txt", "cs.log", "ipc.log"):
+        assert not (dest.parent / name).exists(), f"{name} was carried"
+
+
+def test_every_recognised_setting_is_carried(tmp_path):
+    old, new = make_prefix(tmp_path / "Old"), make_prefix(tmp_path / "New")
+    build_live_shaped(old)
+    source = prefsseed.settings_in(old)[0]
+    dest = prefsseed.destination_for(new)
+    prefsseed.seed(source, dest, mode=prefsseed.REPLACE)
+    for name in sorted(prefsseed.CONFIG_NAMES):
+        assert (dest.parent / name).exists(), f"{name} was not carried"
+
+
+def test_what_is_left_behind_is_named(tmp_path):
+    old = make_prefix(tmp_path / "Old")
+    build_live_shaped(old)
+    left = {e.name: kind for e, kind in prefsseed.settings_in(old)[0].left_behind}
+    assert left["autosave"] == prefsseed.VOLATILE
+    assert left["sess.db"] == prefsseed.UNKNOWN
+    assert "Workspaces" not in left and "mcp.json" not in left
+
+
+def test_replace_renames_displaced_workspaces_aside(tmp_path):
+    """The module promised REPLACE deletes nothing. That was true for Settings
+    and false for everything beside it, which was rmtree'd."""
+    old, new = make_prefix(tmp_path / "Old"), make_prefix(tmp_path / "New")
+    make_settings(old)
+    make_settings(new)
+    for prefix, text in ((old, "theirs"), (new, "mine")):
+        version = prefsseed.settings_in(prefix)[0].path.parent
+        (version / "Workspaces").mkdir()
+        (version / "Workspaces" / "w.xml").write_text(text)
+    dest = prefsseed.settings_in(new)[0].path
+    prefsseed.seed(prefsseed.settings_in(old)[0], dest, mode=prefsseed.REPLACE)
+
+    assert (dest.parent / "Workspaces" / "w.xml").read_text() == "theirs"
+    aside = [p for p in dest.parent.iterdir()
+             if p.name.startswith("Workspaces.before-copy-")]
+    assert len(aside) == 1 and (aside[0] / "w.xml").read_text() == "mine"
+
+
+# ── drive letters ──────────────────────────────────────────────────────────
+
+def wine_drives(prefix: Path, **letters) -> Path:
+    """dosdevices as Wine lays it out: c: relative, z: to /, the user's own
+    letters absolute, raw-device entries with two colons, serial ports."""
+    dd = prefix / "dosdevices"
+    for name in ("c:", "z:"):
+        (dd / name).unlink(missing_ok=True)
+    (dd / "c:").symlink_to("../drive_c")
+    (dd / "z:").symlink_to("/")
+    (dd / "d::").symlink_to("/dev/sda1")
+    (dd / "com1").symlink_to("/dev/ttyS0")
+    for letter, target in letters.items():
+        (dd / f"{letter}:").symlink_to(target)
+    return prefix
+
+
+def test_only_the_users_own_letters_are_found(tmp_path):
+    work = tmp_path / "work"
+    work.mkdir()
+    old = wine_drives(make_prefix(tmp_path / "Old"), w=str(work),
+                      k="/run/media/nobody/NIKON")
+    found = {d.letter: d for d in prefsseed.drive_letters(old)}
+    assert set(found) == {"w", "k"}, "c:, z:, d:: and com1 are not designations"
+    assert found["w"].target == str(work) and found["w"].available
+    assert not found["k"].available
+
+
+def test_a_relative_letter_is_not_carried(tmp_path):
+    """A relative target points inside the prefix it came from."""
+    old = wine_drives(make_prefix(tmp_path / "Old"))
+    (old / "dosdevices" / "e:").symlink_to("../drive_c/stuff")
+    assert prefsseed.drive_letters(old) == []
+
+
+def test_letters_are_not_written_into_a_prefix_wine_has_not_set_up(tmp_path):
+    """Wine creates C: and Z: only when it creates dosdevices itself
+    (dlls/ntdll/unix/server.c). A W: put there first leaves a prefix with no
+    C: drive -- so the import refuses, and creates nothing at all."""
+    fresh = tmp_path / "Fresh"
+    (fresh / "drive_c" / "users" / "joshua").mkdir(parents=True)
+    with pytest.raises(prefsseed.PrefixNotReady):
+        prefsseed.import_drive_letters(
+            fresh, [prefsseed.DriveLetter("w", "/mnt/work")])
+    assert not (fresh / "dosdevices").exists(), "dosdevices was created"
+
+
+def test_letters_are_imported_into_a_set_up_prefix(tmp_path):
+    work = tmp_path / "work"
+    work.mkdir()
+    new = wine_drives(make_prefix(tmp_path / "New"))
+    notes = prefsseed.import_drive_letters(
+        new, [prefsseed.DriveLetter("w", str(work))])
+    link = new / "dosdevices" / "w:"
+    assert link.is_symlink() and os.readlink(link) == str(work)
+    assert any("W: ->" in n for n in notes)
+
+
+def test_an_existing_letter_is_never_changed(tmp_path):
+    new = wine_drives(make_prefix(tmp_path / "New"), w="/somewhere/else")
+    notes = prefsseed.import_drive_letters(
+        new, [prefsseed.DriveLetter("w", "/mnt/work")])
+    assert os.readlink(new / "dosdevices" / "w:") == "/somewhere/else"
+    assert any("left alone" in n for n in notes)
+
+
+def test_importing_the_same_letter_twice_is_harmless(tmp_path):
+    new = wine_drives(make_prefix(tmp_path / "New"))
+    letter = [prefsseed.DriveLetter("w", "/mnt/work")]
+    prefsseed.import_drive_letters(new, letter)
+    notes = prefsseed.import_drive_letters(new, letter)
+    assert any("already /mnt/work" in n for n in notes)
+
+
+def test_wines_own_letters_cannot_be_imported(tmp_path):
+    new = wine_drives(make_prefix(tmp_path / "New"))
+    prefsseed.import_drive_letters(new, [prefsseed.DriveLetter("c", "/tmp"),
+                                         prefsseed.DriveLetter("z", "/tmp")])
+    assert os.readlink(new / "dosdevices" / "c:") == "../drive_c"
+    assert os.readlink(new / "dosdevices" / "z:") == "/"
+
+
+def test_recents_are_counted_by_drive(tmp_path):
+    old = make_prefix(tmp_path / "Old")
+    settings = make_settings(old)
+    (settings / "RecentFiles.xml").write_text(
+        '<r><f path="W:\\Clients\\a.af"/><f path="W:\\b.af"/>'
+        '<f path="Z:\\home\\c.af"/><f path="http://x.y/z"/></r>')
+    counts = prefsseed.settings_in(old)[0].recents_by_drive()
+    assert counts == {"W": 2, "Z": 1}
+
+
+def test_a_settings_folder_knows_which_prefix_it_is_in(tmp_path):
+    old = wine_drives(make_prefix(tmp_path / "Old"))
+    settings = make_settings(old)
+    assert prefsseed.prefix_of(settings) == old.resolve()
+    loose = tmp_path / "backup-disk" / "Settings"
+    loose.mkdir(parents=True)
+    assert prefsseed.prefix_of(loose) is None
