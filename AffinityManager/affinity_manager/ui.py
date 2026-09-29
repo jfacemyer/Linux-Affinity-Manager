@@ -180,6 +180,16 @@ QLabel#cautionText { color: #F5A623; }
 """
 
 
+# Rules that are the same whichever theme is worn.
+#
+# cardCaption: the line under each of Back up / Clone / Snapshots. As a plain
+# descriptionLabel it picked up the installer theme's label background and sat
+# on a darker band inside the card, which read as a text field.
+_COMMON = """
+QLabel#cardCaption { background: transparent; border: none; }
+"""
+
+
 def current_theme() -> str:
     theme = settings.get("theme", DEFAULT_THEME)
     return theme if theme in THEMES else DEFAULT_THEME
@@ -199,7 +209,7 @@ def stylesheet(theme: str | None = None) -> str:
     theme = theme or current_theme()
     if theme not in _stylesheet_cache:
         base = _installer_stylesheet(theme) or FALLBACK_STYLESHEET
-        _stylesheet_cache[theme] = base + _SUPPLEMENT.get(theme, "")
+        _stylesheet_cache[theme] = base + _SUPPLEMENT.get(theme, "") + _COMMON
     return _stylesheet_cache[theme]
 
 
