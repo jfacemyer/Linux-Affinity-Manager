@@ -570,3 +570,21 @@ def test_renaming_a_prefix_to_itself_is_not_a_collision(host):
     host.reg.add("Affinity 33", str(host.tmp / "a"))
     host.reg.rename("Affinity 33", "Affinity  33")   # same slug, same prefix
     assert host.reg.by_name("Affinity  33") is not None
+
+
+def test_a_snapshot_leaves_out_autosaves_and_the_webview_profile(host):
+    """Every snapshot of the working prefix was 224 MB, 205 of it crash-recovery
+    autosaves. A backup of settings is not a backup of those."""
+    settings = settings_in(host.prefix)
+    version = settings.parent
+    for d in ("autosave", "EBWebView", "temp"):
+        (version / d).mkdir()
+        (version / d / "big").write_bytes(b"x" * 4096)
+    (version / "pid").write_text("12345")
+    (version / "Workspaces").mkdir()
+
+    snap = snapshots.take("Working", host.prefix, "lean")
+    for name in ("autosave", "EBWebView", "temp", "pid"):
+        assert not (snap.path / name).exists(), f"{name} was snapshotted"
+    assert (snap.path / "Workspaces").is_dir()
+    assert (snap.path / "sess.db").is_file(), "unrecognised state is kept in a backup"

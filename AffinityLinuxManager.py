@@ -446,44 +446,48 @@ class FirstRunDialog(SizedDialog):
 
 
 class CarrySettingsDialog(SizedDialog):
-    """Bring preferences and recent files across from another prefix.
+    """Bring preferences, recent files and drive letters across from another prefix.
 
-    Offered after a new prefix is built, because that is when somebody who has
-    been using Affinity for a year discovers their workspace is gone -- and
-    RecentFiles.xml is the one thing a reinstall cannot give back.
+    Run after Setup, before Affinity's first launch in the destination. After,
+    because drive letters cannot exist until Wine has initialised the prefix --
+    see prefsseed.is_initialised. Before first launch, because that is when the
+    destination still holds only stock settings.
 
-    Any prefix can be a source, and so can a directory typed or browsed to: a
-    backup, a prefix on another disk, one restored from a snapshot."""
+    Three things are shown, because each has been got wrong before:
+      - what is copied, and what is deliberately left behind by name -- the
+        source folder holds 200 MB of crash-recovery autosaves and a WebView2
+        profile that are not settings;
+      - the drive letters, each with how many recent files depend on it, since
+        a recent file on W: is a dead link in a prefix without a W:;
+      - whether the source is running, because Affinity rewrites
+        preferences.dat and RecentFiles.xml as it goes."""
 
-    FIT_MIN_WIDTH = 640
+    FIT_MIN_WIDTH = 700
 
-    def __init__(self, parent, destination, sources):
+    def __init__(self, parent, dest_prefix, destination, sources):
         super().__init__(parent)
         self.setWindowTitle("Copy settings from another prefix")
         self.setModal(True)
         ui.apply(self)
+        self.dest_prefix = Path(dest_prefix)
         self.destination = Path(destination)
         self.sources = list(sources)
         self.manual = None
+        self.letter_boxes = []
 
         layout = QVBoxLayout(self)
-        # "A new prefix starts with the stock settings" was said whatever was
-        # there. Choosing "use it anyway" for a directory that already existed
-        # reaches this dialog too, and that prefix may hold a year of somebody
-        # else's preferences.
-        populated = bool(prefsseed.settings_in(self.destination.parents[3])) \
-            if len(self.destination.parents) > 3 else False
-        opening = ("This prefix already has Affinity settings in it."
+        populated = bool(prefsseed.settings_in(self.dest_prefix))
+        opening = ("This prefix already has Affinity settings in it; they will "
+                   "be renamed aside, not deleted."
                    if populated else
-                   "A new prefix starts with the stock settings.")
+                   "This prefix has no Affinity settings yet.")
         blurb = QLabel(
             opening + (
-                " If you already use Affinity, its preferences, shortcuts and "
-                "recent files can be copied across instead."
+                " Your preferences, workspaces, shortcuts, recent files and "
+                "drive letters can be brought across from another prefix."
                 if self.sources else
-                " No other managed prefix has any to copy, but if you have "
-                "them somewhere else — a backup, another disk, a prefix this "
-                "manager does not know about — they can come from there."))
+                " No other managed prefix has any to copy, but a backup or a "
+                "prefix on another disk works just as well."))
         blurb.setWordWrap(True)
         layout.addWidget(blurb)
 
@@ -505,21 +509,38 @@ class CarrySettingsDialog(SizedDialog):
         self.chosen_label.setObjectName("descriptionLabel")
         layout.addWidget(self.chosen_label)
 
+        self.running_label = QLabel("")
+        self.running_label.setWordWrap(True)
+        self.running_label.setObjectName("cautionText")
+        layout.addWidget(self.running_label)
+
+        layout.addSpacing(6)
+        layout.addWidget(QLabel("<b>Drive letters</b>"))
+        self.letters_note = QLabel("")
+        self.letters_note.setWordWrap(True)
+        self.letters_note.setObjectName("descriptionLabel")
+        layout.addWidget(self.letters_note)
+        self.letters_holder = QWidget()
+        self.letters_layout = QVBoxLayout(self.letters_holder)
+        self.letters_layout.setContentsMargins(12, 0, 0, 0)
+        layout.addWidget(self.letters_holder)
+
         self.replace = QCheckBox(
-            "Replace what is in the new prefix (the current Settings folder is "
-            "renamed aside first, not deleted)")
+            "Replace what is in this prefix (what is there is renamed aside "
+            "first, not deleted)")
         self.replace.setChecked(True)
         layout.addWidget(self.replace)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Copy settings")
-        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("Start fresh")
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Copy")
         buttons.accepted.connect(self._confirm)
         buttons.rejected.connect(self.reject)
         self.ok_button = buttons.button(QDialogButtonBox.StandardButton.Ok)
         layout.addWidget(buttons)
         self._picked()
+
+    # -- the source ----------------------------------------------------------
 
     def _picked(self):
         source = self.picker.currentData()
@@ -527,16 +548,102 @@ class CarrySettingsDialog(SizedDialog):
             self.chosen_label.setText(
                 "Choose a prefix, or the Settings folder inside one. A backup "
                 "or a copy on another disk works just as well.")
+            self.running_label.setText("")
+            self._letters_for(None)
             return
         self._describe(source)
 
     def _describe(self, source):
         plan = prefsseed.plan(source, self.destination)
-        extras = (", plus " + ", ".join(plan.extras)) if plan.extras else ""
+        left = []
+        for entry, kind in source.left_behind:
+            if kind == prefsseed.VOLATILE:
+                files, size, _ = prefsseed._measure(entry) if entry.is_dir() \
+                    else (1, entry.stat().st_size, 0)
+                left.append("%s (%s)" % (entry.name, probe.human_size(size))
+                            if size > 1024 * 1024 else entry.name)
+            else:
+                left.append(entry.name + "?")
         self.chosen_label.setText(
-            "%s\n%d file(s) would be added, %d replaced%s. Recent files: %s."
-            % (source.path, len(plan.added), len(plan.replaced), extras,
-               "yes" if source.has_recents else "none in this source"))
+            "%s\n%d setting file(s): %d new, %d replacing what is there.\n"
+            "Also copied: %s.\nNot copied: %s.%s"
+            % (source.path, len(plan.added) + len(plan.replaced),
+               len(plan.added), len(plan.replaced),
+               ", ".join(plan.extras) or "nothing else",
+               ", ".join(left) or "nothing",
+               "\n(Names ending in ? are not recognised as settings, so they "
+               "are left where they are rather than guessed at.)"
+               if any(n.endswith("?") for n in left) else ""))
+
+        home = prefsseed.prefix_of(source.path)
+        pids = probe.running_pids(home) if home else []
+        self.running_label.setText(
+            "Affinity is running in the source (pid %s). It rewrites "
+            "preferences.dat and RecentFiles.xml as it works, so this copies "
+            "them as they are this second. Closing it first gives you exactly "
+            "what it saves on exit." % pids[0] if pids else "")
+        self._letters_for(source)
+
+    # -- drive letters -------------------------------------------------------
+
+    def _letters_for(self, source):
+        for box in self.letter_boxes:
+            box.setParent(None)
+            box.deleteLater()
+        self.letter_boxes = []
+
+        home = prefsseed.prefix_of(source.path) if source else None
+        letters = prefsseed.drive_letters(home) if home else []
+        ready = prefsseed.is_initialised(self.dest_prefix)
+
+        if source is None:
+            self.letters_note.setText("")
+            return
+        if not letters:
+            self.letters_note.setText(
+                "The source has no drive letters beyond C: and Z:."
+                if home else
+                "This source is not inside a prefix, so it has no drive "
+                "letters to bring.")
+            return
+        if not ready:
+            self.letters_note.setText(
+                "This prefix has not been set up by Wine yet, so drive letters "
+                "cannot be added: Wine only creates C: when it creates the "
+                "drive list itself. Run Setup first, then copy again.")
+        else:
+            self.letters_note.setText(
+                "Recent files and paths inside documents are Windows paths, so "
+                "these decide whether they still resolve. Existing letters in "
+                "this prefix are never changed.")
+
+        used = source.recents_by_drive()
+        existing = {d.letter: d.target for d in prefsseed.drive_letters(self.dest_prefix)} \
+            if ready else {}
+        for d in letters:
+            notes = []
+            if used.get(d.label[0]):
+                notes.append("%d recent file(s)" % used[d.label[0]])
+            if not d.available:
+                notes.append("not mounted now")
+            clash = existing.get(d.letter)
+            if clash == d.target:
+                notes.append("already set here")
+            elif clash:
+                notes.append("already %s here; left alone" % clash)
+            box = QCheckBox("%s  →  %s%s" % (d.label, d.target,
+                            ("   (" + ", ".join(notes) + ")") if notes else ""))
+            box.setChecked(ready and clash is None)
+            box.setEnabled(ready and clash is None)
+            box.setProperty("letter", d)
+            self.letters_layout.addWidget(box)
+            self.letter_boxes.append(box)
+
+    def chosen_letters(self):
+        return [b.property("letter") for b in self.letter_boxes
+                if b.isEnabled() and b.isChecked()]
+
+    # -- the answer ------------------------------------------------------------
 
     def _confirm(self):
         source = self.picker.currentData()
@@ -554,6 +661,7 @@ class CarrySettingsDialog(SizedDialog):
                 return
             self.manual = source
             self._describe(source)
+            return              # show what it found before copying it
         self.accept()
 
     def chosen_source(self):
@@ -561,7 +669,6 @@ class CarrySettingsDialog(SizedDialog):
 
     def mode(self):
         return prefsseed.REPLACE if self.replace.isChecked() else prefsseed.FILL
-
 
 class RemovalDialog(SizedDialog):
     """Everything removing a prefix would take with it, as a list.
@@ -1884,29 +1991,52 @@ class ManagerWindow(QMainWindow):
             self, "Moved", f"{name} is now at {entry['path']}.\n\n"
             + "\n".join(notes[:10]))
 
+    def copy_settings_selected(self):
+        entry = self.selected_entry()
+        if entry:
+            self.offer_settings_copy(entry)
+
     def offer_settings_copy(self, entry):
-        """After a new prefix exists, offer to bring settings into it.
+        """Bring settings, workspaces, recents and drive letters into a prefix.
 
-        Only when there is somewhere to bring them from -- and the manual route
-        is always on the list, because the source may be a backup or a disk the
-        manager knows nothing about."""
-        destination = prefsseed.destination_for(entry["path"])
+        Refused while Affinity runs in the DESTINATION -- it would overwrite
+        what was copied on exit. A running SOURCE is only a caution: reading it
+        is harmless, it just may not be the last word."""
+        path = Path(entry["path"])
+        pids = probe.running_pids(path) if path.exists() else []
+        if pids:
+            QMessageBox.warning(
+                self, "Affinity is running there",
+                f"Affinity is running in {entry['name']} (pid {pids[0]}). Close "
+                "it first: it would write its own settings over these when it "
+                "exits.")
+            return
+
+        destination = prefsseed.destination_for(path)
         others = [e["path"] for e in self.reg.entries if e["name"] != entry["name"]]
-        found = prefsseed.sources(others, exclude=entry["path"])
+        found = prefsseed.sources(others, exclude=path)
 
-        dialog = CarrySettingsDialog(self, destination, found)
+        dialog = CarrySettingsDialog(self, path, destination, found)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         source = dialog.chosen_source()
         if source is None:
             return
+        letters = dialog.chosen_letters()
+
+        try:
+            self._busy_start(f"Copying settings into {entry['name']}",
+                             prefix=entry["name"], operation="Copy settings")
+        except oplock.InUse as exc:
+            self._refuse(exc)
+            return
         try:
             result = prefsseed.seed(source, destination, mode=dialog.mode())
         except OSError as exc:
-            # Where the old settings went matters most when this fails: in
-            # REPLACE mode they have already been renamed aside, so the prefix
-            # is left with no Settings folder at all and the only copy is under
-            # a name the user has never seen.
+            self._busy_done("Copying settings failed", owner=entry["name"])
+            # In REPLACE mode the old settings have already been renamed aside
+            # by now, so the prefix has no Settings folder at all and the only
+            # copy is under a name the user has never seen.
             aside = prefsseed.aside_of(destination)
             where = (f"\n\nThe settings that were there are at {aside}. "
                      "Rename it back to 'Settings' to undo this."
@@ -1914,18 +2044,31 @@ class ManagerWindow(QMainWindow):
             QMessageBox.critical(self, "Could not copy the settings",
                                  f"{exc}{where}")
             return
-        aside = (f"\n\nWhat was there is kept at {result.saved_aside.name}."
-                 if result.saved_aside else "")
-        also = ("\n\nAlso copied: " + ", ".join(result.extras)
-                if result.extras else "")
+
+        drive_notes = []
+        if letters:
+            try:
+                drive_notes = prefsseed.import_drive_letters(path, letters)
+            except prefsseed.PrefixNotReady as exc:
+                drive_notes = [str(exc)]
+
         prefixlog.write(entry["name"],
-                        "Settings copied from %s: %d added, %d replaced, %d kept"
+                        "Settings copied from %s: %d added, %d replaced, %d kept; "
+                        "also %s; drive letters: %s"
                         % (source.path, len(result.added), len(result.replaced),
-                           len(result.kept)))
-        QMessageBox.information(
-            self, "Settings copied",
-            f"{len(result.added)} added and {len(result.replaced)} replaced in "
-            f"{destination}.{also}{aside}")
+                           len(result.kept), ", ".join(result.extras) or "nothing",
+                           "; ".join(drive_notes) or "none"))
+        self._busy_done(f"Settings copied into {entry['name']}", owner=entry["name"])
+
+        lines = [f"{len(result.added)} added and {len(result.replaced)} replaced "
+                 f"in {destination}."]
+        if result.extras:
+            lines.append("Also copied: " + ", ".join(result.extras) + ".")
+        if result.saved_aside:
+            lines.append(f"What was there is kept at {result.saved_aside.name}.")
+        if drive_notes:
+            lines.append("Drive letters:\n  " + "\n  ".join(drive_notes))
+        QMessageBox.information(self, "Settings copied", "\n\n".join(lines))
 
     # ── recovery ─────────────────────────────────────────────────────────────
 
@@ -2139,6 +2282,10 @@ class ManagerWindow(QMainWindow):
             "Setup", self.open_installer,
             "Install, update and configure this prefix -- AffinityOnLinux, "
             "inside this window")
+        self.copy_settings_button = self._action(
+            "Copy settings…", self.copy_settings_selected,
+            "Bring preferences, workspaces, recent files and drive letters in "
+            "from another prefix. Use after Setup, before first launch")
         self.snapshots_button = self._action(
             "Snapshots", self.show_snapshots,
             "Dated copies of this prefix's preferences, shortcuts and recent "
@@ -2169,7 +2316,7 @@ class ManagerWindow(QMainWindow):
         left_layout.addWidget(self._button_card(
             "Selected prefix",
             [self.launch_button, self.commands_button, self.installer_button,
-             self.snapshots_button,
+             self.copy_settings_button, self.snapshots_button,
              self.clone_button, self.clean_button,
              self.protect_button, self.forget_button, self.delete_button]))
         left_layout.addWidget(self._button_card("View", [self.refresh_button]))
@@ -2389,7 +2536,7 @@ class ManagerWindow(QMainWindow):
 
     BUSY_BUTTONS = ("new_button", "find_button", "adopt_button", "launch_button",
                     "commands_button", "installer_button", "clone_button",
-                    "snapshots_button",
+                    "snapshots_button", "copy_settings_button",
                     "clean_button", "protect_button", "forget_button",
                     "delete_button", "refresh_button")
 
@@ -2708,6 +2855,7 @@ class ManagerWindow(QMainWindow):
             self.forget_button,
             self.commands_button,
             self.snapshots_button,
+            self.copy_settings_button,
             self.protect_button,
             self.delete_button,
             # Clone and Clean act on the selection too, and refresh() rebuilds
@@ -2734,14 +2882,16 @@ class ManagerWindow(QMainWindow):
             return
         entry = dialog.result_entry
         self.refresh()
-        # Before Setup, not after: the installer lays down stock settings with
-        # a fill-what-is-missing rule, so anything copied here survives it --
-        # and asked now, the copy is into an empty prefix with nothing to
-        # argue with. Offered even when no other managed prefix has settings,
-        # because the source may be a backup or a disk this manager has never
-        # seen.
-        self.offer_settings_copy(entry)
+        # Settings are NOT copied here any more. This used to offer the copy
+        # before Setup, into a prefix Wine had never run in -- fine for the
+        # settings, and fatal for drive letters: Wine creates C: and Z: only
+        # when it creates dosdevices itself, so a W: put there first leaves a
+        # prefix with no C: drive. The copy is its own action now, after Setup
+        # and before Affinity is first launched.
         self.show_setup(entry)
+        self.status.setText(
+            f"When Setup has finished, select {entry['name']} and use "
+            "'Copy settings…' before launching Affinity in it.")
 
     def adopt(self):
         chosen = QFileDialog.getExistingDirectory(
