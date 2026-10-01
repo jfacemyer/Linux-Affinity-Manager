@@ -3381,6 +3381,10 @@ class ManagerWindow(QMainWindow):
             "Reclaim space: Wine builds this prefix does not use, downloaded archives, saved-aside copies")
         self.delete_button = self._action(
             "Delete", self.delete_selected, "Permanently delete this prefix")
+        self.fonts_button = self._action(
+            "Check fonts", self.check_fonts_selected,
+            "Make sure every font in the prefix is registered, and remove fonts "
+            "left by a different Wine -- the fix for bold text drawn in the wrong face")
 
         self.refresh_button = self._action(
             "Refresh", self.refresh, "Re-read the registry and re-inspect every prefix")
@@ -3408,8 +3412,8 @@ class ManagerWindow(QMainWindow):
              (self.snapshots_button, COPY_CAPTIONS["snapshot"])]))
         left_layout.addWidget(self._button_card(
             "Maintenance",
-            [self.clean_button, self.protect_button, self.forget_button,
-             self.delete_button]))
+            [self.clean_button, self.fonts_button, self.protect_button,
+             self.forget_button, self.delete_button]))
         left_layout.addWidget(self._button_card("View", [self.refresh_button]))
         left_layout.addStretch(1)
 
@@ -3640,7 +3644,7 @@ class ManagerWindow(QMainWindow):
                     "commands_button", "installer_button", "clone_button",
                     "snapshots_button", "copy_settings_button",
                     "backup_button", "backups_button",
-                    "clean_button", "protect_button", "forget_button",
+                    "clean_button", "fonts_button", "protect_button", "forget_button",
                     "delete_button", "refresh_button")
 
     def _busy_start(self, message, maximum=0, *, prefix=None, operation=None,
@@ -4016,6 +4020,7 @@ class ManagerWindow(QMainWindow):
             # nothing selected and did nothing at all when clicked.
             self.clone_button,
             self.clean_button,
+            self.fonts_button,
         ):
             b.setEnabled(entry is not None)
         several = len(self.selected_entries())
@@ -4588,6 +4593,77 @@ class ManagerWindow(QMainWindow):
         title = (f"{chosen[0][0].name} removed" if len(chosen) == 1
                  else f"{len(chosen)} prefixes removed")
         QMessageBox.information(self, title, "\n".join(report[:60]))
+
+    def check_fonts_selected(self):
+        """Repair the selected prefix's font registrations (installer code).
+
+        Fresh prefixes have come out with the core fonts on disk but not
+        registered in the 64-bit Fonts keys, and with Microsoft Yahei
+        registered from another Wine's folder -- Affinity's bold text then
+        falls back to Arial Narrow and Yahei. The installer now checks this at
+        the end of an install; this is the same check for a prefix that
+        already exists. Through the prefix's own Wine, and only while nothing
+        runs in it: Wine reads fonts at startup, and a second Wine against a
+        live prefix can disagree with the one already serving it."""
+        entry = self.selected_entry()
+        if not entry:
+            return
+        name, path = entry["name"], Path(entry["path"]).expanduser()
+        activity = liveness.scan(path)
+        if activity.state != liveness.QUIET:
+            QMessageBox.information(
+                self, "Close it first",
+                f"{activity.summary()}\n\nFonts are read when Wine starts, so "
+                f"close Affinity in {name} (and end any leftovers) and check again.")
+            return
+        wine = path / "ElementalWarriorWine" / "bin" / "wine"
+        if not wine.exists():
+            builds = [b for b in probe.wine_builds(path) if b != "ElementalWarriorWine"]
+            wine = path / builds[-1] / "bin" / "wine" if builds else wine
+        if not wine.exists():
+            QMessageBox.warning(self, "No Wine found",
+                                f"{name} has no Wine build to check its fonts with.")
+            return
+        try:
+            repair = aol.module().repair_font_registrations
+        except (aol.NotAvailable, AttributeError) as exc:
+            QMessageBox.warning(
+                self, "Installer too old",
+                f"The font check lives in the installer, and the one found "
+                f"does not have it: {exc}")
+            return
+        def work(progress):
+            # The repair never raises -- an install must not fail over fonts
+            # -- so its warnings are the only sign it did not run. Without
+            # them a failed check would report "fonts are fine".
+            problems = []
+            notes = repair(path, wine, lambda message, level="info":
+                           problems.append(message) if level != "info" else None)
+            if problems and not notes:
+                raise RuntimeError("; ".join(problems))
+            return notes
+
+        self._run_task(
+            name, "Check fonts", f"Checking fonts in {name}", work,
+            lambda notes, error: self._fonts_checked(name, notes, error))
+
+    def _fonts_checked(self, name, notes, error):
+        if error:
+            QMessageBox.warning(self, "Check fonts", f"The check failed: {error}")
+            return
+        prefixlog.write(name, "Check fonts: " + ("; ".join(notes) if notes
+                                                 else "nothing to repair"))
+        if not notes:
+            QMessageBox.information(
+                self, "Fonts are fine",
+                f"Every font in {name} is registered, and none is borrowed from "
+                "another Wine. Nothing was changed.")
+            return
+        QMessageBox.information(
+            self, "Fonts repaired",
+            f"{len(notes)} change(s) in {name}:\n\n" + "\n".join(notes[:30])
+            + ("\n…" if len(notes) > 30 else "")
+            + "\n\nStart Affinity again to see them.")
 
     def forget_selected(self):
         entry = self.selected_entry()
