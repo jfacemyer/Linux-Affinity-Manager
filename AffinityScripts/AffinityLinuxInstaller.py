@@ -247,7 +247,7 @@ def _sha256_of(path):
 # The handler this installer is meant to install, by content. The piped install
 # fetches it over the network from a branch that can be older than this file,
 # and "it starts with MZ and is over 4KB" does not tell those apart.
-HANDLER_SHA256 = "f26d7d744be4ce6c9272907b3e9e0d19ffd4c4c47d5faf8356a5e4bd6eec2be5"
+HANDLER_SHA256 = "188e4f214a990c3250dbb4d46cf5b7933bec1c1b23819bb354618c7dc987a6bc"
 
 # The Wine 11.16 build this installer is meant to install, by content, for the
 # same reason. The 11.16 release was published on 2026-09-11 and never rebuilt;

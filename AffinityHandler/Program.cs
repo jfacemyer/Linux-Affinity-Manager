@@ -256,10 +256,10 @@ namespace AffinityOnLinux
         // intermittent one-in-three hang does with probability 0.037, twice in
         // a day with probability 0.0014. It was not detecting a hang. It was
         // failing to recognise a window that was up, because FindAffinityWindow
-        // requires GetWindowRect to report at least 600 pixels of width and
+        // required GetWindowRect to report at least 600 pixels of width and
         // Affinity 3.3's main window reported left = 22369618 and a NEGATIVE
         // width, while X reported a perfectly sane 3850x2101 for the same
-        // window. So it killed a running Affinity the user was working in,
+        // window. (It measures the client rect now, which is sane.) So it killed a running Affinity the user was working in,
         // three times over, at exactly StallSeconds each.
         //
         // Score at retirement: 31 recorded cold starts in the working prefix
@@ -543,11 +543,13 @@ namespace AffinityOnLinux
 
         // Does this process own a VISIBLE top-level window?
         //
-        // Deliberately not FindAffinityWindow(). That one requires GetWindowRect
-        // to report at least 600 pixels of width, and Affinity 3.3's main window
+        // Deliberately not FindAffinityWindow(). That one asks a different
+        // question -- is the titled, wide main window up -- and until 2026-10-01
+        // it answered it with GetWindowRect, which for Affinity 3.3's main window
         // reports left = 22369618 and a NEGATIVE width under Wine while X reports
-        // a perfectly sane 3850x2101 for the same window. Trusting the rect is
-        // exactly what made the retired watchdog kill three live sessions.
+        // a perfectly sane 3850x2101. Trusting that rect is exactly what made the
+        // retired watchdog kill three live sessions. A kill path asks only
+        // whether ANY visible window is owned, which needs no geometry at all.
         //
         // Nor is it "any window at all", which was the first attempt here and is
         // useless: measured against a real corpse, a spent Affinity still owns
@@ -783,11 +785,12 @@ namespace AffinityOnLinux
         // EVERY Affinity and AffinityHook process for killing, with no per-process
         // test at all. Two things were wrong with that:
         //
-        //   * FindAffinityWindow is the rect test. It requires GetWindowRect to
+        //   * FindAffinityWindow was the rect test. It required GetWindowRect to
         //     report at least 600 pixels of width, and Affinity 3.3's main window
         //     reports left = 22369618 and a NEGATIVE width under Wine. That test
         //     is why the retry watchdog killed three live sessions (see RETIRED
         //     above). Using it as the guard on a kill path repeated the mistake.
+        //     It measures the client rect now, and still guards no kill.
         //   * the caller waited StallSeconds (45) before concluding nothing was
         //     alive, while this file's own definition of a startup window is
         //     StartupGraceSeconds (75). A genuine start could be declared a husk
@@ -989,7 +992,7 @@ namespace AffinityOnLinux
         private static extern int GetClassNameW(IntPtr hwnd, StringBuilder buf, int max);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
         private static extern int GetWindowTextW(IntPtr hwnd, StringBuilder buf, int max);
-        [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr hwnd, out RECT r);
+        [DllImport("user32.dll")] private static extern bool GetClientRect(IntPtr hwnd, out RECT r);
         [DllImport("user32.dll")] private static extern int GetWindowThreadProcessId(IntPtr hwnd, out int pid);
 
         [StructLayout(LayoutKind.Sequential)]
@@ -997,6 +1000,19 @@ namespace AffinityOnLinux
 
         // Affinity is WPF: its main window class is HwndWrapper[Affinity.exe;;<guid>].
         // Several of those exist -- the real one is visible, titled and wide.
+        //
+        // Wide by its CLIENT rect. Affinity 3.3's maximised main window reports a
+        // window rect of left = 23469763, right = 2017 under Wine -- a negative
+        // width -- while its client rect is a sane 2014x1097. Measured with a
+        // window probe across a cold start (2026-10-01):
+        //
+        //      4.2s  splash    untitled  client 587x450
+        //     14.4s  main      "Affinity"  window rect garbage, client 2014x1097
+        //     17.4s  welcome   untitled  client 1007x734, owned by main
+        //
+        // With the window rect this never matched on 3.3, so the two-stage cold
+        // start waited out all of StallSeconds on every document whose path has
+        // a space in it: 50s to open instead of ~17s.
         private static IntPtr FindAffinityWindow()
         {
             IntPtr found = IntPtr.Zero;
@@ -1012,7 +1028,7 @@ namespace AffinityOnLinux
                 GetWindowTextW(hwnd, txt, txt.Capacity);
                 if (txt.Length == 0) return true;
                 RECT r;
-                if (!GetWindowRect(hwnd, out r) || r.Right - r.Left < 600) return true;
+                if (!GetClientRect(hwnd, out r) || r.Right - r.Left < 600) return true;
                 found = hwnd;
                 return false;
             }, IntPtr.Zero);
