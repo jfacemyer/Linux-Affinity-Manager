@@ -22,6 +22,7 @@ against the copy before it was deleted: mattscreative 9392, dark 9207, light
 from __future__ import annotations
 
 import functools
+import os
 
 from PyQt6.QtCore import Qt
 
@@ -196,6 +197,59 @@ QLabel#cardCaption { background: transparent; border: none; }
 QPushButton:disabled { color: rgba(140, 140, 140, 120); }
 """
 
+# Checkboxes. Under Fusion, the installer's two dark themes draw an unticked
+# box in the background colour -- no box at all, just the label -- so the
+# tick that arms Remove read as a sentence rather than a control. A visible
+# box in every theme, filled with a white tick when ticked. The tick is an SVG
+# because a stylesheet can only draw an image from a file; it is written to
+# the cache, and without it a ticked box is still unmistakably filled.
+_CHECK_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" '
+    'viewBox="0 0 16 16"><path d="M3.2 8.4l3 3 6.6-7" fill="none" '
+    'stroke="#FFFFFF" stroke-width="2.2" stroke-linecap="round" '
+    'stroke-linejoin="round"/></svg>')
+
+
+def _check_image() -> str:
+    try:
+        base = os.environ.get("XDG_CACHE_HOME", "").strip() or \
+            os.path.join(os.path.expanduser("~"), ".cache")
+        path = os.path.join(base, "AffinityOnLinux", "manager-ui", "check.svg")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        try:
+            with open(path) as f:
+                current = f.read()
+        except OSError:
+            current = ""
+        if current != _CHECK_SVG:
+            with open(path, "w") as f:
+                f.write(_CHECK_SVG)
+        return path
+    except OSError:
+        return ""
+
+
+def _checkbox_rules() -> str:
+    image = _check_image()
+    tick = f' image: url("{image}");' if image else ""
+    # The same box for the tick column of a list -- the removal list, Clean,
+    # Copy settings' drive letters -- which a view draws itself, not as a
+    # QCheckBox, and which was just as invisible.
+    rules = []
+    for widget in ("QCheckBox", "QTreeView", "QListView"):
+        rules.append(f"""
+{widget}::indicator {{ width: 16px; height: 16px; border-radius: 3px;
+                       border: 2px solid rgb(150, 150, 165);
+                       background: transparent; }}
+{widget}::indicator:hover {{ border-color: rgb(200, 200, 215); }}
+{widget}::indicator:checked {{ background: #7C5CD6; border-color: #7C5CD6;{tick} }}
+{widget}::indicator:indeterminate {{ background: rgba(124, 92, 214, 0.45);
+                                     border-color: #7C5CD6; }}
+{widget}::indicator:disabled {{ border-color: rgba(140, 140, 140, 90); }}
+{widget}::indicator:checked:disabled {{ background: rgba(124, 92, 214, 0.4);
+                                        border-color: rgba(124, 92, 214, 0.4); }}""")
+    return "\nQCheckBox { spacing: 8px; }" + "".join(rules) + "\n"
+
 
 def current_theme() -> str:
     theme = settings.get("theme", DEFAULT_THEME)
@@ -216,7 +270,8 @@ def stylesheet(theme: str | None = None) -> str:
     theme = theme or current_theme()
     if theme not in _stylesheet_cache:
         base = _installer_stylesheet(theme) or FALLBACK_STYLESHEET
-        _stylesheet_cache[theme] = base + _SUPPLEMENT.get(theme, "") + _COMMON
+        _stylesheet_cache[theme] = (base + _SUPPLEMENT.get(theme, "") + _COMMON
+                                    + _checkbox_rules())
     return _stylesheet_cache[theme]
 
 

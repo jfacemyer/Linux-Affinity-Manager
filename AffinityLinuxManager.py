@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import contextlib
 import html
+import re
 import shutil
 import sys
 import time
@@ -27,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from PyQt6.QtCore import Qt, QThread, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QBrush, QColor, QDesktopServices
 from PyQt6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QComboBox,
     QFrame,
@@ -73,6 +75,7 @@ from affinity_manager import (
     prefixlog,
     prefixstate,
     probe,
+    release,
     singleinstance,
     registry,
     ui,
@@ -208,7 +211,7 @@ class ConfirmDialog(SizedDialog):
         body.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(body)
 
-        self.tick = QCheckBox(tick)
+        self.tick = ArmBox(tick, f"Required — {confirm} stays off until this is ticked.")
         layout.addWidget(self.tick)
 
         buttons = QDialogButtonBox(
@@ -231,6 +234,65 @@ class ConfirmDialog(SizedDialog):
     def ask(parent, title, message, **kwargs) -> bool:
         dialog = ConfirmDialog(parent, title, message, **kwargs)
         return dialog.exec() == QDialog.DialogCode.Accepted and dialog.tick.isChecked()
+
+
+class ArmBox(QFrame):
+    """The tick that arms a destructive button -- made impossible to miss.
+
+    It was a plain checkbox among the other rows, and the button it arms was
+    greyed out with nothing to say why; the dialog looked broken. Now it sits
+    in its own bordered box with a REQUIRED line under it, turns green when
+    ticked, and the line says what is still missing when something else (a
+    running prefix, nothing chosen) is what keeps the button off."""
+
+    toggled = pyqtSignal(bool)
+
+    def __init__(self, text, required="Required — the button stays off until "
+                                      "this is ticked.", parent=None):
+        super().__init__(parent)
+        self.setObjectName("armBox")
+        self.required = required
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 10, 14, 10)
+        layout.setSpacing(4)
+        self.box = QCheckBox(text)
+        font = self.box.font()
+        font.setBold(True)
+        font.setPointSizeF(font.pointSizeF() * 1.15)
+        self.box.setFont(font)
+        layout.addWidget(self.box)
+        self.line = QLabel(required)
+        self.line.setWordWrap(True)
+        layout.addWidget(self.line)
+        self.box.toggled.connect(self._paint)
+        self.box.toggled.connect(self.toggled.emit)
+        self._note = None
+        self._paint()
+
+    def isChecked(self) -> bool:
+        return self.box.isChecked()
+
+    def setChecked(self, value: bool):
+        self.box.setChecked(value)
+
+    def set_note(self, note):
+        self._note = note
+        self._paint()
+
+    def _paint(self, *_):
+        on = self.box.isChecked()
+        edge, fill = ("#3FBF6F", "rgba(63, 191, 111, 0.12)") if on \
+            else ("#F5A623", "rgba(245, 166, 35, 0.12)")
+        self.setStyleSheet(
+            f"QFrame#armBox {{ border: 2px solid {edge}; border-radius: 8px; "
+            f"background: {fill}; }}"
+            "QFrame#armBox QLabel, QFrame#armBox QCheckBox "
+            "{ background: transparent; border: none; }")
+        if self._note:
+            self.line.setText(f"<b>{html.escape(self._note)}</b>")
+        else:
+            self.line.setText("Ticked." if on else
+                              f"<b>{html.escape(self.required)}</b>")
 
 
 class ActivityBanner(QFrame):
@@ -942,13 +1004,18 @@ class CarrySettingsDialog(SizedDialog):
         return prefsseed.REPLACE if self.replace.isChecked() else prefsseed.FILL
 
 class RemovalDialog(SizedDialog):
-    """Everything removing a prefix would take with it, as a list.
+    """Everything removing one or more prefixes would take with them, as a list.
 
     The confirmation is the list. A yes/no on a summary is where "and 4 other
     items" hides the one you would have objected to -- and the things most
     easily forgotten here are the ones that bite later: a menu entry that
     launches nothing, and a document association that silently stops working
     because the prefix holding it has gone.
+
+    Several prefixes at once, each its own group: ticking or unticking the
+    group's row takes all of its items with it, and each item can still be
+    chosen on its own. A file two prefixes both claim is listed once, under
+    the first, so it is not removed twice and reported failed the second time.
 
     Two rows are not like the others. Settings snapshots are listed unticked,
     because losing the backups of a thing along with the thing is the wrong
@@ -957,104 +1024,171 @@ class RemovalDialog(SizedDialog):
     do as well as what it will.
     """
 
-    FIT_MIN_WIDTH = 860
-    COLUMNS = ["", "What", "Where", "Size"]
-
-    def __init__(self, parent, plan):
-        super().__init__(parent)
-        self.setWindowTitle(f"Remove {plan.name}")
-        self.setModal(True)
-        ui.apply(self)
-        self.plan = plan
-        self.boxes = []
-
-        layout = QVBoxLayout(self)
-        blurb = QLabel(
-            f"<b>{plan.name}</b> put all of this on this machine. Choose what "
-            "goes.<br><br>The prefix, its log and any snapshots are deleted "
-            "outright. The small host-side files — menu entries, document "
-            "type definitions, icons — are moved aside rather than deleted, "
-            "so those are recoverable; the rest is not.")
-        blurb.setWordWrap(True)
-        layout.addWidget(blurb)
-
-        self.tree = QTreeWidget()
-        self.tree.setColumnCount(len(self.COLUMNS))
-        self.tree.setHeaderLabels(self.COLUMNS)
-        self.tree.setRootIsDecorated(False)
-        self.tree.setColumnWidth(0, 34)
-        self.tree.setColumnWidth(1, 300)
-        for item in plan.items:
-            row = SizeSortItem([
-                "", item.label,
-                item.detail,
-                probe.human_size(item.size) if item.size else "",
-            ])
-            row.setData(SizeSortItem.SIZE_COLUMN, Qt.ItemDataRole.UserRole,
-                        item.size)
-            row.setFlags(row.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            row.setCheckState(0, Qt.CheckState.Checked if item.default
-                              else Qt.CheckState.Unchecked)
-            row.setData(0, Qt.ItemDataRole.UserRole, item)
-            self.tree.addTopLevelItem(row)
-            self.boxes.append(row)
-        # Swapped: the plan's own wording is the reason a row is proposed, and
-        # it is more useful than the path for the rows that have no path.
-        self.tree.setColumnWidth(2, 360)
-        layout.addWidget(self.tree, 1)
-
-        if plan.left_alone:
-            left = QLabel(
-                "<b>Left alone, not ours:</b> "
-                + ", ".join(str(a.path.name if a.path else a.detail)
-                            for a in plan.left_alone[:8]))
-            left.setWordWrap(True)
-            left.setObjectName("descriptionLabel")
-            layout.addWidget(left)
-
-        # Checked live: the plan was made when the dialog opened, and closing
-        # Affinity with it open has to be noticed without reopening it.
-        self.banner = ActivityBanner(self, plan.path if plan.path.exists() else None,
-                                     name=plan.name, waiting_for="remove it")
-        layout.addWidget(self.banner)
-
-        self.arm = QCheckBox("Yes, remove the ticked items")
-        layout.addWidget(self.arm)
-
-        self.buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        self.ok = self.buttons.button(QDialogButtonBox.StandardButton.Ok)
-        self.ok.setText("Remove")
-        self.buttons.accepted.connect(self.accept)
-        self.buttons.rejected.connect(self.reject)
-        layout.addWidget(self.buttons)
-
-        self.arm.toggled.connect(self._retotal)
-        self.tree.itemChanged.connect(lambda *_: self._retotal())
-        self.banner.changed.connect(lambda *_: self._retotal())
-        self._retotal()
+    FIT_MIN_WIDTH = 900
+    COLUMNS = ["What", "Where", "Size"]
 
     # Removing these actually frees the space. The rest are moved aside by
     # hoststate.delete, which keeps a copy, so counting them in a figure
     # labelled "freed" would be a promise the button does not keep.
     FREES_SPACE = ("prefix", "log", "settings-backup")
 
+    def __init__(self, parent, plans):
+        super().__init__(parent)
+        self.plans = list(plans) if isinstance(plans, (list, tuple)) else [plans]
+        names = [p.name for p in self.plans]
+        self.setWindowTitle(f"Remove {names[0]}" if len(names) == 1
+                            else f"Remove {len(names)} prefixes")
+        self.setModal(True)
+        ui.apply(self)
+        self.groups = []            # (plan, group row, [item rows])
+
+        layout = QVBoxLayout(self)
+        who = (f"<b>{names[0]}</b> put" if len(names) == 1
+               else f"These <b>{len(names)} prefixes</b> put")
+        blurb = QLabel(
+            f"{who} all of this on this machine. Choose what goes.<br><br>"
+            "Prefixes, their logs and any snapshots are deleted outright. The "
+            "small host-side files — menu entries, document type definitions, "
+            "icons — are moved aside rather than deleted, so those are "
+            "recoverable; the rest is not.")
+        blurb.setWordWrap(True)
+        layout.addWidget(blurb)
+
+        self.tree = QTreeWidget()
+        self.tree.setColumnCount(len(self.COLUMNS))
+        self.tree.setHeaderLabels(self.COLUMNS)
+        self.tree.setRootIsDecorated(len(self.plans) > 1)
+        self.tree.setMinimumHeight(300)
+        # What and Size sized to what they hold, Where takes the rest -- with
+        # fixed widths the Size column, the one people check, ran off the edge.
+        header = self.tree.header()
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        seen = set()
+        for plan in self.plans:
+            if len(self.plans) > 1:
+                group = QTreeWidgetItem([plan.name, str(plan.path), ""])
+                font = group.font(0)
+                font.setBold(True)
+                group.setFont(0, font)
+                group.setFlags(group.flags() | Qt.ItemFlag.ItemIsUserCheckable
+                               | Qt.ItemFlag.ItemIsAutoTristate)
+                self.tree.addTopLevelItem(group)
+            else:
+                group = None
+            rows = []
+            for item in plan.items:
+                key = (item.kind, str(item.path) if item.path else item.label,
+                       item.value)
+                if key in seen:
+                    continue
+                seen.add(key)
+                row = QTreeWidgetItem([
+                    item.label, item.detail,
+                    probe.human_size(item.size) if item.size else ""])
+                row.setFlags(row.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                row.setCheckState(0, Qt.CheckState.Checked if item.default
+                                  else Qt.CheckState.Unchecked)
+                row.setData(0, Qt.ItemDataRole.UserRole, item)
+                if group is not None:
+                    group.addChild(row)
+                else:
+                    self.tree.addTopLevelItem(row)
+                rows.append(row)
+            if group is not None:
+                total = sum(i.size for i in plan.items)
+                group.setText(2, probe.human_size(total) if total else "")
+                group.setExpanded(len(self.plans) <= 3)
+            self.groups.append((plan, group, rows))
+        layout.addWidget(self.tree, 1)
+
+        left_alone = [a for p in self.plans for a in p.left_alone]
+        if left_alone:
+            left = QLabel(
+                "<b>Left alone, not ours:</b> "
+                + ", ".join(str(a.path.name if a.path else a.detail)
+                            for a in left_alone[:8]))
+            left.setWordWrap(True)
+            left.setObjectName("descriptionLabel")
+            layout.addWidget(left)
+
+        # Checked live, one per prefix: the plans were made when the dialog
+        # opened, and closing Affinity with it open has to be noticed without
+        # reopening it. A quiet prefix's banner takes no room.
+        self.banners = {}
+        for plan in self.plans:
+            banner = ActivityBanner(self, plan.path if plan.path.exists() else None,
+                                    name=plan.name, waiting_for="remove it")
+            banner.changed.connect(lambda *_: self._retotal())
+            layout.addWidget(banner)
+            self.banners[plan.name] = banner
+
+        self.arm = ArmBox("Yes, permanently remove the ticked items",
+                          "Required — Remove stays off until this is ticked.")
+        layout.addWidget(self.arm)
+
+        self.buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        self.ok = self.buttons.button(QDialogButtonBox.StandardButton.Ok)
+        self.ok.setText("Remove")
+        self.ok.setProperty("class", "danger")
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        self.buttons.button(QDialogButtonBox.StandardButton.Cancel).setDefault(True)
+        layout.addWidget(self.buttons)
+
+        self.arm.toggled.connect(lambda *_: self._retotal())
+        self.tree.itemChanged.connect(lambda *_: self._retotal())
+        self._retotal()
+
+    # kept for the single-prefix callers and tests that read it
+    @property
+    def plan(self):
+        return self.plans[0]
+
     def _retotal(self):
-        chosen = self.chosen()
-        freed = sum(i.size for i in chosen if i.kind in self.FREES_SPACE)
-        label = f"Remove {len(chosen)} item(s)"
+        chosen = self.chosen_by_plan()
+        items = [i for _, its in chosen for i in its]
+        blocked = []
+        for plan, its in chosen:
+            banner = self.banners.get(plan.name)
+            if banner is None:
+                continue
+            # Leftovers stop only the deletion of the prefix itself -- they
+            # have files in it open. The menu entry and the rest can go.
+            banner.set_leftovers_block(any(i.kind == "prefix" for i in its))
+            if its and banner.blocks():
+                blocked.append(plan.name)
+        freed = sum(i.size for i in items if i.kind in self.FREES_SPACE)
+        label = f"Remove {len(items)} item(s)"
+        if len(chosen) > 1:
+            label += f" from {len(chosen)} prefixes"
         if freed:
             label += f"  (frees {probe.human_size(freed)})"
-        self.ok.setText(label if chosen else "Remove")
-        # Leftovers stop only the deletion of the prefix itself -- they have
-        # files in it open. The menu entry and the rest can go regardless.
-        self.banner.set_leftovers_block(any(i.kind == "prefix" for i in chosen))
-        self.ok.setEnabled(bool(chosen) and self.arm.isChecked()
-                           and not self.banner.blocks())
+        self.ok.setText(label if items else "Remove")
+        self.ok.setEnabled(bool(items) and self.arm.isChecked() and not blocked)
+        if blocked:
+            self.arm.set_note(f"Not while something runs in {', '.join(blocked)} "
+                              "— see above.")
+        elif not items:
+            self.arm.set_note("Nothing is ticked in the list.")
+        else:
+            self.arm.set_note(None)
+
+    def chosen_by_plan(self):
+        """[(plan, [items])] for every prefix with anything ticked."""
+        out = []
+        for plan, _, rows in self.groups:
+            its = [r.data(0, Qt.ItemDataRole.UserRole) for r in rows
+                   if r.checkState(0) == Qt.CheckState.Checked]
+            if its:
+                out.append((plan, its))
+        return out
 
     def chosen(self):
-        return [row.data(0, Qt.ItemDataRole.UserRole) for row in self.boxes
-                if row.checkState(0) == Qt.CheckState.Checked]
+        return [i for _, its in self.chosen_by_plan() for i in its]
 
 
 class SnapshotsDialog(SizedDialog):
@@ -1457,17 +1591,38 @@ class NewPrefixDialog(SizedDialog):
         form = QFormLayout()
         self.name = QLineEdit(reg.suggest_name())
         self.name.textChanged.connect(self._name_changed)
+        self.name.setMaxLength(64)
         form.addRow("Name", self.name)
+        # Always shown, not only once a name is refused: knowing the rule
+        # before typing beats finding it out from a button that will not press.
+        self.name_rule = QLabel(self.NAME_RULE)
+        self.name_rule.setWordWrap(True)
+        self.name_rule.setObjectName("descriptionLabel")
+        form.addRow("", self.name_rule)
 
         # Read-only: a managed prefix lives directly under the base directory,
         # named after itself. Somewhere else would be an adopted prefix, which
         # is a different action.
-        self.path_label = QLabel()
-        self.path_label.setObjectName("descriptionLabel")
-        self.path_label.setWordWrap(True)
-        form.addRow("Directory", self.path_label)
+        #
+        # A read-only field, not a label. The label was word-wrapped, and a
+        # path has no spaces to wrap at: Qt laid it out narrower than the
+        # text and clipped it, and widening the window did not bring it back.
+        # A field always shows what fits, scrolls for the rest, and can be
+        # selected and copied.
+        self.path_field = QLineEdit()
+        self.path_field.setReadOnly(True)
+        self.path_field.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+        form.addRow("Directory", self.path_field)
+        self.path_note = QLabel("")
+        self.path_note.setWordWrap(True)
+        self.path_note.setObjectName("cautionText")
+        self.path_note.hide()
+        form.addRow("", self.path_note)
 
-        self.pin = QCheckBox("Install a specific build instead of the current release")
+        # Says Affinity, and says what it is not: the manager also chooses
+        # Wine builds, and "a specific build" alone read as one of those.
+        self.pin = QCheckBox("Install an older version of Affinity, from an "
+                             "installer you kept, instead of the current release")
         self.pin.toggled.connect(self._pin_toggled)
         form.addRow("", self.pin)
 
@@ -1482,12 +1637,23 @@ class NewPrefixDialog(SizedDialog):
         prow.addWidget(self.pick)
         pholder = QWidget()
         pholder.setLayout(prow)
-        form.addRow("Installer", pholder)
+        form.addRow("Affinity installer", pholder)
+
+        # Which Affinity this will actually be. "The current release" alone
+        # does not say which one, and the download URL never changes.
+        self.will_install = QLabel("Affinity: checking the current release…")
+        self.will_install.setWordWrap(True)
+        self.will_install.setTextFormat(Qt.TextFormat.RichText)
+        form.addRow("Will install", self.will_install)
+        self.current_release = None
+        self.release_problem = ""
+        self.installer_file.textChanged.connect(lambda *_: self._show_version())
 
         self.note = QLabel(
-            "downloads.affinity.studio has no versioned URL, so an unpinned "
-            "install always gets the current release. Pin a kept installer to "
-            "reproduce an older one."
+            "This is Affinity's own installer (Affinity-x64-<version>.exe), "
+            "not Wine — the Wine build is chosen during Setup. Affinity's "
+            "download site only ever offers the current release, so to "
+            "install an older Affinity, point this at an installer you kept."
         )
         self.note.setObjectName("descriptionLabel")
         self.note.setWordWrap(True)
@@ -1509,6 +1675,44 @@ class NewPrefixDialog(SizedDialog):
         self.result_entry = None
         self._name_changed(self.name.text())
 
+        thread = TaskThread(lambda progress: release.current())
+        thread.done.connect(self._release_known)
+        keep_until_finished(thread)
+        thread.start()
+
+    def _release_known(self, result, error):
+        self.current_release = result
+        self.release_problem = error
+        self._show_version()
+
+    def _show_version(self):
+        if self.pin.isChecked():
+            chosen = self.installer_file.text().strip()
+            if not chosen:
+                self.will_install.setText("Choose the Affinity installer to use.")
+                return
+            try:
+                kept = release.of_file(chosen)
+            except release.Unknown as exc:
+                self.will_install.setText(
+                    f"<b>Unknown version</b> — {html.escape(str(exc))}.")
+                return
+            self.will_install.setText(
+                f"<b>{html.escape(str(kept))}</b>, from the installer you chose.")
+            return
+        r = self.current_release
+        if r is not None:
+            when = f", published {r.published}" if r.published else ""
+            self.will_install.setText(
+                f"<b>{html.escape(str(r))}</b> — the current release{when}, "
+                "downloaded during Setup.")
+        elif self.release_problem:
+            self.will_install.setText(
+                "The current release, downloaded during Setup. Which version "
+                f"that is could not be checked: {html.escape(self.release_problem)}.")
+        else:
+            self.will_install.setText("Affinity: checking the current release…")
+
     def _name_changed(self, text):
         try:
             registry.validate_name(text)
@@ -1516,21 +1720,52 @@ class NewPrefixDialog(SizedDialog):
         except registry.InvalidName:
             valid = False
         self.ok.setEnabled(valid)
+        self.ok.setToolTip("" if valid else "The name is not usable — see the "
+                           "line under Directory.")
         if valid:
             path = registry.path_for(text)
-            exists = path.exists()
-            self.path_label.setText(
-                str(path) + ("   \u2014 already exists" if exists else "")
-            )
+            self.path_field.setText(str(path))
+            self.path_field.setCursorPosition(0)
+            note = "A folder with this name already exists." if path.exists() else ""
         else:
-            self.path_label.setText(
-                "Letters, digits, space, dot, underscore or hyphen; "
-                "1-64 characters, starting with a letter or digit."
-            )
+            self.path_field.setText("")
+            note = self._why_not(text)
+        self.path_note.setText(note)
+        if bool(note) != self.path_note.isVisible():
+            self.path_note.setVisible(bool(note))
+            # Grow to fit the line rather than squeeze the rows under it.
+            if self.isVisible():
+                self.layout().activate()
+                want = self.sizeHint().height()
+                if want > self.height():
+                    self.resize(self.width(), want)
+
+    NAME_RULE = ("Allowed: letters A–Z a–z, digits 0–9, space, dot ( . ), "
+                 "underscore ( _ ) and hyphen ( - ). Up to 64 characters, "
+                 "starting with a letter or digit. Spaces become underscores "
+                 "in the folder name.")
+
+    @staticmethod
+    def _why_not(text):
+        """What exactly is wrong with a name. The rule is on show already, so
+        this names the offending character rather than repeating it."""
+        text = text.strip()
+        if not text:
+            return "Give the prefix a name."
+        bad = sorted({c for c in text if not re.match(r"[A-Za-z0-9 ._-]", c)})
+        if bad:
+            shown = "  ".join(f"“{c}”" for c in bad)
+            return f"Not allowed in a name: {shown}"
+        if not re.match(r"[A-Za-z0-9]", text):
+            return f"A name has to start with a letter or digit, not “{text[0]}”."
+        if len(text) > 64:
+            return f"That is {len(text)} characters; the limit is 64."
+        return "This name is not usable."
 
     def _pin_toggled(self, on):
         self.installer_file.setEnabled(on)
         self.pick.setEnabled(on)
+        self._show_version()
 
     def _pick_installer(self):
         chosen, _ = QFileDialog.getOpenFileName(
@@ -2045,6 +2280,19 @@ def kinds_legend(current: str) -> QLabel:
     return label
 
 
+_RUNNING_THREADS = set()
+
+
+def keep_until_finished(thread):
+    """Hold a reference to a QThread until it ends.
+
+    A dialog can be closed while its background check is still waiting on the
+    network. If the dialog's reference was the only one, Python collects the
+    QThread while it runs, and Qt aborts the whole process for that."""
+    _RUNNING_THREADS.add(thread)
+    thread.finished.connect(lambda: _RUNNING_THREADS.discard(thread))
+
+
 class TaskThread(QThread):
     """One long job off the UI thread: fn(progress) -> result."""
 
@@ -2282,7 +2530,8 @@ class RestoreBackupDialog(SizedDialog):
         self.caution.setObjectName("cautionText")
         layout.addWidget(self.caution)
 
-        self.arm = QCheckBox("Yes, restore this backup")
+        self.arm = ArmBox("Yes, restore this backup",
+                          "Required — Restore stays off until this is ticked.")
         self.arm.toggled.connect(self._arm)
         layout.addWidget(self.arm)
 
@@ -3215,6 +3464,9 @@ class ManagerWindow(QMainWindow):
         self.tree.setHeaderLabels(self.COLUMNS)
         self.tree.setRootIsDecorated(False)
         self.tree.setAlternatingRowColors(False)
+        # Ctrl- and Shift-click choose several, for Delete. Everything else
+        # acts on one prefix and is off while more than one is selected.
+        self.tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.tree.itemSelectionChanged.connect(self._selection_changed)
         self.tree.itemDoubleClicked.connect(lambda *_: self.show_commands())
         self.tree.header().setSectionResizeMode(
@@ -3719,10 +3971,22 @@ class ManagerWindow(QMainWindow):
     # ── selection ────────────────────────────────────────────────────────────
 
     def selected_entry(self):
-        items = self.tree.selectedItems()
-        if not items:
-            return None
-        return self.reg.by_name(items[0].data(0, Qt.ItemDataRole.UserRole))
+        """The one selected prefix -- None when none, or when several are.
+
+        None for several on purpose: every action but Delete is about one
+        prefix, and each already does nothing without one. Quietly acting on
+        whichever row Qt lists first would be launching, cloning or backing
+        up a prefix the user did not single out."""
+        entries = self.selected_entries()
+        return entries[0] if len(entries) == 1 else None
+
+    def selected_entries(self):
+        out = []
+        for item in self.tree.selectedItems():
+            entry = self.reg.by_name(item.data(0, Qt.ItemDataRole.UserRole))
+            if entry is not None:
+                out.append(entry)
+        return out
 
     def _selection_changed(self):
         # Nothing in this list is actionable while an operation holds the
@@ -3754,6 +4018,12 @@ class ManagerWindow(QMainWindow):
             self.clean_button,
         ):
             b.setEnabled(entry is not None)
+        several = len(self.selected_entries())
+        self.delete_button.setText(f"Delete {several}…" if several > 1 else "Delete")
+        if several > 1:
+            self.delete_button.setEnabled(True)
+            self.status.setText(f"{several} prefixes selected — only Delete acts "
+                                "on more than one.")
         if entry is None:
             self.protect_button.setText("Protect")
             return
@@ -3779,8 +4049,8 @@ class ManagerWindow(QMainWindow):
         classifies again from those -- the same one place as always."""
         try:
             items = self.tree.selectedItems()
-            if not items:
-                return
+            if len(items) != 1 or self.activity_banner.prefix is None:
+                return              # the banner follows one prefix, or none
             item = items[0]
             info = item.data(4, Qt.ItemDataRole.UserRole)
             if not info:
@@ -4252,62 +4522,72 @@ class ManagerWindow(QMainWindow):
                 "Freed " + probe.human_size(freed) + ".\n\n" + "\n".join(problems[:8]))
 
     def delete_selected(self):
-        entry = self.selected_entry()
-        if not entry:
+        entries = self.selected_entries()
+        if not entries:
             return
-        name, path = entry["name"], Path(entry["path"])
 
-        if registry.is_protected(entry):
+        protected = [e["name"] for e in entries if registry.is_protected(e)]
+        if protected:
             QMessageBox.information(
                 self,
                 "Protected",
-                f"{name} is protected from deletion.\n\n"
-                "Use Unprotect first if you really mean to delete it.",
-            )
-            return
-
-        pids = probe.running_pids(path)
-        if pids:
-            QMessageBox.warning(
-                self,
-                "Still running",
-                f"Affinity is running in {name} (pid {pids[0]}).\n\n"
-                "Close it first — deleting a prefix out from under a running "
-                "Wine loses whatever is unsaved and leaves its services behind.",
+                f"{', '.join(protected)} "
+                f"{'is' if len(protected) == 1 else 'are'} protected from "
+                "deletion.\n\nUse Unprotect first if you really mean to delete "
+                + ("it." if len(protected) == 1 else "them.")
+                + ("" if len(protected) == len(entries) else
+                   "\n\nNothing was deleted. Select the others without "
+                   f"{'it' if len(protected) == 1 else 'them'} to go on."),
             )
             return
 
         # Itemised, because the things most easily forgotten here are the ones
         # that bite later: a menu entry that launches nothing, and a document
         # association that silently stops working because the prefix holding it
-        # has gone. The list is the confirmation.
-        try:
-            plan = removal.plan(self.reg, name)
-        except KeyError:
+        # has gone. The list is the confirmation. A running prefix is shown in
+        # it, live, rather than refused here -- it may be closed while the
+        # list is read.
+        plans = []
+        for e in entries:
+            try:
+                plans.append(removal.plan(self.reg, e["name"]))
+            except KeyError:
+                pass
+        if not plans:
             self.refresh()
             return
-        dialog = RemovalDialog(self, plan)
+        dialog = RemovalDialog(self, plans)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        chosen = dialog.chosen()
+        chosen = dialog.chosen_by_plan()
         if not chosen:
             return
 
-        # Through the lock like the others. Removing several gigabytes takes
-        # long enough to overlap a clone, and a clone reading the tree this is
-        # deleting from is the worst of the collisions -- it would produce a
-        # copy that is quietly half a prefix.
-        try:
-            self._busy_start(f"Removing {name}", prefix=name, operation="Remove")
-        except oplock.InUse as exc:
-            self._refuse(exc)
-            return
-        notes = removal.apply(self.reg, plan, chosen)
-        # Released before the refresh: the registry row may be gone, and
-        # _busy_done clears the working state off an entry that has to exist.
-        self._busy_done(f"Removed {len(chosen)} item(s) belonging to {name}")
+        # Through the lock like the others, one prefix at a time. Removing
+        # several gigabytes takes long enough to overlap a clone, and a clone
+        # reading the tree this is deleting from is the worst of the
+        # collisions -- it would produce a copy that is quietly half a prefix.
+        report = []
+        for plan, items in chosen:
+            name = plan.name
+            try:
+                self._busy_start(f"Removing {name}", prefix=name, operation="Remove")
+            except oplock.InUse as exc:
+                report.append(f"{name}: not removed -- {exc}")
+                continue
+            try:
+                notes = removal.apply(self.reg, plan, items)
+            finally:
+                # Released before the refresh: the registry row may be gone,
+                # and _busy_done clears the working state off an entry that
+                # has to exist.
+                self._busy_done(f"Removed {len(items)} item(s) belonging to {name}")
+            report.append(f"{name}:")
+            report += [f"  {n}" for n in notes[:14]]
         self.refresh()
-        QMessageBox.information(self, f"{name} removed", "\n".join(notes[:14]))
+        title = (f"{chosen[0][0].name} removed" if len(chosen) == 1
+                 else f"{len(chosen)} prefixes removed")
+        QMessageBox.information(self, title, "\n".join(report[:60]))
 
     def forget_selected(self):
         entry = self.selected_entry()
