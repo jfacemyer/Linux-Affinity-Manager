@@ -109,6 +109,12 @@ grep -n 'POC SOURCE' AffinityScripts/AffinityLinuxInstaller.py
 | Wine 11.16 tarball | `forgejo.facemyer.net/facemyer/Affinity-Wine-Builder/releases/download/11.16/ElementalWarrior-wine-11.16.tar.xz` | `github.com/ryzendew/Affinity-Wine-Builder/releases/download/11.16/ElementalWarrior-wine-11.16.tar.xz` |
 | `affinity-on-linux.exe` | `forgejo.facemyer.net/facemyer/AffinityOnLinux/raw/branch/experimental/affinity-3.3/AffinityHandler/` | `raw.githubusercontent.com/ryzendew/AffinityOnLinux/main/AffinityHandler/` |
 | MIME definitions | `forgejo.facemyer.net/facemyer/AffinityOnLinux/raw/branch/experimental/affinity-3.3/mime/` | `raw.githubusercontent.com/ryzendew/AffinityOnLinux/main/mime/` |
+| The manager, via `AffinityManager/run.py` (`REPO`, `BRANCH`) | `forgejo.facemyer.net/facemyer/AffinityOnLinux`, branch `experimental/affinity-3.3` | `github.com/ryzendew/AffinityOnLinux`, branch `main` — GitHub serves `/archive/<branch>.tar.gz` the same way |
+
+The fourth is not in the installer: it is the bootstrap that lets the manager be
+run with `curl … | python3`, and the one-line command in the top-level README
+and in `AffinityManager/README.md` names the same URL. A test in the manager
+fails if the README and the code disagree, so repoint both together.
 
 The Wine one also depends on a release that does not exist upstream yet: 11.16
 built with the Affinity patch set, from the matching branch of

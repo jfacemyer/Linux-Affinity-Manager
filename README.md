@@ -58,13 +58,21 @@ curl -sSL https://raw.githubusercontent.com/ryzendew/AffinityOnLinux/refs/heads/
 > **Several prefixes to keep track of?** [`AffinityManager/`](AffinityManager/README.md)
 > is optional and changes nothing about the above. The installer stays a single
 > file you run with `curl … | python3`; the manager is a separate window that
-> tracks a set of prefixes, hosts this installer as one of its pages, and keeps
-> two of them from provisioning at the same time. It needs PyQt6, which the
-> installer needs anyway.
+> tracks a set of prefixes, hosts this installer as one of its pages, keeps two
+> of them from provisioning at the same time, and backs prefixes up and
+> restores them. It needs PyQt6, which the installer needs anyway.
+>
+> Run it straight from the repository, the same way as the installer:
 >
 > ```bash
-> ./AffinityManager/AffinityLinuxManager.py
+> curl -sSL https://forgejo.facemyer.net/facemyer/AffinityOnLinux/raw/branch/experimental/affinity-3.3/AffinityManager/run.py | python3
 > ```
+>
+> That pipes a single small file, `run.py`, which downloads this branch, keeps
+> it in `~/.cache/AffinityOnLinux/`, and starts the manager from it — fetching
+> again on every run, so it is always the latest. It installs nothing. From a
+> clone instead: `python3 AffinityManager/AffinityLinuxManager.py`. Details are
+> in the [manager's README](AffinityManager/README.md#running-it).
 
 <details>
 <summary><strong>Python GUI Dependencies</strong></summary>
