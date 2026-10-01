@@ -15,6 +15,7 @@ that was missing.
 
 from __future__ import annotations
 
+import contextlib
 import shutil
 import sys
 import time
@@ -3395,6 +3396,7 @@ class ManagerWindow(QMainWindow):
         if prefix and not already_held:
             self.lock.claim(prefix, operation or message, alive=alive)
         self._busy_prefix = prefix
+        self._last_step = None
         if prefix:
             label = operation or message
             try:
@@ -3418,13 +3420,45 @@ class ManagerWindow(QMainWindow):
         QApplication.processEvents()
 
     def _busy_step(self, value, message=None):
-        if message:
+        """Progress from work running ON the UI thread -- a move, a clean --
+        which has to let the window repaint between steps.
+
+        Never connect a signal to this; use _busy_progress. processEvents
+        delivers whatever is queued, and from a worker thread that is the next
+        progress report, which called this, which processed events again: a
+        backup's rsync reports many times a second, the calls nested a
+        thousand deep and the manager died of a RecursionError mid-backup.
+        The guard is for a caller that gets that wrong anyway."""
+        self._show_step(value, message)
+        if getattr(self, "_in_step", False):
+            return
+        self._in_step = True
+        try:
+            QApplication.processEvents()
+        finally:
+            self._in_step = False
+
+    def _busy_progress(self, value, message):
+        """A slot for progress arriving from a worker thread.
+
+        Already on the event loop, so nothing to process. Written only to
+        the prefix log every ten percent -- rsync repeats each percentage
+        dozens of times, and the log was getting every one. And it never
+        raises: an exception leaving a slot aborts the whole process."""
+        try:
+            self._show_step(value, message, log=value % 10 == 0)
+        except Exception as exc:
+            with contextlib.suppress(Exception):
+                self.status.setText(f"{message} (progress display failed: {exc})")
+
+    def _show_step(self, value, message=None, log=True):
+        if message and message != getattr(self, "_last_step", None):
+            self._last_step = message
             self.status.setText(message)
-            if getattr(self, "_busy_prefix", None):
+            if log and getattr(self, "_busy_prefix", None):
                 prefixlog.write(self._busy_prefix, message)
         if self.progress.maximum():
             self.progress.setValue(value)
-        QApplication.processEvents()
 
     def _busy_done(self, message="", owner=None):
         """End an operation, and give up the lock it took.
@@ -3904,7 +3938,7 @@ class ManagerWindow(QMainWindow):
             self._refuse(exc)
             return
         self._task_thread = thread           # a live reference, or Qt deletes it
-        thread.progress.connect(lambda pct: self._busy_step(pct, f"{message} — {pct}%"))
+        thread.progress.connect(lambda pct: self._busy_progress(pct, f"{message} — {pct}%"))
 
         def finished(result, error):
             # A slot: anything escaping it aborts the process, and this one
@@ -4098,7 +4132,7 @@ class ManagerWindow(QMainWindow):
             self._refuse(exc)
             return
         self._clone_thread.progress.connect(
-            lambda pct: self._busy_step(pct, f"Copying {name} to {new_name} — {pct}%"))
+            lambda pct: self._busy_progress(pct, f"Copying {name} to {new_name} — {pct}%"))
         self._clone_thread.done.connect(self._clone_finished)
         self._clone_thread.start()
 

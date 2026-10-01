@@ -53,7 +53,7 @@ def window(tmp_path, monkeypatch):
         _selection_changed=lambda: None,
         refresh=lambda: None,
     )
-    for name in ("_busy_start", "_busy_step", "_busy_done", "_sync_lock_ui",
-                 "_lock_tick"):
+    for name in ("_busy_start", "_busy_step", "_busy_progress", "_show_step",
+                 "_busy_done", "_sync_lock_ui", "_lock_tick"):
         setattr(w, name, types.MethodType(getattr(app.ManagerWindow, name), w))
     return w, reg, prefixlog
