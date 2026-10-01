@@ -7049,8 +7049,9 @@ class AffinityInstallerGUI(QMainWindow):
         desc_label.setTextFormat(Qt.TextFormat.RichText)
         desc_label.setText(
             "Please choose your preferred graphics backend:\n\n"
-            "• <b>vkd3d</b> - Includes OpenCL support for hardware acceleration\n"
-            "• <b>DXVK</b> - Hardware accelerated, uses the GPU (no OpenCL)\n\n"
+            "• <b>vkd3d</b> - vkd3d-proton: Direct3D 12 on your GPU. The usual choice. "
+            "(OpenCL also works with it, but only on Wine older than 11.11.)\n"
+            "• <b>DXVK</b> - Direct3D 11 on your GPU, never OpenCL\n\n"
             "Note: You can change this later if needed."
         )
         desc_label.setObjectName("descriptionLabel")
@@ -7531,7 +7532,7 @@ class AffinityInstallerGUI(QMainWindow):
             self,
             "Switch to VKD3D",
             "This will:\n\n"
-            "• Install vkd3d-proton for OpenCL support\n"
+            "• Install vkd3d-proton (Direct3D 12 on your GPU)\n"
             "• Install d3d12.dll and d3d12core.dll\n"
             "• Set preference to use VKD3D\n"
             "• Update all desktop entries to remove DXVK environment variables\n\n"
@@ -7696,12 +7697,12 @@ class AffinityInstallerGUI(QMainWindow):
             self.show_message(
                 "Switch to VKD3D Complete",
                 f"Successfully switched to VKD3D!\n\n"
-                f"• Installed vkd3d-proton with OpenCL support\n"
+                f"• Installed vkd3d-proton (Direct3D 12 on your GPU)\n"
                 f"• Installed d3d12.dll and d3d12core.dll\n"
                 f"• Removed DXVK DLL overrides\n"
                 f"• Set up DLL overrides for d3d12 and d3d12core in Wine registry\n"
                 f"• Updated {updated_count} desktop entry/entries\n"
-                f"• All Affinity applications will now use VKD3D with OpenCL support",
+                f"• All Affinity applications will now use VKD3D",
                 "info",
             )
 
@@ -8332,7 +8333,7 @@ class AffinityInstallerGUI(QMainWindow):
 
             if opencl_reply == "Yes":
                 self.enable_opencl = True
-                self.log("OpenCL support will be enabled", "info")
+                self.log("GPU rendering (vkd3d-proton) will be set up", "info")
 
                 # Check if AMD GPU is detected and install additional dependencies based on distribution
                 if self.has_amd_gpu():
@@ -8431,7 +8432,7 @@ class AffinityInstallerGUI(QMainWindow):
                             )
             else:
                 self.enable_opencl = False
-                self.log("OpenCL support will be disabled", "info")
+                self.log("GPU rendering not chosen: Affinity will render in software", "info")
 
             # Save OpenCL preference
             try:
@@ -8443,9 +8444,9 @@ class AffinityInstallerGUI(QMainWindow):
             # Load existing preference
             self.enable_opencl = self.is_opencl_enabled()
             if self.enable_opencl:
-                self.log("OpenCL support is enabled (from previous setup)", "info")
+                self.log("GPU rendering is set up (from previous setup)", "info")
             else:
-                self.log("OpenCL support is disabled (from previous setup)", "info")
+                self.log("GPU rendering is not set up (from previous setup)", "info")
 
         if self.check_cancelled():
             return
@@ -10868,7 +10869,7 @@ class AffinityInstallerGUI(QMainWindow):
                         self.install_d3d12_dlls()
                     else:
                         self.update_progress_text(
-                            "Setting up vkd3d-proton for OpenCL..."
+                            "Setting up vkd3d-proton (GPU rendering)..."
                         )
                         self.update_progress(0.80)
                         self.setup_vkd3d()
@@ -10886,14 +10887,14 @@ class AffinityInstallerGUI(QMainWindow):
                     self.log("Installing d3d12 DLLs for compatibility...", "info")
                     self.install_d3d12_dlls()
                 else:
-                    self.update_progress_text("Setting up vkd3d-proton for OpenCL...")
+                    self.update_progress_text("Setting up vkd3d-proton (GPU rendering)...")
                     self.update_progress(0.80)
                     self.setup_vkd3d()
             else:
                 self.update_progress_text("Installing d3d12 DLLs...")
                 self.update_progress(0.80)
                 self.log(
-                    "OpenCL support is disabled, but installing d3d12 DLLs for compatibility",
+                    "GPU rendering was not chosen, but installing d3d12 DLLs into Wine for compatibility",
                     "info",
                 )
                 self.install_d3d12_dlls()
@@ -12102,7 +12103,7 @@ class AffinityInstallerGUI(QMainWindow):
         self.log(
             "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         )
-        self.log("OpenCL Support Setup", "info")
+        self.log("GPU Rendering Setup (vkd3d-proton)", "info")
         self.log(
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         )
@@ -14853,11 +14854,11 @@ Would you like to continue with {distro_name} anyway?"""
 
             # Configure OpenCL (if enabled)
             if self.is_opencl_enabled():
-                self.update_progress_text("Configuring OpenCL...")
+                self.update_progress_text("Setting up GPU rendering for Affinity...")
                 self.update_progress(0.7)
                 self.configure_opencl(app_name)
             else:
-                self.log("OpenCL support is disabled, skipping configuration", "info")
+                self.log("GPU rendering was not chosen; vkd3d-proton not placed beside Affinity", "info")
 
             # For Affinity v2 apps (Photo, Designer, Publisher), copy wintypes.dll and set override (only for Wine < 11.12)
             if is_affinity_v2:
@@ -15301,7 +15302,7 @@ Would you like to continue with {distro_name} anyway?"""
             QMessageBox.warning(
                 self,
                 "Wine Not Installed",
-                "Wine must be installed before enabling OpenCL support.\n\n"
+                "Wine must be installed before setting up GPU rendering.\n\n"
                 "Please run 'One-Click Setup' or 'Setup Wine Environment' first.",
             )
             return
@@ -15343,11 +15344,11 @@ Would you like to continue with {distro_name} anyway?"""
         def enable_opencl_thread():
             try:
                 self.update_progress(0.0)
-                self.update_progress_text("Enabling OpenCL support...")
+                self.update_progress_text("Setting up GPU rendering...")
                 self.log(
                     "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
                 )
-                self.log("Enabling OpenCL Support", "info")
+                self.log("Setting Up GPU Rendering", "info")
                 self.log(
                     "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 )
@@ -15405,9 +15406,9 @@ Would you like to continue with {distro_name} anyway?"""
                         self.install_d3d12_dlls()
                     else:
                         self.update_progress_text(
-                            "Setting up vkd3d-proton for OpenCL..."
+                            "Setting up vkd3d-proton (GPU rendering)..."
                         )
-                        self.log("Setting up vkd3d-proton for OpenCL...", "info")
+                        self.log("Setting up vkd3d-proton (GPU rendering)...", "info")
                         self.setup_vkd3d()
 
                 elif self.has_amd_gpu() and (
@@ -15512,15 +15513,15 @@ Would you like to continue with {distro_name} anyway?"""
 
                 else:
                     self.update_progress(0.4)
-                    self.update_progress_text("Setting up vkd3d-proton for OpenCL...")
-                    self.log("Setting up vkd3d-proton for OpenCL...", "info")
+                    self.update_progress_text("Setting up vkd3d-proton (GPU rendering)...")
+                    self.log("Setting up vkd3d-proton (GPU rendering)...", "info")
                     self.setup_vkd3d()
 
                 self.update_progress(0.8)
 
                 # Configure OpenCL for all installed Affinity applications
                 self.update_progress_text(
-                    "Configuring OpenCL for Affinity applications..."
+                    "Setting up GPU rendering for Affinity applications..."
                 )
                 apps_to_configure = []
 
@@ -15545,7 +15546,7 @@ Would you like to continue with {distro_name} anyway?"""
 
                 if apps_to_configure:
                     self.log(
-                        f"Configuring OpenCL for: {', '.join(apps_to_configure)}",
+                        f"Setting up GPU rendering for: {', '.join(apps_to_configure)}",
                         "info",
                     )
                     for app_name in apps_to_configure:
@@ -15554,28 +15555,28 @@ Would you like to continue with {distro_name} anyway?"""
                     self.log("No Affinity applications found to configure", "info")
 
                 self.update_progress(1.0)
-                self.update_progress_text("OpenCL support enabled!")
+                self.update_progress_text("GPU rendering set up")
 
                 # Verify OpenCL is enabled
                 if self.is_opencl_enabled():
                     self.log(
-                        "\n✓ OpenCL support has been enabled successfully!", "success"
+                        "\n✓ GPU rendering has been set up.", "success"
                     )
                     self.log(
-                        "OpenCL is now configured for all installed Affinity applications.",
+                        "vkd3d-proton is now in place for all installed Affinity applications.",
                         "info",
                     )
                     # Show success message on main thread
                     self.show_message(
-                        "OpenCL Enabled",
-                        "OpenCL support has been successfully enabled!\n\n"
-                        "OpenCL is now configured for all installed Affinity applications.\n"
+                        "GPU rendering set up",
+                        "GPU rendering has been set up for all installed Affinity "
+                        "applications.\n\n"
                         "You may need to restart Affinity applications for the changes to take effect.",
                         "info",
                     )
                 else:
                     self.log(
-                        "\n⚠ Warning: OpenCL preference may not have been saved correctly",
+                        "\n⚠ Warning: the GPU rendering preference may not have been saved correctly",
                         "warning",
                     )
                     self.log(
@@ -15583,8 +15584,8 @@ Would you like to continue with {distro_name} anyway?"""
                         "warning",
                     )
                     self.show_message(
-                        "OpenCL Warning",
-                        "OpenCL support was configured, but the preference may not have been saved correctly.\n\n"
+                        "GPU rendering",
+                        "GPU rendering was set up, but the preference may not have been saved correctly.\n\n"
                         "Please check the log for details.",
                         "warning",
                     )
@@ -15597,12 +15598,12 @@ Would you like to continue with {distro_name} anyway?"""
 
                 error_msg = str(e)
                 error_trace = traceback.format_exc()
-                self.log(f"Error enabling OpenCL support: {error_msg}", "error")
+                self.log(f"Error setting up GPU rendering: {error_msg}", "error")
                 self.log(f"Traceback: {error_trace}", "error")
-                self.update_progress_text("Error enabling OpenCL support")
+                self.update_progress_text("Error setting up GPU rendering")
                 self.show_message(
                     "Error",
-                    f"An error occurred while enabling OpenCL support:\n\n{error_msg}\n\nCheck the log for details.",
+                    f"An error occurred while setting up GPU rendering:\n\n{error_msg}\n\nCheck the log for details.",
                     "error",
                 )
 
