@@ -8616,10 +8616,14 @@ class AffinityInstallerGUI(QMainWindow):
 
         # Complete!
         self.update_progress(1.0)
-        self.update_progress_text("Setup Complete!")
-        self.log("\n✓ Full setup completed!", "success")
+        # "Setup Complete!" read as "Affinity is installed" -- after a button
+        # labelled Create and install, most of all. It is not: this is the
+        # environment, and Affinity itself is the next step.
+        self.update_progress_text("Wine is ready — Affinity is not installed yet")
+        self.log("\n✓ Wine and everything Affinity needs are set up.", "success")
         self.log(
-            "You can now install Affinity applications using the buttons above.", "info"
+            "Affinity itself is not installed yet: that is the next step, "
+            "offered now, or use the install buttons above.", "info"
         )
 
         # End operation
@@ -8635,8 +8639,12 @@ class AffinityInstallerGUI(QMainWindow):
         """Prompt user to install an Affinity application"""
         reply = QMessageBox.question(
             self,
-            "Install Affinity Application",
-            "Setup is complete!\n\nWould you like to install an Affinity application now?",
+            "Install Affinity now?",
+            "Wine and everything Affinity needs are ready.\n\n"
+            "Affinity itself is not installed yet. Install it now? This "
+            "downloads Affinity's installer and runs it in this prefix.\n\n"
+            "(No leaves the prefix ready, without Affinity; the install "
+            "buttons can do it later.)",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
 
