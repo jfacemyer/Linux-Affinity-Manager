@@ -591,8 +591,50 @@ def test_analytics_locks_clipboard_and_models_are_never_carried(tmp_path):
     dest = prefsseed.destination_for(new)
     prefsseed.seed(prefsseed.settings_in(old)[0], dest, mode=prefsseed.REPLACE)
     common = dest.parent.parent.parent / "Common" / "3.0"
-    for name in ("sp.db", "cs.dat", "cs.json", "ipc.dat", "locks", "clipboard", "modelcache"):
+    for name in ("sp.db", "cs.dat", "cs.json", "ipc.dat", "locks", "clipboard"):
         assert not (common / name).exists(), f"Common/{name} was carried"
+
+
+def test_the_ai_models_are_carried(tmp_path):
+    """554 MB that Affinity 3.3 uses and would otherwise download again."""
+    old, new = make_prefix(tmp_path / "Old"), make_prefix(tmp_path / "New")
+    make_settings(old)
+    common = build_common(old)
+    (common / "modelcache" / "SegmentationEncoder_3.2.2.onnx").write_text("model")
+    dest = prefsseed.destination_for(new)
+    prefsseed.seed(prefsseed.settings_in(old)[0], dest, mode=prefsseed.REPLACE)
+    carried = dest.parent.parent.parent / "Common" / "3.0" / "modelcache"
+    assert (carried / "SegmentationEncoder_3.2.2.onnx").read_text() == "model"
+
+
+def test_windows_favorites_and_links_are_carried_as_links(tmp_path):
+    """The working prefix's Favorites are symlinks to client folders; they
+    travel as symlinks, pointing where they pointed."""
+    old, new = make_prefix(tmp_path / "Old"), make_prefix(tmp_path / "New")
+    make_settings(old)
+    client = tmp_path / "work" / "Client A"
+    client.mkdir(parents=True)
+    profile = prefsseed.settings_in(old)[0].profile_dir
+    assert profile.name == "joshua"
+    (profile / "Favorites").mkdir()
+    (profile / "Favorites" / "Client A").symlink_to(client)
+    (profile / "Links").mkdir()
+    (profile / "Links" / "work").symlink_to(tmp_path / "work")
+    dest = prefsseed.destination_for(new)
+    result = prefsseed.seed(prefsseed.settings_in(old)[0], dest, mode=prefsseed.REPLACE)
+    new_profile = dest.parents[5]
+    fav = new_profile / "Favorites" / "Client A"
+    assert fav.is_symlink() and Path(os.readlink(fav)) == client
+    assert (new_profile / "Links" / "work").is_symlink()
+    assert {"Favorites", "Links"} <= set(result.extras)
+
+
+def test_empty_favorites_are_not_carried(tmp_path):
+    old, new = make_prefix(tmp_path / "Old"), make_prefix(tmp_path / "New")
+    make_settings(old)
+    (prefsseed.settings_in(old)[0].profile_dir / "Favorites").mkdir()
+    plan = prefsseed.plan(prefsseed.settings_in(old)[0], prefsseed.destination_for(new))
+    assert "Favorites" not in plan.extras
 
 
 def test_displaced_common_settings_are_renamed_aside_not_deleted(tmp_path):
@@ -629,7 +671,8 @@ def test_the_plan_and_the_left_behind_list_include_common(tmp_path):
     plan = prefsseed.plan(source, prefsseed.destination_for(new))
     assert "Common/Settings" in plan.extras and "Common/user" in plan.extras
     left = {e.name: k for e, k in source.common_left_behind}
-    assert left["sp.db"] == prefsseed.VOLATILE and left["modelcache"] == prefsseed.VOLATILE
+    assert left["sp.db"] == prefsseed.VOLATILE and left["clipboard"] == prefsseed.VOLATILE
+    assert "modelcache" not in left
     assert "user" not in left
 
 
