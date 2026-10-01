@@ -539,6 +539,109 @@ def test_replace_renames_displaced_workspaces_aside(tmp_path):
     assert len(aside) == 1 and (aside[0] / "w.xml").read_text() == "mine"
 
 
+# ── Common/<version>, beside Affinity/<version> ────────────────────────────
+#
+# Found 2026-10-01: a carried prefix came up without its recent fonts, fill
+# presets, object styles, document presets or user dictionary, because the
+# carry never looked in Common. Names are the working prefix's Common/3.0.
+
+LIVE_COMMON = {
+    "dirs": ["Settings", "user", "locks", "clipboard", "modelcache"],
+    "files": ["cs.dat", "cs.json", "ipc.dat", "sp.db"],
+}
+
+
+def build_common(prefix: Path, text="mine") -> Path:
+    settings = prefsseed.settings_in(prefix)[0]
+    common = settings.common_dir
+    for d in LIVE_COMMON["dirs"]:
+        (common / d).mkdir(parents=True, exist_ok=True)
+        (common / d / "x").write_text(text)
+    (common / "Settings" / "Fonts.xml").write_text(f"<fonts>{text}</fonts>")
+    (common / "user" / "fills.propcol").write_text(text)
+    for f in LIVE_COMMON["files"]:
+        (common / f).write_text(text)
+    return common
+
+
+def test_the_common_folder_is_found_beside_the_version_folder(tmp_path):
+    old = make_prefix(tmp_path / "Old")
+    make_settings(old)
+    common = prefsseed.settings_in(old)[0].common_dir
+    assert common.parts[-3:] == ("Affinity", "Common", "3.0")
+    assert common.parent.parent == prefsseed.settings_in(old)[0].path.parent.parent.parent
+
+
+def test_font_history_and_user_presets_are_carried(tmp_path):
+    old, new = make_prefix(tmp_path / "Old"), make_prefix(tmp_path / "New")
+    make_settings(old)
+    build_common(old, "theirs")
+    dest = prefsseed.destination_for(new)
+    result = prefsseed.seed(prefsseed.settings_in(old)[0], dest, mode=prefsseed.REPLACE)
+    common = dest.parent.parent.parent / "Common" / "3.0"
+    assert (common / "Settings" / "Fonts.xml").read_text() == "<fonts>theirs</fonts>"
+    assert (common / "user" / "fills.propcol").read_text() == "theirs"
+    assert {"Common/Settings", "Common/user"} <= set(result.extras)
+
+
+def test_analytics_locks_clipboard_and_models_are_never_carried(tmp_path):
+    old, new = make_prefix(tmp_path / "Old"), make_prefix(tmp_path / "New")
+    make_settings(old)
+    build_common(old)
+    dest = prefsseed.destination_for(new)
+    prefsseed.seed(prefsseed.settings_in(old)[0], dest, mode=prefsseed.REPLACE)
+    common = dest.parent.parent.parent / "Common" / "3.0"
+    for name in ("sp.db", "cs.dat", "cs.json", "ipc.dat", "locks", "clipboard", "modelcache"):
+        assert not (common / name).exists(), f"Common/{name} was carried"
+
+
+def test_displaced_common_settings_are_renamed_aside_not_deleted(tmp_path):
+    old, new = make_prefix(tmp_path / "Old"), make_prefix(tmp_path / "New")
+    make_settings(old)
+    make_settings(new)
+    build_common(old, "theirs")
+    build_common(new, "mine")
+    dest = prefsseed.settings_in(new)[0].path
+    prefsseed.seed(prefsseed.settings_in(old)[0], dest, mode=prefsseed.REPLACE)
+    common = prefsseed.settings_in(new)[0].common_dir
+    assert (common / "user" / "fills.propcol").read_text() == "theirs"
+    aside = [p for p in common.iterdir() if p.name.startswith("user.before-copy-")]
+    assert len(aside) == 1 and (aside[0] / "fills.propcol").read_text() == "mine"
+
+
+def test_fill_keeps_the_destinations_common_settings(tmp_path):
+    old, new = make_prefix(tmp_path / "Old"), make_prefix(tmp_path / "New")
+    make_settings(old)
+    make_settings(new)
+    build_common(old, "theirs")
+    build_common(new, "mine")
+    dest = prefsseed.settings_in(new)[0].path
+    prefsseed.seed(prefsseed.settings_in(old)[0], dest, mode=prefsseed.FILL)
+    common = prefsseed.settings_in(new)[0].common_dir
+    assert (common / "user" / "fills.propcol").read_text() == "mine"
+
+
+def test_the_plan_and_the_left_behind_list_include_common(tmp_path):
+    old, new = make_prefix(tmp_path / "Old"), make_prefix(tmp_path / "New")
+    make_settings(old)
+    build_common(old)
+    source = prefsseed.settings_in(old)[0]
+    plan = prefsseed.plan(source, prefsseed.destination_for(new))
+    assert "Common/Settings" in plan.extras and "Common/user" in plan.extras
+    left = {e.name: k for e, k in source.common_left_behind}
+    assert left["sp.db"] == prefsseed.VOLATILE and left["modelcache"] == prefsseed.VOLATILE
+    assert "user" not in left
+
+
+def test_a_prefix_without_a_common_folder_still_copies(tmp_path):
+    """Affinity 2 has no Common/<version>; the carry must not care."""
+    old, new = make_prefix(tmp_path / "Old"), make_prefix(tmp_path / "New")
+    make_settings(old)
+    result = prefsseed.seed(prefsseed.settings_in(old)[0],
+                            prefsseed.destination_for(new), mode=prefsseed.REPLACE)
+    assert not any(e.startswith("Common/") for e in result.extras)
+
+
 # ── drive letters ──────────────────────────────────────────────────────────
 
 def wine_drives(prefix: Path, **letters) -> Path:
