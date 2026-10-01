@@ -2936,9 +2936,10 @@ class AffinityInstallerGUI(QMainWindow):
                     "folderopen",
                 ),
                 (
-                    "Enable OpenCL",
+                    "GPU rendering",
                     self.enable_opencl_support,
-                    "Enable OpenCL support for hardware acceleration in Affinity applications",
+                    "Set up vkd3d-proton (DXVK on AMD) so Affinity draws on your "
+                    "graphics card; OpenCL too, on Wine older than 11.11",
                     "lightning",
                 ),
             ],
@@ -8304,13 +8305,28 @@ class AffinityInstallerGUI(QMainWindow):
         # Ask about OpenCL support (only if not already configured)
         opencl_config_file = Path(self.directory) / ".opencl_enabled"
         if not opencl_config_file.exists():
+            # This question was titled "Enable OpenCL Support?", and it was
+            # answered as one -- "No" sounded like the safe choice, given that
+            # OpenCL hangs Affinity on newer Wine. But what "Yes" actually
+            # installs is the GPU renderer (vkd3d-proton, or DXVK on AMD), and
+            # "No" left Affinity drawing in software with an "unsupported
+            # graphics card" warning. OpenCL itself is handled separately by
+            # disable_opencl_if_needed, whatever is answered here.
             opencl_reply = self.show_question_dialog(
-                "Enable OpenCL Support?",
-                "OpenCL (Open Computing Language) enables hardware acceleration for certain features in Affinity applications, "
-                "which can improve performance for tasks like image processing, filters, and effects.\n\n"
-                "This will download and configure vkd3d-proton, which provides OpenCL support through Vulkan.\n\n"
-                "Would you like to enable OpenCL support?\n\n"
-                "Note: You can change this setting later if needed.",
+                "Use your graphics card?",
+                "Affinity draws its canvas with Direct3D 12. To do that on your "
+                "graphics card under Wine it needs a translation layer: "
+                "vkd3d-proton (DXVK on AMD cards), which this sets up. "
+                "Without it, Affinity falls back to slow software rendering and "
+                "reports an unsupported graphics card.\n\n"
+                "Recommended: Yes.\n\n"
+                "About OpenCL: on Wine 11.11 and newer, Affinity's OpenCL "
+                "acceleration is kept switched off whichever you choose, because "
+                "turning it on has made Affinity hang at startup. That has been "
+                "seen on Intel Arc; other cards have not been tested, so it is "
+                "off for all of them to be safe. On an older Wine build, Yes "
+                "here also lets Affinity use OpenCL.\n\n"
+                "You can change this later.",
                 ["Yes", "No"],
             )
 
@@ -15286,9 +15302,9 @@ Would you like to continue with {distro_name} anyway?"""
         if self.is_opencl_enabled():
             reply = QMessageBox.question(
                 self,
-                "OpenCL Already Enabled",
-                "OpenCL support is already enabled.\n\n"
-                "Would you like to reconfigure OpenCL support?",
+                "GPU rendering already set up",
+                "GPU rendering is already set up for this prefix.\n\n"
+                "Set it up again?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
             )
@@ -15298,13 +15314,16 @@ Would you like to continue with {distro_name} anyway?"""
         # Confirm with user
         reply = QMessageBox.question(
             self,
-            "Enable OpenCL Support",
-            "OpenCL (Open Computing Language) enables hardware acceleration for certain features in Affinity applications.\n\n"
-            "This will:\n"
-            "• Download and configure vkd3d-proton (or d3d12 DLLs for AMD GPUs)\n"
-            "• Install AMD OpenCL dependencies if AMD GPU is detected\n"
-            "• Configure OpenCL for all installed Affinity applications\n\n"
-            "Would you like to enable OpenCL support?",
+            "Use your graphics card",
+            "This sets up GPU rendering for Affinity:\n\n"
+            "• vkd3d-proton (or d3d12 DLLs / DXVK for AMD cards), which lets "
+            "Affinity's Direct3D 12 canvas run on your graphics card\n"
+            "• AMD OpenCL dependencies, if an AMD card is detected\n\n"
+            "OpenCL acceleration itself stays switched off on Wine 11.11 and "
+            "newer, because it has made Affinity hang at startup (seen on "
+            "Intel Arc; other cards untested). On an older Wine build it is "
+            "turned on too.\n\n"
+            "Set this up now?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.Yes,
         )
