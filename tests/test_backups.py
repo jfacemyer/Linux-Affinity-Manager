@@ -15,7 +15,17 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from affinity_manager import backups, maintenance, registry, settings  # noqa: E402
+from affinity_manager import backups, liveness, maintenance, registry, settings  # noqa: E402
+
+
+def activity_of(*groups):
+    """A stand-in for liveness.scan: one process per group named."""
+    names = {liveness.AFFINITY: "Affinity.exe", liveness.HOOK: "AffinityHook.ex",
+             liveness.SERVICE: "services.exe", liveness.OTHER: "keyspy.exe"}
+    a = liveness.Activity("p")
+    for i, g in enumerate(groups):
+        a.procs.append(liveness.Proc(4242 + i, names[g], 1e9, g))
+    return a
 
 
 @pytest.fixture
@@ -34,7 +44,7 @@ def world(tmp_path, monkeypatch):
     monkeypatch.setattr(registry, "base_dir", lambda: tmp_path / "base")
     monkeypatch.setattr(maintenance, "LAUNCHER_DIRS", (str(home / ".local" / "bin"),))
     monkeypatch.setattr(backups, "_refresh_databases", lambda: None)
-    monkeypatch.setattr(backups, "wine_pids", lambda prefix: [])
+    monkeypatch.setattr(backups, "activity", lambda prefix: activity_of())
     # pytest's tmp_path lives on tmpfs, which backups rightly refuse -- a backup
     # in memory is gone at reboot. The fixture says what it pretends to be on;
     # tests about filesystems override it.
@@ -134,11 +144,22 @@ def test_a_backup_inside_the_prefix_is_refused(world):
 
 def test_a_running_prefix_is_not_backed_up(world, monkeypatch):
     plan = backups.plan_backup("AffinityLinux", world.prefix, world.location)
-    monkeypatch.setattr(backups, "wine_pids", lambda prefix: [4242])
+    monkeypatch.setattr(backups, "activity",
+                        lambda prefix: activity_of(liveness.AFFINITY))
     with pytest.raises(backups.InUse) as caught:
         backups.create(plan)
     assert "4242" in str(caught.value)
     assert not plan.partial.exists() and not plan.dest.exists()
+
+
+def test_leftovers_do_not_stop_a_backup(world, monkeypatch):
+    """Two-week-old Wine services with no wineserver, a stranded launcher:
+    nothing is writing the prefix. Refusing on them is what made the manager
+    say "running" about an Affinity closed a fortnight ago."""
+    monkeypatch.setattr(backups, "activity", lambda prefix: activity_of(
+        liveness.HOOK, liveness.SERVICE, liveness.OTHER))
+    b = take(world)
+    assert b.status == "ok"
 
 
 def test_not_enough_space_is_refused_before_anything_is_written(world, monkeypatch):
@@ -297,10 +318,22 @@ def test_a_failed_restore_leaves_the_current_prefix_where_it_was(world, monkeypa
 def test_a_running_prefix_is_not_restored_over(world, monkeypatch):
     b = take(world)
     plan = backups.plan_restore(b)
-    monkeypatch.setattr(backups, "wine_pids", lambda prefix: [999])
+    monkeypatch.setattr(backups, "activity",
+                        lambda prefix: activity_of(liveness.AFFINITY))
     with pytest.raises(backups.InUse):
         backups.restore(plan)
     assert (world.prefix / "system.reg").read_text() == "WINE REGISTRY v1\n"
+
+
+def test_leftovers_must_be_ended_before_a_restore_replaces_the_prefix(world, monkeypatch):
+    """They have the prefix open, and it is about to be swapped for another."""
+    b = take(world)
+    plan = backups.plan_restore(b)
+    monkeypatch.setattr(backups, "activity",
+                        lambda prefix: activity_of(liveness.SERVICE))
+    with pytest.raises(backups.InUse) as caught:
+        backups.restore(plan)
+    assert "End them first" in str(caught.value)
 
 
 def test_the_plan_says_what_will_happen_before_it_happens(world):
