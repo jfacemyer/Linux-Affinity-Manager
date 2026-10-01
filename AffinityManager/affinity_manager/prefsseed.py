@@ -93,18 +93,27 @@ VOLATILE_SUFFIXES = (".log",)
 #   Settings      Fonts.xml -- recently used and favourite font families.
 #   user          the user's own presets: fills, object styles, document
 #                 presets, dictionary, preflight, adjustments, macros...
-COMMON_CONFIG_NAMES = frozenset({"Settings", "user"})
+#   modelcache    the AI models (segmentation, and others as they are used).
+#                 Downloadable, but large -- 554 MB in the prefix this was
+#                 written against -- and Affinity 3.3's liblearning.dll uses
+#                 every generation found there, so carrying them saves the
+#                 download and the wait the first time a feature needs one.
+COMMON_CONFIG_NAMES = frozenset({"Settings", "user", "modelcache"})
 #   sp.db*        an analytics event queue (24 MB in the prefix this was
 #                 written against), not settings.
 #   cs.dat/json   the cached dynamic configuration Affinity fetches.
 #   ipc.dat, locks  this prefix's running state.
 #   clipboard     Affinity's clipboard cache.
-#   modelcache    downloadable AI segmentation models, over 500 MB; fetched
-#                 again on demand.
 COMMON_VOLATILE_NAMES = frozenset({
     "sp.db", "sp.db-wal", "sp.db-shm", "cs.dat", "cs.json", "ipc.dat",
-    "locks", "clipboard", "modelcache",
+    "locks", "clipboard",
 })
+
+# And two folders in the Windows user's own profile, outside Affinity's
+# entirely: the Windows Favorites and Links folders, whose shortcuts are what
+# a file chooser offers as places. In the working prefix they are symlinks to
+# client folders; a carried prefix came up with neither (2026-10-01).
+PROFILE_CONFIG_NAMES = ("Favorites", "Links")
 
 
 def kind_of_common(name: str) -> str:
@@ -186,6 +195,25 @@ class Settings:
     def common_extras(self) -> list:
         """The configuration in Common/<version> -- see COMMON_CONFIG_NAMES."""
         return [e for e in self._common() if kind_of_common(e.name) == CONFIG]
+
+    @property
+    def profile_dir(self) -> Path:
+        """drive_c/users/<user>: Settings is <user>/AppData/Roaming/Affinity/
+        Affinity/<version>/Settings."""
+        return self.path.parents[5]
+
+    @property
+    def profile_extras(self) -> list:
+        """Favorites and Links, where they exist and hold anything."""
+        out = []
+        for name in PROFILE_CONFIG_NAMES:
+            p = self.profile_dir / name
+            try:
+                if p.is_dir() and not p.is_symlink() and any(p.iterdir()):
+                    out.append(p)
+            except OSError:
+                pass
+        return out
 
     @property
     def common_left_behind(self) -> list:
@@ -363,7 +391,8 @@ def plan(source: Settings, destination: Path) -> SeedResult:
         (replaced if (destination / rel).exists() else added).append(rel)
     return SeedResult(added, replaced, [], None,
                       [e.name for e in source.extras]
-                      + ["Common/" + e.name for e in source.common_extras])
+                      + ["Common/" + e.name for e in source.common_extras]
+                      + [e.name for e in source.profile_extras])
 
 
 def aside_of(destination) -> Path | None:
@@ -423,10 +452,14 @@ def seed(source: Settings, destination, *, mode=REPLACE) -> SeedResult:
     # Common/<version>, the sibling of Affinity/<version>: the user's own
     # presets and font history. See COMMON_CONFIG_NAMES.
     common_dir = version_dir.parent.parent / "Common" / version_dir.name
+    # ...and the Windows user's Favorites and Links: <user>/AppData/Roaming/
+    # Affinity/Affinity/<version> -> <user>, four levels above <version>.
+    profile_dir = version_dir.parents[4]
     stamp = time.strftime("%Y-%m-%d-%H%M%S")
     for entry, into, label in (
             [(e, version_dir, e.name) for e in source.extras]
-            + [(e, common_dir, "Common/" + e.name) for e in source.common_extras]):
+            + [(e, common_dir, "Common/" + e.name) for e in source.common_extras]
+            + [(e, profile_dir, e.name) for e in source.profile_extras]):
         target = into / entry.name
         if target.exists() or target.is_symlink():
             if mode == FILL:
