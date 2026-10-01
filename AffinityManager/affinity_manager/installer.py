@@ -251,6 +251,11 @@ def summary(info: dict | None = None) -> str:
     if info["branch"] and not info["on_preferred_branch"] and not info.get("vendored"):
         warning = f"  (expected {PREFERRED_BRANCH})"
     if info.get("vendored"):
+        # Started by run.py from a downloaded tarball there is no git to ask,
+        # so run.py says which branch and commit it unpacked.
+        source = os.environ.get("AFFINITY_MANAGER_SOURCE", "").strip()
+        if source and not detail:
+            detail = f"downloaded: {source}"
         detail = ("shipped with this manager" + (f", {detail}" if detail else ""))
     return f"Installer: {where}" + (f"  [{detail}]" if detail else "") + warning
 
