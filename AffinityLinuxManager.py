@@ -16,6 +16,7 @@ that was missing.
 from __future__ import annotations
 
 import contextlib
+import html
 import shutil
 import sys
 import time
@@ -2361,6 +2362,7 @@ class BackupsDialog(SizedDialog):
         self.detail.setWordWrap(True)
         self.detail.setObjectName("descriptionLabel")
         self.detail.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.detail.setTextFormat(Qt.TextFormat.RichText)
         layout.addWidget(self.detail)
 
         buttons = QHBoxLayout()
@@ -2397,6 +2399,15 @@ class BackupsDialog(SizedDialog):
             self.tree.resizeColumnToContents(i)
         self._selection_changed()
 
+    WHY_NOT = {
+        "partial": "this backup did not finish, so there is no record of what "
+                   "it should contain to check it against, and it may be "
+                   "missing files. Delete it and back up again.",
+        "unreachable": "its folder cannot be reached -- a disk that is not "
+                       "plugged in or mounted. Connect it and reopen this list.",
+        "damaged": "its record cannot be read, so what it holds is unknown.",
+    }
+
     def selected(self):
         rows = self.tree.selectedItems()
         return rows[0].data(0, Qt.ItemDataRole.UserRole) if rows else None
@@ -2407,6 +2418,11 @@ class BackupsDialog(SizedDialog):
         self.verify_button.setEnabled(bool(b) and b.status == "ok")
         self.open_button.setEnabled(bool(b) and b.path.exists())
         self.delete_button.setEnabled(bool(b) and b.status != "unreachable")
+        # A switched-off button says nothing about why, so the reason goes on
+        # the button and in the detail line both.
+        why = self.WHY_NOT.get(b.status, "") if b else "Choose a backup first."
+        for button in (self.restore_button, self.verify_button):
+            button.setToolTip(why)
         if not b:
             self.detail.setText("Nothing here yet." if not self.tree.topLevelItemCount()
                                 else "Choose a backup.")
@@ -2424,7 +2440,10 @@ class BackupsDialog(SizedDialog):
             if disk.same_disk:
                 bits.append("On the same physical disk as the prefix.")
         bits += b.notes
-        self.detail.setText("\n".join(bits))
+        if why:
+            bits.append(f"<b>Verify and Restore are not available:</b> {why}")
+        self.detail.setText("<br>".join(html.escape(x) if not x.startswith("<b>")
+                                        else x for x in bits))
 
     def _restore(self):
         b = self.selected()
