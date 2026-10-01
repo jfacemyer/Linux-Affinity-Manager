@@ -63,6 +63,7 @@ from affinity_manager import (
     discover,
     hosted,
     installer,
+    liveness,
     prefsseed,
     removal,
     snapshots,
@@ -228,6 +229,259 @@ class ConfirmDialog(SizedDialog):
     def ask(parent, title, message, **kwargs) -> bool:
         dialog = ConfirmDialog(parent, title, message, **kwargs)
         return dialog.exec() == QDialog.DialogCode.Accepted and dialog.tick.isChecked()
+
+
+class ActivityBanner(QFrame):
+    """What is running in a prefix, in a coloured band, checked every second
+    and a half.
+
+    This replaces a line of small amber text that was worked out once, when a
+    dialog opened, and never again. Two things were wrong with it. It was easy
+    to read past -- and it was what was stopping the button from working. And
+    it went on saying Affinity was running after Affinity had been closed, so
+    the only way out was to close the dialog and open it again, which did not
+    help either, because what it had counted were processes left behind by
+    sessions weeks old (see liveness).
+
+    Three states, each its own colour, so the state reads before the words do:
+
+      running    red. Affinity is open; what this dialog does must wait.
+                 Offers to end it, behind a tick -- for one that has hung.
+      leftovers  amber. Affinity is closed, but Wine processes from earlier
+                 sessions are still there. Offers to end them.
+      quiet      nothing shown -- except, straight after one of the others, a
+                 green "closed" for a few seconds, so that what was blocking
+                 visibly goes away rather than just vanishing.
+
+    `blocking` says what the owner does about leftovers: a backup can be
+    taken with them there, a restore over the prefix cannot. The owner listens
+    to `changed` and re-checks its own buttons; the banner says why."""
+
+    changed = pyqtSignal(str)
+
+    INTERVAL_MS = 1500
+    CLOSED_MS = 6000
+    STYLE = {
+        liveness.RUNNING: ("#5C1A1E", "#E5484D"),
+        liveness.LEFTOVERS: ("#4A3410", "#F5A623"),
+        "closed": ("#143D28", "#3FBF6F"),
+    }
+
+    def __init__(self, parent, prefix, *, name=None, waiting_for="",
+                 leftovers_block=False):
+        super().__init__(parent)
+        self.setObjectName("activityBanner")
+        self.prefix = Path(prefix) if prefix else None
+        self.name = name or (self.prefix.name if self.prefix else "")
+        self.waiting_for = waiting_for
+        self.leftovers_block = leftovers_block
+        self.activity = liveness.Activity(str(prefix or ""))
+        self._shown = None
+        self._gone = None
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(14, 10, 14, 10)
+        layout.setSpacing(14)
+        text = QVBoxLayout()
+        text.setSpacing(2)
+        self.heading = QLabel("")
+        self.heading.setWordWrap(True)
+        self.detail = QLabel("")
+        self.detail.setWordWrap(True)
+        text.addWidget(self.heading)
+        text.addWidget(self.detail)
+        layout.addLayout(text, 1)
+        self.end_button = QPushButton("End them…")
+        self.end_button.setToolTip("End the leftover Wine processes in this prefix")
+        self.end_button.clicked.connect(self._end)
+        layout.addWidget(self.end_button, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.hide()
+
+        self._closed_timer = QTimer(self)
+        self._closed_timer.setSingleShot(True)
+        self._closed_timer.timeout.connect(lambda: self._paint())
+        self._timer = QTimer(self)
+        self._timer.setInterval(self.INTERVAL_MS)
+        self._timer.timeout.connect(self.check)
+        self._timer.start()
+        self.check()
+
+    # -- what the owner asks -------------------------------------------------
+
+    @property
+    def state(self) -> str:
+        return self.activity.state
+
+    def blocks(self) -> bool:
+        if self.state == liveness.RUNNING:
+            return True
+        return self.leftovers_block and self.state == liveness.LEFTOVERS
+
+    def set_leftovers_block(self, block: bool):
+        if block != self.leftovers_block:
+            self.leftovers_block = block
+            self._paint()
+
+    def set_prefix(self, prefix, name=None):
+        self.prefix = Path(prefix) if prefix else None
+        self.name = name or (self.prefix.name if self.prefix else "")
+        self._shown = None
+        self._closed_timer.stop()
+        self.check()
+
+    # -- polling -------------------------------------------------------------
+
+    def check(self):
+        try:
+            now = (liveness.scan(self.prefix) if self.prefix
+                   else liveness.Activity(""))
+        except Exception:                       # never kill the event loop
+            return
+        before, self.activity = self.activity.state, now
+        first = self._shown is None
+        self._shown = now.state
+        if not first and now.state == liveness.QUIET and before != liveness.QUIET:
+            self._gone = before
+            self._closed_timer.start(self.CLOSED_MS)
+        elif now.state != liveness.QUIET:
+            self._closed_timer.stop()
+        self._paint()
+        if first or now.state != before:
+            self.changed.emit(now.state)
+
+    def _paint(self):
+        state = self.state
+        closing = state == liveness.QUIET and self._closed_timer.isActive()
+        if state == liveness.QUIET and not closing:
+            self.hide()
+            return
+        if closing:
+            heading = (f"Affinity has closed in {self.name}"
+                       if self._gone == liveness.RUNNING
+                       else f"The leftover processes in {self.name} have gone")
+            detail = "Nothing is running there now."
+            if self.waiting_for:
+                detail += f" You can {self.waiting_for}."
+            key = "closed"
+        elif state == liveness.RUNNING:
+            first = min(self.activity.of(liveness.AFFINITY), key=lambda p: p.started)
+            heading = f"Affinity is running in {self.name}"
+            detail = (f"pid {first.pid}, started {first.when()}. "
+                      + (f"Close it to {self.waiting_for}. " if self.waiting_for else "")
+                      + "This notice updates by itself.")
+            key = state
+        else:
+            heading = (f"Leftover Wine processes in {self.name}"
+                       + (" — end them to continue" if self.leftovers_block else ""))
+            detail = self.activity.summary()
+            if not self.leftovers_block:
+                detail += " They do not stop this."
+            key = state
+        background, edge = self.STYLE[key]
+        self.setStyleSheet(
+            f"QFrame#activityBanner {{ background: {background}; "
+            f"border: 2px solid {edge}; border-radius: 8px; }}"
+            f"QFrame#activityBanner QLabel {{ background: transparent; "
+            f"border: none; color: #FFFFFF; }}")
+        self.heading.setText(f"<b style='font-size:14pt'>{heading}</b>")
+        self.detail.setText(detail)
+        self.end_button.setText("End Affinity…" if state == liveness.RUNNING
+                                else "End them…")
+        self.end_button.setToolTip(
+            "Force Affinity and everything else in this prefix to close -- "
+            "for when it has hung. Anything unsaved is lost."
+            if state == liveness.RUNNING else
+            "End the leftover Wine processes in this prefix")
+        self.end_button.setVisible(state in (liveness.RUNNING, liveness.LEFTOVERS))
+        self.show()
+
+    # -- ending leftovers ----------------------------------------------------
+
+    def _end(self):
+        try:
+            self._end_unguarded()
+        except Exception as exc:                # a slot must never raise
+            QMessageBox.warning(self, "Could not end them", str(exc))
+
+    def _end_unguarded(self):
+        activity = liveness.scan(self.prefix)
+        if activity.state == liveness.RUNNING:
+            self._end_affinity(activity)
+            return
+        if activity.state != liveness.LEFTOVERS:
+            self.check()
+            return
+        lines = [f"  {p.name}  (pid {p.pid}, since {p.when()})"
+                 for p in activity.leftovers]
+        message = (
+            f"{activity.summary()}\n\n" + "\n".join(lines) + "\n\n"
+            "These are ended -- asked first, forced if they do not go. Only "
+            f"processes whose Wine prefix is {self.prefix} are touched. "
+            "Affinity is checked for again at the moment of ending, and if it "
+            "has been started meanwhile nothing is ended.")
+        box = QMessageBox(QMessageBox.Icon.Question, "End leftover processes",
+                          message, QMessageBox.StandardButton.Cancel, self)
+        go = box.addButton("End them", QMessageBox.ButtonRole.AcceptRole)
+        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+        if box.clickedButton() is not go:
+            return
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            notes = liveness.end_leftovers(self.prefix)
+        except liveness.StillRunning as exc:
+            notes = [f"Nothing was ended: {exc}"]
+        finally:
+            QApplication.restoreOverrideCursor()
+        self.check()
+        problems = [n for n in notes if not n.startswith("ended ")]
+        if problems:
+            QMessageBox.warning(self, "Leftover processes", "\n".join(notes))
+
+    def _end_affinity(self, activity):
+        """For an Affinity that has hung, or will not close.
+
+        Behind a tick, like every other destructive action here: this loses
+        whatever is open and unsaved. And bound to what was confirmed -- if by
+        the time of ending a different Affinity is running (closed and started
+        again while the dialog was up), nothing is touched, since that one is
+        not the one the user agreed to end."""
+        confirmed = activity.running_pids
+        first = min(activity.of(liveness.AFFINITY), key=lambda p: p.started)
+        lines = [f"  {p.name}  (pid {p.pid}, since {p.when()})"
+                 for p in activity.procs]
+        message = (
+            f"Affinity is running in {self.name} (pid {first.pid}, started "
+            f"{first.when()}).\n\n"
+            "Ending it closes it at once, without asking to save. Anything "
+            "unsaved in it is lost. Use this when it has hung or will not "
+            "close -- otherwise close it from its own window.\n\n"
+            "Everything in this prefix is ended:\n" + "\n".join(lines) + "\n\n"
+            "Asked first, forced after a few seconds if it does not go. "
+            f"Only processes whose Wine prefix is {self.prefix} are touched.")
+        if not ConfirmDialog.ask(
+                self, "End Affinity", message,
+                tick="Yes, end Affinity — anything unsaved is lost",
+                confirm="End Affinity"):
+            return
+        now = liveness.scan(self.prefix)
+        if now.running_pids != confirmed:
+            self.check()
+            QMessageBox.information(
+                self, "Nothing was ended",
+                "What is running in this prefix changed while you were "
+                "deciding, so nothing was ended.\n\n" + now.summary())
+            return
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            notes = liveness.end_leftovers(self.prefix, include_affinity=True,
+                                           grace=5.0)
+        finally:
+            QApplication.restoreOverrideCursor()
+        self.check()
+        problems = [n for n in notes if not n.startswith("ended ")]
+        if problems:
+            QMessageBox.warning(self, "End Affinity", "\n".join(notes))
 
 
 class BuildChoiceDialog(SizedDialog):
@@ -512,10 +766,17 @@ class CarrySettingsDialog(SizedDialog):
         self.chosen_label.setObjectName("descriptionLabel")
         layout.addWidget(self.chosen_label)
 
-        self.running_label = QLabel("")
-        self.running_label.setWordWrap(True)
-        self.running_label.setObjectName("cautionText")
-        layout.addWidget(self.running_label)
+        # Two banners, both live. Affinity running in the SOURCE is only a
+        # caution: reading it is harmless, it just may not be the last word.
+        # Running in the DESTINATION stops the copy, since it would write its
+        # own settings over these when it exits.
+        self.source_banner = ActivityBanner(
+            self, None, waiting_for="copy exactly what it saves on exit -- "
+            "copying now takes its settings as they are this second")
+        layout.addWidget(self.source_banner)
+        self.dest_banner = ActivityBanner(
+            self, self.dest_prefix, waiting_for="copy settings into it")
+        layout.addWidget(self.dest_banner)
 
         layout.addSpacing(6)
         layout.addWidget(QLabel("<b>Drive letters</b>"))
@@ -541,17 +802,21 @@ class CarrySettingsDialog(SizedDialog):
         buttons.rejected.connect(self.reject)
         self.ok_button = buttons.button(QDialogButtonBox.StandardButton.Ok)
         layout.addWidget(buttons)
+        self.dest_banner.changed.connect(
+            lambda *_: self.ok_button.setEnabled(not self.dest_banner.blocks()))
+        self.ok_button.setEnabled(not self.dest_banner.blocks())
         self._picked()
 
     # -- the source ----------------------------------------------------------
 
     def _picked(self):
         source = self.picker.currentData()
+        self.manual = None
         if source is None:
             self.chosen_label.setText(
                 "Choose a prefix, or the Settings folder inside one. A backup "
                 "or a copy on another disk works just as well.")
-            self.running_label.setText("")
+            self.source_banner.set_prefix(None)
             self._letters_for(None)
             return
         self._describe(source)
@@ -579,12 +844,8 @@ class CarrySettingsDialog(SizedDialog):
                if any(n.endswith("?") for n in left) else ""))
 
         home = prefsseed.prefix_of(source.path)
-        pids = probe.running_pids(home) if home else []
-        self.running_label.setText(
-            "Affinity is running in the source (pid %s). It rewrites "
-            "preferences.dat and RecentFiles.xml as it works, so this copies "
-            "them as they are this second. Closing it first gives you exactly "
-            "what it saves on exit." % pids[0] if pids else "")
+        self.source_banner.set_prefix(home, name=f"{home.name} (the source)"
+                                      if home else None)
         self._letters_for(source)
 
     # -- drive letters -------------------------------------------------------
@@ -649,7 +910,12 @@ class CarrySettingsDialog(SizedDialog):
     # -- the answer ------------------------------------------------------------
 
     def _confirm(self):
-        source = self.picker.currentData()
+        if self.dest_banner.blocks():
+            return
+        # chosen_source, not the picker: after "Somewhere else…" the picker
+        # still says that, and asking it again re-opened the folder chooser
+        # on every press of Copy.
+        source = self.chosen_source()
         if source is None:
             chosen = QFileDialog.getExistingDirectory(
                 self, "Prefix or Settings folder to copy from", str(Path.home()))
@@ -744,13 +1010,11 @@ class RemovalDialog(SizedDialog):
             left.setObjectName("descriptionLabel")
             layout.addWidget(left)
 
-        if plan.running:
-            running = QLabel(
-                f"Affinity is running in this prefix (pid {plan.running[0]}). "
-                "Nothing can be removed until it is closed.")
-            running.setWordWrap(True)
-            running.setObjectName("cautionText")
-            layout.addWidget(running)
+        # Checked live: the plan was made when the dialog opened, and closing
+        # Affinity with it open has to be noticed without reopening it.
+        self.banner = ActivityBanner(self, plan.path if plan.path.exists() else None,
+                                     name=plan.name, waiting_for="remove it")
+        layout.addWidget(self.banner)
 
         self.arm = QCheckBox("Yes, remove the ticked items")
         layout.addWidget(self.arm)
@@ -765,6 +1029,7 @@ class RemovalDialog(SizedDialog):
 
         self.arm.toggled.connect(self._retotal)
         self.tree.itemChanged.connect(lambda *_: self._retotal())
+        self.banner.changed.connect(lambda *_: self._retotal())
         self._retotal()
 
     # Removing these actually frees the space. The rest are moved aside by
@@ -779,8 +1044,11 @@ class RemovalDialog(SizedDialog):
         if freed:
             label += f"  (frees {probe.human_size(freed)})"
         self.ok.setText(label if chosen else "Remove")
+        # Leftovers stop only the deletion of the prefix itself -- they have
+        # files in it open. The menu entry and the rest can go regardless.
+        self.banner.set_leftovers_block(any(i.kind == "prefix" for i in chosen))
         self.ok.setEnabled(bool(chosen) and self.arm.isChecked()
-                           and not self.plan.running)
+                           and not self.banner.blocks())
 
     def chosen(self):
         return [row.data(0, Qt.ItemDataRole.UserRole) for row in self.boxes
@@ -1848,10 +2116,9 @@ class BackupDialog(SizedDialog):
         layout.addWidget(kinds_legend("backup"))
         layout.addSpacing(8)
 
-        self.running = QLabel("")
-        self.running.setWordWrap(True)
-        self.running.setObjectName("cautionText")
-        layout.addWidget(self.running)
+        self.banner = ActivityBanner(self, self.prefix, name=entry["name"],
+                                     waiting_for="back it up")
+        layout.addWidget(self.banner)
 
         layout.addWidget(QLabel(
             f"<b>Where</b> — {entry['name']} needs about "
@@ -1900,6 +2167,7 @@ class BackupDialog(SizedDialog):
         self.group.buttonToggled.connect(lambda *_: self._check())
         if self.group.buttons():
             self.group.buttons()[0].setChecked(True)
+        self.banner.changed.connect(lambda *_: self._check())
         self._check()
 
     def _add_location(self, loc):
@@ -1930,13 +2198,10 @@ class BackupDialog(SizedDialog):
         return button.property("location") if button else None
 
     def _check(self):
-        pids = backups.wine_pids(self.prefix)
-        self.running.setText(
-            f"Wine is running in {self.entry['name']} (pid {pids[0]}). Close "
-            "Affinity first: a copy taken under a running Wine can capture a "
-            "registry half-written." if pids else "")
+        # Only Affinity itself stops a backup. Leftovers from old sessions
+        # with no wineserver write nothing, so they cannot tear the copy.
         loc = self.chosen_location()
-        ok = bool(loc) and not pids and loc.usable and loc.free >= self.size * 1.05
+        ok = bool(loc) and not self.banner.blocks() and loc.usable and loc.free >= self.size * 1.05
         self.ok.setEnabled(ok)
         if loc and loc.same_disk:
             self.status.setText(
@@ -1988,6 +2253,13 @@ class RestoreBackupDialog(SizedDialog):
         intro.setWordWrap(True)
         layout.addWidget(intro)
 
+        # Leftovers block here, unlike a backup: the prefix is about to be
+        # moved aside, and they have files in it open.
+        self.banner = ActivityBanner(self, backup.prefix_path,
+                                     waiting_for="restore over it",
+                                     leftovers_block=True)
+        layout.addWidget(self.banner)
+
         self.do_prefix = QCheckBox("The prefix")
         self.do_prefix.setChecked(True)
         self.do_host = QCheckBox(
@@ -2019,6 +2291,7 @@ class RestoreBackupDialog(SizedDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+        self.banner.changed.connect(lambda *_: self._replan())
         self._replan()
 
     def _replan(self):
@@ -2033,11 +2306,9 @@ class RestoreBackupDialog(SizedDialog):
             except (backups.BackupError, maintenance.NotEnoughSpace, OSError) as exc:
                 problem = str(exc)
         self.detail.setText("\n".join(self.plan.describe()) if self.plan else "")
-        pids = backups.wine_pids(self.backup.prefix_path) \
-            if self.do_prefix.isChecked() else []
-        if pids:
-            problem = (f"Wine is running in {self.backup.prefix_path} (pid "
-                       f"{pids[0]}). Close Affinity there first.")
+        if self.do_prefix.isChecked() and self.banner.blocks():
+            problem = ("Not while anything is running in the prefix -- see "
+                       "above.")
             self.plan = None
         self.caution.setText(problem)
         self._arm()
@@ -2911,6 +3182,14 @@ class ManagerWindow(QMainWindow):
 
         middle_layout.addWidget(status_card)
 
+        # What is running in the selected prefix, live. Above the list rather
+        # than in its Status column: the column is filled by a probe that
+        # runs on refresh, and the banner is what says the column is out of
+        # date -- when it changes state the list is probed again.
+        self.activity_banner = ActivityBanner(self, None)
+        self.activity_banner.changed.connect(self._activity_changed)
+        middle_layout.addWidget(self.activity_banner)
+
         self.tree = QTreeWidget()
         self.tree.setColumnCount(len(self.COLUMNS))
         self.tree.setHeaderLabels(self.COLUMNS)
@@ -3357,29 +3636,32 @@ class ManagerWindow(QMainWindow):
             # the recovery message says can never disagree with each other.
             # This used to be four hand-written strings that knew nothing about
             # an operation having been interrupted.
-            entry = self.reg.by_name(item.data(0, Qt.ItemDataRole.UserRole)) or {}
-            condition = prefixstate.classify(info["path"], entry=entry, facts=info)
-
             item.setText(2, info["affinity_version"] or "—")
             item.setText(3, info["wine"] or "—")
             item.setText(4, probe.human_size(info["size"]) if info["exists"] else "—")
-            item.setText(5, condition.label)
-            item.setData(5, Qt.ItemDataRole.UserRole, condition.name)
-
-            tip = condition.detail
-            if condition.suggestion:
-                tip = f"{tip}\n\n{condition.suggestion}"
-            # A prefix that could not be read reports as though it were not
-            # there, which is a different problem with a different fix. Say
-            # which it was.
-            if info.get("unreadable"):
-                tip = (f"{tip}\n\nThis prefix could not be read: "
-                       f"{info['unreadable']}")
-            for column in range(len(self.COLUMNS)):
-                item.setToolTip(column, tip)
+            item.setData(4, Qt.ItemDataRole.UserRole, info)
+            self._show_condition(item, info)
         for i in range(len(self.COLUMNS) - 1):
             self.tree.resizeColumnToContents(i)
         self._selection_changed()
+
+    def _show_condition(self, item, info):
+        entry = self.reg.by_name(item.data(0, Qt.ItemDataRole.UserRole)) or {}
+        condition = prefixstate.classify(info["path"], entry=entry, facts=info)
+        item.setText(5, condition.label)
+        item.setData(5, Qt.ItemDataRole.UserRole, condition.name)
+
+        tip = condition.detail
+        if condition.suggestion:
+            tip = f"{tip}\n\n{condition.suggestion}"
+        # A prefix that could not be read reports as though it were not
+        # there, which is a different problem with a different fix. Say
+        # which it was.
+        if info.get("unreadable"):
+            tip = (f"{tip}\n\nThis prefix could not be read: "
+                   f"{info['unreadable']}")
+        for column in range(len(self.COLUMNS)):
+            item.setToolTip(column, tip)
 
     # ── selection ────────────────────────────────────────────────────────────
 
@@ -3401,6 +3683,7 @@ class ManagerWindow(QMainWindow):
                     b.setEnabled(False)
             return
         entry = self.selected_entry()
+        self._follow_selection(entry)
         for b in (
             self.launch_button,
             self.installer_button,
@@ -3426,6 +3709,35 @@ class ManagerWindow(QMainWindow):
         # Left enabled while locked so the refusal can explain itself, rather
         # than a greyed button leaving the user guessing why.
         self.delete_button.setEnabled(True)
+
+    def _follow_selection(self, entry):
+        path = Path(entry["path"]).expanduser() if entry else None
+        if path is not None and not path.exists():
+            path = None
+        if path != self.activity_banner.prefix:
+            self.activity_banner.set_prefix(path, name=entry["name"] if entry else None)
+
+    def _activity_changed(self, state):
+        """Bring the selected row's Status into line with the banner.
+
+        Not a refresh: that rebuilds the list and loses the selection, and
+        re-measures every prefix. The row keeps the facts its last probe
+        found; only whether Affinity is running is replaced, and prefixstate
+        classifies again from those -- the same one place as always."""
+        try:
+            items = self.tree.selectedItems()
+            if not items:
+                return
+            item = items[0]
+            info = item.data(4, Qt.ItemDataRole.UserRole)
+            if not info:
+                return
+            pids = self.activity_banner.activity.running_pids
+            facts = dict(info, running=bool(pids), pids=pids)
+            item.setData(4, Qt.ItemDataRole.UserRole, facts)
+            self._show_condition(item, facts)
+        except Exception as exc:                # a slot must never raise
+            self.status.setText(f"Could not update the status: {exc}")
 
     # ── actions ──────────────────────────────────────────────────────────────
 

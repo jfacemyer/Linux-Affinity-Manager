@@ -80,45 +80,33 @@ class InUse(BackupError):
 # ── which processes are using a prefix ───────────────────────────────────────
 
 
-def wine_pids(prefix) -> list[int]:
-    """Every process whose own WINEPREFIX is this prefix -- not only Affinity.
+def activity(prefix):
+    """What is running in a prefix. One place, so tests can stand in for /proc."""
+    from . import liveness
 
-    Copying or replacing a prefix under a running wineserver is how a registry
-    gets written half before and half after. probe.running_pids asks only
-    about Affinity, which is the right question for "is it safe to launch" and
-    the wrong one here, where winecfg or a lingering wineserver matter too."""
-    try:
-        target = os.path.realpath(os.path.expanduser(str(prefix)))
-    except OSError:
-        return []
-    found = []
-    for entry in Path("/proc").iterdir():
-        if not entry.name.isdigit():
-            continue
-        try:
-            environ = (entry / "environ").read_bytes()
-        except OSError:
-            continue
-        for item in environ.split(b"\0"):
-            if item.startswith(b"WINEPREFIX="):
-                value = item[len(b"WINEPREFIX="):].decode("utf-8", "replace")
-                try:
-                    if os.path.realpath(os.path.expanduser(value)) == target:
-                        found.append(int(entry.name))
-                except OSError:
-                    pass
-                break
-    return sorted(found)
+    return liveness.scan(prefix)
 
 
-def _require_quiet(prefix) -> None:
-    pids = wine_pids(prefix)
-    if pids:
-        raise InUse(
-            f"Wine is running in {prefix} (pid {', '.join(map(str, pids[:4]))}). "
-            "Close Affinity and anything else using that prefix first: a copy "
-            "taken or replaced under a running Wine can capture a registry "
-            "half-written.")
+def _require_quiet(prefix, *, replacing=False) -> None:
+    """Refuse while Affinity runs; when REPLACING the prefix, refuse leftovers too.
+
+    Copying a prefix that has only leftovers in it is safe: with Affinity gone
+    nothing is writing its settings, and the registry on disk is whole. Putting
+    a different prefix in its place is not -- those processes have it open --
+    so a restore asks for them to be ended first.
+
+    This used to refuse on ANY Wine process, which counted two-week-old
+    leftovers with no wineserver as "Wine is running" for ever."""
+    from . import liveness
+
+    now = activity(prefix)
+    if now.state == liveness.RUNNING:
+        raise InUse(f"{now.summary()} Close it first: a copy taken or replaced "
+                    "under a running Affinity can capture its settings "
+                    "half-written.")
+    if replacing and now.state == liveness.LEFTOVERS:
+        raise InUse(f"{now.summary()} End them first -- they have this prefix "
+                    "open, and it is about to be replaced.")
 
 
 # ── locations ────────────────────────────────────────────────────────────────
@@ -880,7 +868,7 @@ def restore(plan: RestorePlan, *, progress=None) -> list[str]:
     reversed."""
     notes = []
     if plan.restore_prefix:
-        _require_quiet(plan.target)
+        _require_quiet(plan.target, replacing=True)
         staging = plan.target.with_name(plan.target.name + ".restoring")
         if staging.exists():
             shutil.rmtree(staging)

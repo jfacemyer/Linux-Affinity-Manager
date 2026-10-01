@@ -155,7 +155,14 @@ def apply(reg, plan_: Plan, chosen) -> list[str]:
     # to double-click a document and have the desktop start Affinity in the
     # very prefix being removed, which is not far-fetched when the plan's own
     # default-handler rows say this prefix is what opens them.
-    live = probe.running_pids(plan_.path) if plan_.path.exists() else []
+    from . import liveness
+
+    now = liveness.scan(plan_.path) if plan_.path.exists() else None
+    if now is not None and now.state != liveness.QUIET and \
+            any(i.kind == "prefix" for i in chosen):
+        # Leftovers too, when the directory itself is going: they have it open.
+        return [f"{now.summary()} Nothing was removed."]
+    live = now.running_pids if now is not None else []
     if live or plan_.running:
         pid = (live or plan_.running)[0]
         return [f"Affinity is running in {plan_.name} (pid {pid}). "

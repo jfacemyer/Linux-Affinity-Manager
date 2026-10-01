@@ -122,35 +122,17 @@ def active_wine(prefix) -> str | None:
 
 
 def running_pids(prefix) -> list[int]:
-    """PIDs of Affinity processes belonging to this prefix.
+    """PIDs of the Affinity processes really running in this prefix.
 
-    Matched on each process's own WINEPREFIX rather than on a command line
-    pattern. `pgrep -f Affinity.exe` matches the searching shell itself, which
-    has killed a shell here more than once, and a substring match on the path
-    would also catch a prefix whose name contains another's."""
-    target = str(Path(prefix).expanduser())
-    found: list[int] = []
-    for entry in Path("/proc").iterdir():
-        if not entry.name.isdigit():
-            continue
-        try:
-            cmdline = (entry / "cmdline").read_bytes()
-        except OSError:
-            continue
-        if b"Affinity.exe" not in cmdline and b"AffinityHook" not in cmdline:
-            continue
-        if b"crashpad" in cmdline:
-            continue
-        try:
-            environ = (entry / "environ").read_bytes()
-        except OSError:
-            continue
-        for item in environ.split(b"\0"):
-            if item.startswith(b"WINEPREFIX="):
-                if item[len(b"WINEPREFIX="):].decode("utf-8", "ignore") == target:
-                    found.append(int(entry.name))
-                break
-    return sorted(found)
+    Asked of liveness, which tells Affinity apart from what a finished session
+    left behind. This used to count any process whose command line mentioned
+    AffinityHook -- so a launcher stranded by a session two weeks earlier, with
+    no Affinity.exe and no wineserver, made the prefix "running" for ever,
+    refusing every operation and telling the user to close an Affinity that was
+    not open."""
+    from . import liveness
+
+    return liveness.scan(prefix).running_pids
 
 
 def disk_usage(prefix) -> int:

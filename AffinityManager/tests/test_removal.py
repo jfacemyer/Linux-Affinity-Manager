@@ -396,9 +396,13 @@ def test_a_prefix_started_while_the_dialog_was_open_is_not_deleted(host, monkeyp
     """The plan's pids are read when the dialog is built. It can sit open for
     as long as somebody reads it -- long enough to double-click a document and
     have the desktop start Affinity in the prefix being removed."""
+    from affinity_manager import liveness
+
     plan = removal.plan(host.reg, "Working")
     assert plan.running == []
-    monkeypatch.setattr(removal.probe, "running_pids", lambda *a: [4242])
+    running = liveness.Activity(str(host.prefix))
+    running.procs.append(liveness.Proc(4242, "Affinity.exe", 1e9, liveness.AFFINITY))
+    monkeypatch.setattr(liveness, "scan", lambda *a, **k: running)
     notes = removal.apply(host.reg, plan, plan.chosen())
     assert host.prefix.is_dir() and host.reg.by_name("Working") is not None
     assert "4242" in notes[0]
