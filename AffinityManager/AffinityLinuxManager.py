@@ -888,14 +888,16 @@ class CarrySettingsDialog(SizedDialog):
     def _describe(self, source):
         plan = prefsseed.plan(source, self.destination)
         left = []
-        for entry, kind in source.left_behind:
+        for entry, kind, label in (
+                [(e, k, e.name) for e, k in source.left_behind]
+                + [(e, k, "Common/" + e.name) for e, k in source.common_left_behind]):
             if kind == prefsseed.VOLATILE:
                 files, size, _ = prefsseed._measure(entry) if entry.is_dir() \
                     else (1, entry.stat().st_size, 0)
-                left.append("%s (%s)" % (entry.name, probe.human_size(size))
-                            if size > 1024 * 1024 else entry.name)
+                left.append("%s (%s)" % (label, probe.human_size(size))
+                            if size > 1024 * 1024 else label)
             else:
-                left.append(entry.name + "?")
+                left.append(label + "?")
         self.chosen_label.setText(
             "%s\n%d setting file(s): %d new, %d replacing what is there.\n"
             "Also copied: %s.\nNot copied: %s.%s"
