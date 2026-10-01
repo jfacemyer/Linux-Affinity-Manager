@@ -249,6 +249,14 @@ def _sha256_of(path):
 # and "it starts with MZ and is over 4KB" does not tell those apart.
 HANDLER_SHA256 = "f26d7d744be4ce6c9272907b3e9e0d19ffd4c4c47d5faf8356a5e4bd6eec2be5"
 
+# The Wine 11.16 build this installer is meant to install, by content, for the
+# same reason. The 11.16 release was published on 2026-09-11 and never rebuilt;
+# for three weeks every new install got a Wine missing eight fixes from the
+# patch set while the local builds had them, and nothing noticed. A tarball that
+# is not this one is refused rather than installed. Rebuild, republish under a
+# new tag, and update the URL and this hash together.
+WINE_11_16_SHA256 = "8fb3b91b7ef3dba6c529d14970a9e1aa5c7baa593bde45af9ca9d05d992a9e52"
+
 
 def script_dir():
     """The checkout directory this file was run from, or None if there is none.
@@ -10894,6 +10902,9 @@ class AffinityInstallerGUI(QMainWindow):
                 self.log(f"Failed to download {wine_display_name}", "error")
                 self.update_progress_text("Ready")
                 return False
+            if not self._wine_download_matches(wine_file, config):
+                self.update_progress_text("Ready")
+                return False
 
             if self.check_cancelled():
                 return False
@@ -11354,6 +11365,31 @@ class AffinityInstallerGUI(QMainWindow):
         if len(parts) < 2:
             return False
         return (parts[0], parts[1]) >= self.OPENCL_DEADLOCK_FROM
+
+    def _wine_download_matches(self, wine_file, config):
+        """Is this the Wine build the installer was made for?
+
+        True when the config pins no hash. A mismatch is refused, not
+        installed: it is either a stale or partial download, or a release
+        rebuilt without this installer being updated -- and the second is
+        exactly how new installs went three weeks without eight fixes."""
+        want = config.get("wine_sha256")
+        if not want:
+            return True
+        try:
+            got = _sha256_of(wine_file)
+        except OSError as e:
+            self.log(f"Could not check the Wine download: {e}", "error")
+            return False
+        if got == want:
+            self.log(f"{config['wine_display_name']}: checksum matches", "success")
+            return True
+        self.log(
+            f"The downloaded {config['wine_display_name']} is not the build this "
+            f"installer expects (got {got[:16]}..., wanted {want[:16]}...). "
+            "Not installing it. If the release was rebuilt, the installer "
+            "needs the new checksum.", "error")
+        return False
 
     def repair_fonts(self):
         """Put the prefix's font registrations right; log what changed."""
@@ -12594,8 +12630,9 @@ class AffinityInstallerGUI(QMainWindow):
             return {
                 # POC SOURCE -- a personal Forgejo build, not an upstream release.
                 # Repoint this at the upstream 11.16 release before merging.
-                "wine_url": "https://forgejo.facemyer.net/facemyer/Affinity-Wine-Builder/releases/download/11.16/ElementalWarrior-wine-11.16.tar.xz",
+                "wine_url": "https://forgejo.facemyer.net/facemyer/Affinity-Wine-Builder/releases/download/11.16-r2/ElementalWarrior-wine-11.16.tar.xz",
                 "wine_file_name": "ElementalWarrior-wine-11.16.tar.xz",
+                "wine_sha256": WINE_11_16_SHA256,
                 "wine_dir_name": "ElementalWarriorWine",
                 "wine_dir_pattern": "ElementalWarrior-wine-11.16*",
                 "archive_format": "xz",
@@ -12650,6 +12687,8 @@ class AffinityInstallerGUI(QMainWindow):
             f"{config['wine_display_name']} binaries",
         ):
             self.log(f"Failed to cache {config['wine_display_name']}", "warning")
+            return False
+        if not self._wine_download_matches(wine_file, config):
             return False
 
         if self.check_cancelled():
@@ -12925,6 +12964,8 @@ class AffinityInstallerGUI(QMainWindow):
                     wine_url, str(wine_file), f"{wine_display_name} binaries"
                 ):
                     self.log(f"Failed to download {wine_display_name}", "error")
+                    return False
+                if not self._wine_download_matches(wine_file, config):
                     return False
 
                 if self.check_cancelled():

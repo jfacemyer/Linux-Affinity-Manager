@@ -106,7 +106,7 @@ grep -n 'POC SOURCE' AffinityScripts/AffinityLinuxInstaller.py
 
 | What | Points at now | Should point at |
 |---|---|---|
-| Wine 11.16 tarball | `forgejo.facemyer.net/facemyer/Affinity-Wine-Builder/releases/download/11.16/ElementalWarrior-wine-11.16.tar.xz` | `github.com/ryzendew/Affinity-Wine-Builder/releases/download/11.16/ElementalWarrior-wine-11.16.tar.xz` |
+| Wine 11.16 tarball | `forgejo.facemyer.net/facemyer/Affinity-Wine-Builder/releases/download/11.16-r2/ElementalWarrior-wine-11.16.tar.xz`, pinned by `WINE_11_16_SHA256` | `github.com/ryzendew/Affinity-Wine-Builder/releases/download/11.16/ElementalWarrior-wine-11.16.tar.xz` — rebuilt from the same patch set, and the checksum updated with it |
 | `affinity-on-linux.exe` | `forgejo.facemyer.net/facemyer/AffinityOnLinux/raw/branch/experimental/affinity-3.3/AffinityHandler/` | `raw.githubusercontent.com/ryzendew/AffinityOnLinux/main/AffinityHandler/` |
 | MIME definitions | `forgejo.facemyer.net/facemyer/AffinityOnLinux/raw/branch/experimental/affinity-3.3/mime/` | `raw.githubusercontent.com/ryzendew/AffinityOnLinux/main/mime/` |
 | The manager, via `AffinityManager/run.py` (`REPO`, `BRANCH`) | `forgejo.facemyer.net/facemyer/AffinityOnLinux`, branch `experimental/affinity-3.3` | `github.com/ryzendew/AffinityOnLinux`, branch `main` — GitHub serves `/archive/<branch>.tar.gz` the same way |
