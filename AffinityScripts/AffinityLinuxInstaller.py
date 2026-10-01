@@ -255,7 +255,7 @@ HANDLER_SHA256 = "f26d7d744be4ce6c9272907b3e9e0d19ffd4c4c47d5faf8356a5e4bd6eec2b
 # patch set while the local builds had them, and nothing noticed. A tarball that
 # is not this one is refused rather than installed. Rebuild, republish under a
 # new tag, and update the URL and this hash together.
-WINE_11_16_SHA256 = "8fb3b91b7ef3dba6c529d14970a9e1aa5c7baa593bde45af9ca9d05d992a9e52"
+WINE_11_16_SHA256 = "e0027cb5b42931ca0f1fecdef9a6a59d1b69d2acd75de7cc1e07c6af3c123b39"
 
 
 def script_dir():
@@ -12630,7 +12630,7 @@ class AffinityInstallerGUI(QMainWindow):
             return {
                 # POC SOURCE -- a personal Forgejo build, not an upstream release.
                 # Repoint this at the upstream 11.16 release before merging.
-                "wine_url": "https://forgejo.facemyer.net/facemyer/Affinity-Wine-Builder/releases/download/11.16-r2/ElementalWarrior-wine-11.16.tar.xz",
+                "wine_url": "https://forgejo.facemyer.net/facemyer/Affinity-Wine-Builder/releases/download/11.16-r3/ElementalWarrior-wine-11.16.tar.xz",
                 "wine_file_name": "ElementalWarrior-wine-11.16.tar.xz",
                 "wine_sha256": WINE_11_16_SHA256,
                 "wine_dir_name": "ElementalWarriorWine",
