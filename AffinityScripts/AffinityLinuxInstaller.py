@@ -321,6 +321,211 @@ def override_installer_file():
     return str(path) if path.is_file() else None
 
 
+# ── Font registrations ─────────────────────────────────────────────────────────
+#
+# Found 2026-10-01, after a fresh prefix drew Affinity's bold UI text in Arial
+# Narrow and Microsoft Yahei. The core fonts winetricks installs (Tahoma Bold,
+# Arial, Verdana...) were on disk in windows\Fonts, but their registrations had
+# gone from the 64-bit Fonts keys -- the ones a 64-bit Affinity reads. winetricks
+# wrote them correctly; a later Wine startup's font re-sync dropped them, and the
+# exact trigger was not reproduced. And Microsoft Yahei was registered from
+# *another* Wine's font folder -- wine-tkg's, or the distro Wine's in
+# /usr/share/wine -- because winetricks runs under wine-tkg, which looks for
+# Wine's own fonts there.
+#
+# So rather than chase every way registrations can drift, the result is checked
+# at the end of an install (and on request from the manager) and put right:
+#   - every font file in the prefix's windows\Fonts is registered;
+#   - registrations pointing into some other Wine's share/wine/fonts are removed.
+# Host fonts (/usr/share/fonts, ~/.fonts) are Wine's normal integration and are
+# left alone. Nothing points outside the prefix that did not already.
+
+FONT_KEYS_64 = (
+    r"HKLM\Software\Microsoft\Windows NT\CurrentVersion\Fonts",
+    r"HKLM\Software\Microsoft\Windows\CurrentVersion\Fonts",
+)
+EXTERNAL_FONTS_KEY = r"HKCU\Software\Wine\Fonts\External Fonts"
+FONT_FILE_SUFFIXES = (".ttf", ".otf")
+
+
+def font_full_name(path):
+    """The full name (name ID 4) from a TrueType/OpenType file, or None.
+
+    That is the name Windows registers a font under -- "Tahoma Bold",
+    "Arial Bold Italic" -- with " (TrueType)" after it."""
+    import struct
+    try:
+        data = Path(path).read_bytes()
+        count = struct.unpack_from(">H", data, 4)[0]
+        table = None
+        for i in range(count):
+            tag, _, offset, _ = struct.unpack_from(">4sIII", data, 12 + 16 * i)
+            if tag == b"name":
+                table = offset
+                break
+        if table is None:
+            return None
+        _, n, strings = struct.unpack_from(">HHH", data, table)
+        found = {}
+        for i in range(n):
+            platform_id, encoding, language, name_id, length, offset = \
+                struct.unpack_from(">HHHHHH", data, table + 6 + 12 * i)
+            if name_id != 4:
+                continue
+            raw = data[table + strings + offset: table + strings + offset + length]
+            if platform_id == 3 and language == 0x409:
+                found.setdefault(0, raw.decode("utf-16-be", "replace"))
+            elif platform_id == 3:
+                found.setdefault(1, raw.decode("utf-16-be", "replace"))
+            elif platform_id == 1:
+                found.setdefault(2, raw.decode("mac_roman", "replace"))
+        name = found.get(0) or found.get(1) or found.get(2)
+        return name.strip() if name else None
+    except (OSError, struct.error, UnicodeError):
+        return None
+
+
+def parse_reg_query(text):
+    """{value name: data} for the REG_SZ values in `wine reg query` output."""
+    values = {}
+    for line in text.splitlines():
+        name, sep, data = line.strip("\r\n").partition("    REG_SZ    ")
+        if sep:
+            values[name.strip()] = data.strip()
+    return values
+
+
+def _foreign_wine_font(data, own_wine_dir):
+    """Does this registration point into a Wine font folder other than the
+    prefix's own Wine's? Those are left by running a different Wine on the
+    prefix, and are not fonts anyone installed."""
+    unix = data
+    if len(unix) > 2 and unix[1] == ":" and unix[0] in "Zz":
+        unix = unix[2:].replace("\\", "/")
+    else:
+        return False
+    if "/share/wine/fonts/" not in unix:
+        return False
+    if own_wine_dir:
+        own = str(Path(own_wine_dir).resolve()).rstrip("/") + "/"
+        try:
+            if str(Path(unix).resolve()).startswith(own):
+                return False
+        except OSError:
+            pass
+    return True
+
+
+def plan_font_registry_repair(fonts_dir, registered, external, own_wine_dir):
+    """What to add and remove. Touches nothing.
+
+    `registered` is {key: {name: data}} for FONT_KEYS_64, `external` the
+    External Fonts values. Returns (add {name: file}, remove {key: [names]}).
+    A font file already registered under any name is left as it is: the name
+    is only made up when there is no registration at all."""
+    add = {}
+    remove = {}
+    nt_key = FONT_KEYS_64[0]
+    by_file = {}
+    for key in FONT_KEYS_64:
+        for name, data in registered.get(key, {}).items():
+            by_file.setdefault(data.rsplit("\\", 1)[-1].lower(), set()).add((key, name))
+    try:
+        files = sorted(p for p in Path(fonts_dir).iterdir()
+                       if p.suffix.lower() in FONT_FILE_SUFFIXES and p.is_file())
+    except OSError:
+        files = []
+    for f in files:
+        keys_with_it = {k for k, _ in by_file.get(f.name.lower(), set())}
+        if all(k in keys_with_it for k in FONT_KEYS_64):
+            continue
+        names = {n for _, n in by_file.get(f.name.lower(), set())}
+        if names:
+            name = sorted(names)[0]
+        else:
+            full = font_full_name(f)
+            if not full:
+                continue
+            name = f"{full} (TrueType)"
+        add[name] = f.name
+    for key in FONT_KEYS_64:
+        for name, data in registered.get(key, {}).items():
+            if _foreign_wine_font(data, own_wine_dir):
+                remove.setdefault(key, []).append(name)
+    for name, data in external.items():
+        if _foreign_wine_font(data, own_wine_dir):
+            remove.setdefault(EXTERNAL_FONTS_KEY, []).append(name)
+    return add, remove
+
+
+def font_registry_patch(add, remove):
+    """The .reg text that applies a plan: additions to both 64-bit keys,
+    removals where they were found."""
+    def esc(s):
+        return s.replace("\\", "\\\\").replace('"', '\\"')
+
+    def full(key):
+        return key.replace("HKLM\\", "HKEY_LOCAL_MACHINE\\").replace(
+            "HKCU\\", "HKEY_CURRENT_USER\\")
+
+    lines = ["Windows Registry Editor Version 5.00", ""]
+    for key in FONT_KEYS_64 + (EXTERNAL_FONTS_KEY,):
+        body = []
+        if key in FONT_KEYS_64:
+            body += [f'"{esc(n)}"="{esc(f)}"' for n, f in sorted(add.items())]
+        body += [f'"{esc(n)}"=-' for n in sorted(remove.get(key, []))]
+        if body:
+            lines += [f"[{full(key)}]"] + body + [""]
+    return "\r\n".join(lines) + "\r\n"
+
+
+def repair_font_registrations(prefix, wine, log=None):
+    """Check the prefix's font registrations and put them right, through the
+    prefix's own Wine. Returns one line per change; empty when nothing was
+    needed. Never raises: a font check must not fail an install."""
+    log = log or (lambda message, level="info": None)
+    prefix = Path(prefix)
+    wine = Path(wine)
+    env = os.environ.copy()
+    env["WINEPREFIX"] = str(prefix)
+    env["WINEDEBUG"] = "-all"
+    try:
+        def query(key):
+            out = subprocess.run([str(wine), "reg", "query", key, "/reg:64"],
+                                 env=env, capture_output=True, text=True,
+                                 errors="replace", timeout=120)
+            return parse_reg_query(out.stdout)
+
+        registered = {key: query(key) for key in FONT_KEYS_64}
+        external = query(EXTERNAL_FONTS_KEY)
+        own = wine.resolve().parent.parent
+        add, remove = plan_font_registry_repair(
+            prefix / "drive_c" / "windows" / "Fonts", registered, external, own)
+        if not add and not any(remove.values()):
+            return []
+        patch = prefix / "drive_c" / "windows" / "Temp" / "font-registrations.reg"
+        patch.parent.mkdir(parents=True, exist_ok=True)
+        patch.write_text(font_registry_patch(add, remove), encoding="utf-16")
+        result = subprocess.run(
+            [str(wine), "regedit", "/S", r"C:\windows\Temp\font-registrations.reg"],
+            env=env, capture_output=True, timeout=120)
+        try:
+            patch.unlink()
+        except OSError:
+            pass
+        if result.returncode != 0:
+            log(f"Could not update font registrations (regedit exit {result.returncode})",
+                "warning")
+            return []
+        notes = [f"registered {n} ({f})" for n, f in sorted(add.items())]
+        notes += [f"removed {n} -- it pointed into another Wine's font folder"
+                  for n in sorted({n for names in remove.values() for n in names})]
+        return notes
+    except Exception as e:                    # noqa: BLE001 -- see docstring
+        log(f"Could not check font registrations: {e}", "warning")
+        return []
+
+
 class ZoomableTextEdit(QTextEdit):
     """QTextEdit with Ctrl+Wheel zoom support"""
 
@@ -11150,6 +11355,20 @@ class AffinityInstallerGUI(QMainWindow):
             return False
         return (parts[0], parts[1]) >= self.OPENCL_DEADLOCK_FROM
 
+    def repair_fonts(self):
+        """Put the prefix's font registrations right; log what changed."""
+        wine = self.get_wine_path("wine")
+        if not wine.exists():
+            return []
+        notes = repair_font_registrations(self.directory, wine, self.log)
+        if notes:
+            self.log(f"Font registrations repaired ({len(notes)} change(s)):", "info")
+            for note in notes[:40]:
+                self.log(f"  {note}", "info")
+        else:
+            self.log("Font registrations checked: nothing to repair", "info")
+        return notes
+
     def disable_opencl_if_needed(self, wine_version=None):
         """Turn opencl.dll off in the prefix where leaving it on hangs startup.
 
@@ -14939,6 +15158,11 @@ Would you like to continue with {distro_name} anyway?"""
             # Again at the end: a prefix whose Wine changed during the install
             # must still come out with opencl off.
             self.disable_opencl_if_needed()
+            # And the fonts, last of all: winetricks registers them under
+            # wine-tkg, and a later Wine startup can drop them again -- see
+            # repair_font_registrations().
+            self.update_progress_text("Checking font registrations...")
+            self.repair_fonts()
 
             self.update_progress(1.0)
             self.update_progress_text("Installation complete!")
