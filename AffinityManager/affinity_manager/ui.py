@@ -185,8 +185,15 @@ QLabel#cautionText { color: #F5A623; }
 # cardCaption: the line under each of Back up / Clone / Snapshots. As a plain
 # descriptionLabel it picked up the installer theme's label background and sat
 # on a darker band inside the card, which read as a text field.
+#
+# QPushButton:disabled: the installer styles only its own named buttons for
+# the disabled state, and its themes set a text colour that overrides Qt's
+# own greying -- so every plain button in every dialog here looked exactly
+# the same switched off as on. Verify on an unfinished backup was "a button
+# that does nothing".
 _COMMON = """
 QLabel#cardCaption { background: transparent; border: none; }
+QPushButton:disabled { color: rgba(140, 140, 140, 120); }
 """
 
 
