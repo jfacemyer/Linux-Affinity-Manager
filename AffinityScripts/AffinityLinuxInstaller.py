@@ -257,6 +257,24 @@ HANDLER_SHA256 = "188e4f214a990c3250dbb4d46cf5b7933bec1c1b23819bb354618c7dc987a6
 # new tag, and update the URL and this hash together.
 WINE_11_16_SHA256 = "e0027cb5b42931ca0f1fecdef9a6a59d1b69d2acd75de7cc1e07c6af3c123b39"
 
+# The same patch set on Wine 11.18, pinned for the same reason. Released on the
+# fork that carries the patches' upstream pull request.
+WINE_11_18_SHA256 = "c325bf804407abcf8070d02066b5be00680b0339e796a6583b4a1d2dae934853"
+
+# The plugin loader. Upstream's latest release (v0.3.0, April) predates Canva
+# sign-in, the command-line open fix and the runtime Direct2D patches, all of
+# which sit unreleased on its dev branch. This build is that dev branch plus two
+# fixes -- libplugins.dll kept loaded (random crashes), launch arguments quoted
+# (paths with spaces) -- released on a fork until upstream publishes one. Each
+# asset is pinned, like the Wine build.
+# POC SOURCE -- repoint at an upstream release that carries these.
+APL_RELEASE_REPO = "jfacemyer/AffinityPluginLoader"
+APL_RELEASE_TAG = "wine-fixes-1"
+APL_ASSET_SHA256 = {
+    "affinitypluginloader-v0.3.0.zip": "d1408f2014f5e3eeebf3f6878cd82e9872e92c479a7884c7316867570637fb5d",
+    "winefix-v0.3.0.zip": "63e5de0e966a590ae7433a6145a3f71a04ab69b0f385c2c24c521ef0e573e54b",
+}
+
 
 def script_dir():
     """The checkout directory this file was run from, or None if there is none.
@@ -4937,8 +4955,8 @@ class AffinityInstallerGUI(QMainWindow):
                                 return "9.14"
                             elif version.startswith("10."):
                                 return "10.10"
-                            elif version == "11.16":
-                                return "11.16"
+                            elif version in ("11.16", "11.18"):
+                                return version
                             elif version.startswith("11."):
                                 return "11.12"
                 except Exception:
@@ -8730,14 +8748,16 @@ class AffinityInstallerGUI(QMainWindow):
         wine_version = self.show_question_dialog(
             "Choose Wine Version",
             "Which Wine version would you like to install?\n\n"
-            "• Wine 11.16 - adds the patches that let a double-clicked document open in a running Affinity, and let its window come to the front.\n"
+            "• Wine 11.18 - the newest build with the Affinity patches: a double-clicked document opens, Affinity exits when it is closed, dialogs stay on top and panels dock back.\n"
+            "• Wine 11.16 - the same patches on Wine 11.16. Use it if 11.18 gives you trouble.\n"
             "• Wine 11.12 (Recommended) - ElementalWarrior Wine 11.12 with AMD GPU and OpenCL patches. Latest version with best compatibility and performance.\n"
             "• Wine 11.12 v4 (Zen 4/5) - ElementalWarrior Wine 11.12 v4 with AVX-512 and AMD Zen 4/5 optimizations. Best performance for Ryzen 7000/9000 series CPUs.\n"
             "• Wine 10.10 - ElementalWarrior Wine 10.10 with AMD GPU and OpenCL patches. Previous stable version.\n"
             "• Wine 9.14 (Legacy) - Legacy version with AMD GPU and OpenCL patches. Fallback option if you encounter issues with newer versions.\n\n"
             "Note: You can switch versions later by running 'Setup Wine Environment' again.",
             [
-                "Wine 11.16 (opens documents from the file manager)",
+                "Wine 11.18 (Affinity patches)",
+                "Wine 11.16 (Affinity patches, previous)",
                 "Wine 11.12 (Recommended)",
                 "Wine 11.12 v4 (Zen 4/5)",
                 "Wine 10.10",
@@ -8745,7 +8765,9 @@ class AffinityInstallerGUI(QMainWindow):
             ],
         )
 
-        if wine_version == "Wine 11.16 (opens documents from the file manager)":
+        if wine_version == "Wine 11.18 (Affinity patches)":
+            wine_version_choice = "11.18"
+        elif wine_version == "Wine 11.16 (Affinity patches, previous)":
             wine_version_choice = "11.16"
         elif wine_version == "Wine 11.12 (Recommended)":
             wine_version_choice = "11.12"
@@ -12566,14 +12588,16 @@ class AffinityInstallerGUI(QMainWindow):
         wine_version = self.show_question_dialog(
             "Choose Wine Version",
             "Which Wine version would you like to install?\n\n"
-            "• Wine 11.16 - adds the patches that let a double-clicked document open in a running Affinity, and let its window come to the front.\n"
+            "• Wine 11.18 - the newest build with the Affinity patches: a double-clicked document opens, Affinity exits when it is closed, dialogs stay on top and panels dock back.\n"
+            "• Wine 11.16 - the same patches on Wine 11.16. Use it if 11.18 gives you trouble.\n"
             "• Wine 11.12 (Recommended) - ElementalWarrior Wine 11.12 with AMD GPU and OpenCL patches. Latest version with best compatibility and performance.\n"
             "• Wine 11.12 v4 (Zen 4/5) - ElementalWarrior Wine 11.12 v4 with AVX-512 and AMD Zen 4/5 optimizations. Best performance for Ryzen 7000/9000 series CPUs.\n"
             "• Wine 10.10 - ElementalWarrior Wine 10.10 with AMD GPU and OpenCL patches. Previous stable version.\n"
             "• Wine 9.14 (Legacy) - Legacy version with AMD GPU and OpenCL patches. Fallback option if you encounter issues with newer versions.\n\n"
             "Note: You can switch versions later by running this setup again.",
             [
-                "Wine 11.16 (opens documents from the file manager)",
+                "Wine 11.18 (Affinity patches)",
+                "Wine 11.16 (Affinity patches, previous)",
                 "Wine 11.12 (Recommended)",
                 "Wine 11.12 v4 (Zen 4/5)",
                 "Wine 10.10",
@@ -12581,7 +12605,9 @@ class AffinityInstallerGUI(QMainWindow):
             ],
         )
 
-        if wine_version == "Wine 11.16 (opens documents from the file manager)":
+        if wine_version == "Wine 11.18 (Affinity patches)":
+            wine_version_choice = "11.18"
+        elif wine_version == "Wine 11.16 (Affinity patches, previous)":
             wine_version_choice = "11.16"
         elif wine_version == "Wine 11.12 (Recommended)":
             wine_version_choice = "11.12"
@@ -12636,7 +12662,19 @@ class AffinityInstallerGUI(QMainWindow):
                 "wine_dir_name": "ElementalWarriorWine",
                 "wine_dir_pattern": "ElementalWarrior-wine-11.16*",
                 "archive_format": "xz",
-                "wine_display_name": "Wine 11.16 (opens documents from the file manager)",
+                "wine_display_name": "Wine 11.16 (Affinity patches, previous)",
+            }
+        elif wine_version == "11.18":
+            return {
+                # POC SOURCE -- the fork that carries the upstream pull request
+                # for these patches. Repoint at the upstream 11.18 release.
+                "wine_url": "https://github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.18-r1/ElementalWarrior-wine-11.18.tar.xz",
+                "wine_file_name": "ElementalWarrior-wine-11.18.tar.xz",
+                "wine_sha256": WINE_11_18_SHA256,
+                "wine_dir_name": "ElementalWarriorWine",
+                "wine_dir_pattern": "ElementalWarrior-wine-11.18*",
+                "archive_format": "xz",
+                "wine_display_name": "Wine 11.18 (Affinity patches)",
             }
         elif wine_version == "11.12-v4":
             return {
@@ -12761,7 +12799,7 @@ class AffinityInstallerGUI(QMainWindow):
         cache_dir = Path(self.directory) / "Wine-Switch"
         cache_dir.mkdir(parents=True, exist_ok=True)
 
-        all_versions = ["9.14", "10.10", "11.12", "11.12-v4", "11.16"]
+        all_versions = ["9.14", "10.10", "11.12", "11.12-v4", "11.16", "11.18"]
 
         self.log(
             "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -13099,14 +13137,16 @@ class AffinityInstallerGUI(QMainWindow):
         wine_version = self.show_question_dialog(
             "Choose Wine Version",
             "Which Wine version would you like to install?\n\n"
-            "• Wine 11.16 - adds the patches that let a double-clicked document open in a running Affinity, and let its window come to the front.\n"
+            "• Wine 11.18 - the newest build with the Affinity patches: a double-clicked document opens, Affinity exits when it is closed, dialogs stay on top and panels dock back.\n"
+            "• Wine 11.16 - the same patches on Wine 11.16. Use it if 11.18 gives you trouble.\n"
             "• Wine 11.12 (Recommended) - ElementalWarrior Wine 11.12 with AMD GPU and OpenCL patches. Latest version with best compatibility and performance.\n"
             "• Wine 11.12 v4 (Zen 4/5) - ElementalWarrior Wine 11.12 v4 with AVX-512 and AMD Zen 4/5 optimizations. Best performance for Ryzen 7000/9000 series CPUs.\n"
             "• Wine 10.10 - ElementalWarrior Wine 10.10 with AMD GPU and OpenCL patches. Previous stable version.\n"
             "• Wine 9.14 (Legacy) - Legacy version with AMD GPU and OpenCL patches. Fallback option if you encounter issues with newer versions.\n\n"
             "Note: This will replace your current Wine installation.",
             [
-                "Wine 11.16 (opens documents from the file manager)",
+                "Wine 11.18 (Affinity patches)",
+                "Wine 11.16 (Affinity patches, previous)",
                 "Wine 11.12 (Recommended)",
                 "Wine 11.12 v4 (Zen 4/5)",
                 "Wine 10.10",
@@ -13114,7 +13154,9 @@ class AffinityInstallerGUI(QMainWindow):
             ],
         )
 
-        if wine_version == "Wine 11.16 (opens documents from the file manager)":
+        if wine_version == "Wine 11.18 (Affinity patches)":
+            wine_version_choice = "11.18"
+        elif wine_version == "Wine 11.16 (Affinity patches, previous)":
             wine_version_choice = "11.16"
         elif wine_version == "Wine 11.12 (Recommended)":
             wine_version_choice = "11.12"
@@ -19489,9 +19531,9 @@ Would you like to continue with {distro_name} anyway?"""
                 / "Affinity"
             )
 
-            # ── 1. Fetch latest release metadata from GitHub ──────────────────────────
-            self.log("Fetching latest release info from GitHub...", "info")
-            api_url = "https://api.github.com/repos/noahc3/AffinityPluginLoader/releases/latest"
+            # ── 1. Fetch the pinned release's metadata from GitHub ────────────────────
+            self.log(f"Fetching plugin loader release {APL_RELEASE_TAG}...", "info")
+            api_url = f"https://api.github.com/repos/{APL_RELEASE_REPO}/releases/tags/{APL_RELEASE_TAG}"
             request = urllib.request.Request(api_url)
             request.add_header("User-Agent", "AffinityLinuxInstaller")
 
@@ -19506,10 +19548,10 @@ Would you like to continue with {distro_name} anyway?"""
 
             tag = release_data.get("tag_name", "unknown")
             assets = release_data.get("assets", [])
-            self.log(f"Latest release: {tag}", "info")
+            self.log(f"Release: {tag}", "info")
 
             if not assets:
-                self.log("✗ No assets found in latest release.", "error")
+                self.log("✗ No assets found in the release.", "error")
                 if standalone:
                     self.end_operation()
                 return
@@ -19600,6 +19642,22 @@ Would you like to continue with {distro_name} anyway?"""
                             self.end_operation()
                         return
 
+                    # The build this installer pins, or nothing: a release
+                    # re-uploaded or renamed under the same tag is refused.
+                    want = APL_ASSET_SHA256.get(asset["name"])
+                    got = _sha256_of(dest_zip)
+                    if got != want:
+                        self.log(
+                            f"✗ {asset['name']} is not the build this installer pins "
+                            f"(got {got[:16]}..., wanted {(want or 'no pin')[:16]}...). "
+                            "Not installing it.",
+                            "error",
+                        )
+                        if standalone:
+                            self.end_operation()
+                        return
+                    self.log(f"✓ {asset['name']}: checksum matches", "success")
+
                     # Verify it is a valid zip
                     if not zipfile.is_zipfile(str(dest_zip)):
                         self.log(
@@ -19662,26 +19720,38 @@ Would you like to continue with {distro_name} anyway?"""
                     # Wine resolves a DLL through the executable's own directory,
                     # which is how this copy shadows Wine's d2d1 at all. Left under
                     # apl/ it is never loaded and WineFix silently does nothing.
+                    #
+                    # Newer WineFix ships no d2d1.dll at all: its Direct2D fixes
+                    # are runtime patches applied to the d2d1 Wine provides. A
+                    # copy left beside Affinity.exe by an older WineFix -- built
+                    # from Wine 10.18 -- would go on shadowing Wine's, so it is
+                    # renamed aside rather than left to win.
                     if label == "WineFix":
                         beside = install_dir / "d2d1.dll"
-                        if not beside.exists():
-                            found = next(
-                                (f for f in extract_dir.rglob("d2d1.dll") if f.is_file()),
-                                None,
-                            )
-                            if found:
+                        found = next(
+                            (f for f in extract_dir.rglob("d2d1.dll") if f.is_file()),
+                            None,
+                        )
+                        if found:
+                            if not beside.exists():
                                 shutil.copy2(str(found), str(beside))
                                 self.log(
                                     f"  Moved d2d1.dll up from {found.relative_to(extract_dir)}"
                                     " so Affinity.exe can find it",
                                     "success",
                                 )
-                        if beside.exists():
                             self.log("  ✓ d2d1.dll is beside Affinity.exe", "success")
+                        elif beside.exists():
+                            aside = beside.with_name("d2d1.dll.winefix-old")
+                            beside.replace(aside)
+                            self.log(
+                                "  ✓ This WineFix patches Wine's own d2d1 at runtime; "
+                                f"the old copy beside Affinity.exe is now {aside.name}",
+                                "success",
+                            )
                         else:
                             self.log(
-                                "  ⚠ no d2d1.dll in the WineFix archive — check its layout",
-                                "warning",
+                                "  ✓ WineFix patches Wine's own d2d1 at runtime", "success"
                             )
 
             # ── 5. Verify AffinityHook.exe is present after install ───────────────────

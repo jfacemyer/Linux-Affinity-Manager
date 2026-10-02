@@ -91,8 +91,8 @@ committed binary is built from the `Program.cs` beside it.
 
 ## Temporary download sources — must be repointed before merging
 
-Three downloads in `AffinityScripts/AffinityLinuxInstaller.py` point at a
-personal Forgejo mirror rather than upstream. They have to be *downloads* at all
+Five downloads in `AffinityScripts/AffinityLinuxInstaller.py` point at a
+personal mirror or fork rather than upstream. They have to be *downloads* at all
 because the documented install pipes the installer straight into `python3`,
 where there is no checkout to copy from; and they
 have to point somewhere other than upstream because none of these files exist
@@ -107,6 +107,8 @@ grep -n 'POC SOURCE' AffinityScripts/AffinityLinuxInstaller.py
 | What | Points at now | Should point at |
 |---|---|---|
 | Wine 11.16 tarball | `forgejo.facemyer.net/facemyer/Affinity-Wine-Builder/releases/download/11.16-r3/ElementalWarrior-wine-11.16.tar.xz`, pinned by `WINE_11_16_SHA256` | `github.com/ryzendew/Affinity-Wine-Builder/releases/download/11.16/ElementalWarrior-wine-11.16.tar.xz` — rebuilt from the same patch set, and the checksum updated with it |
+| Wine 11.18 tarball | `github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.18-r1/ElementalWarrior-wine-11.18.tar.xz`, pinned by `WINE_11_18_SHA256` — the fork carrying the patches' upstream pull request | an upstream 11.18 release, once that pull request is merged |
+| AffinityPluginLoader + WineFix | `github.com/jfacemyer/AffinityPluginLoader`, release `wine-fixes-1` (`APL_RELEASE_REPO`, `APL_RELEASE_TAG`), each zip pinned in `APL_ASSET_SHA256` | `noahc3/AffinityPluginLoader`'s next release, once it carries upstream `dev` and the two fixes on the fork's `wine-fixes` branch |
 | `affinity-on-linux.exe` | `forgejo.facemyer.net/facemyer/AffinityOnLinux/raw/branch/experimental/affinity-3.3/AffinityHandler/` | `raw.githubusercontent.com/ryzendew/AffinityOnLinux/main/AffinityHandler/` |
 | MIME definitions | `forgejo.facemyer.net/facemyer/AffinityOnLinux/raw/branch/experimental/affinity-3.3/mime/` | `raw.githubusercontent.com/ryzendew/AffinityOnLinux/main/mime/` |
 | The manager, via `AffinityManager/run.py` (`REPO`, `BRANCH`) | `forgejo.facemyer.net/facemyer/AffinityOnLinux`, branch `experimental/affinity-3.3` | `github.com/ryzendew/AffinityOnLinux`, branch `main` — GitHub serves `/archive/<branch>.tar.gz` the same way |
