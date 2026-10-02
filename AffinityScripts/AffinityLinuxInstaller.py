@@ -4865,22 +4865,43 @@ class AffinityInstallerGUI(QMainWindow):
         # Create button group to ensure only one radio button is selected at a time
         button_group = QButtonGroup(dialog)
 
-        # Wine 11.16 option - the build carrying the document-open patches
+        # Wine 11.18 option - the newest build with the Affinity patches
+        wine_1118_frame = QFrame()
+        wine_1118_frame.setObjectName("optionFrame")
+        wine_1118_layout = QVBoxLayout(wine_1118_frame)
+        wine_1118_layout.setContentsMargins(12, 10, 12, 10)
+        wine_1118_layout.setSpacing(6)
+        wine_1118_radio = QRadioButton("Wine 11.18 (Affinity patches)")
+        wine_1118_radio.setChecked(True)
+        wine_1118_radio.setSizePolicy(
+            QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Minimum
+        )
+        wine_1118_layout.addWidget(wine_1118_radio)
+        wine_1118_desc = QLabel(
+            "ElementalWarrior Wine 11.18 with the Affinity patches: a double-clicked "
+            "document opens, Affinity exits when it is closed, dialogs stay on top "
+            "and panels dock back."
+        )
+        wine_1118_desc.setObjectName("optionDescription")
+        wine_1118_desc.setWordWrap(True)
+        wine_1118_layout.addWidget(wine_1118_desc)
+        button_group.addButton(wine_1118_radio)
+        options_layout.addWidget(wine_1118_frame)
+
+        # Wine 11.16 option - the same patches on the previous base
         wine_1116_frame = QFrame()
         wine_1116_frame.setObjectName("optionFrame")
         wine_1116_layout = QVBoxLayout(wine_1116_frame)
         wine_1116_layout.setContentsMargins(12, 10, 12, 10)
         wine_1116_layout.setSpacing(6)
-        wine_1116_radio = QRadioButton("Wine 11.16 (opens documents from the file manager)")
-        wine_1116_radio.setChecked(True)
+        wine_1116_radio = QRadioButton("Wine 11.16 (Affinity patches, previous)")
         wine_1116_radio.setSizePolicy(
             QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Minimum
         )
         wine_1116_layout.addWidget(wine_1116_radio)
         wine_1116_desc = QLabel(
-            "ElementalWarrior Wine 11.16. Adds the patches that let a double-clicked "
-            "document open in a running Affinity and bring its window to the front, "
-            "and that keep modal dialogs above the window they block."
+            "The same patches on ElementalWarrior Wine 11.16. Use it if 11.18 gives "
+            "you trouble."
         )
         wine_1116_desc.setObjectName("optionDescription")
         wine_1116_desc.setWordWrap(True)
@@ -5018,10 +5039,10 @@ class AffinityInstallerGUI(QMainWindow):
         # Get result
         result = dialog.exec()
         if result == QDialog.DialogCode.Accepted:
-            if wine_1116_radio.isChecked():
-                self.question_dialog_response = (
-                    "Wine 11.16 (opens documents from the file manager)"
-                )
+            if wine_1118_radio.isChecked():
+                self.question_dialog_response = "Wine 11.18 (Affinity patches)"
+            elif wine_1116_radio.isChecked():
+                self.question_dialog_response = "Wine 11.16 (Affinity patches, previous)"
             elif wine_1112_radio.isChecked():
                 self.question_dialog_response = "Wine 11.12 (Recommended)"
             elif wine_1112v4_radio.isChecked():
