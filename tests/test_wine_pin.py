@@ -18,8 +18,9 @@ from affinity_manager import aol  # noqa: E402
 try:
     inst = aol.module()
     HAVE = hasattr(inst, "WINE_11_16_SHA256")
+    HAVE_1118 = hasattr(inst, "WINE_11_18_SHA256")
 except aol.NotAvailable:
-    inst, HAVE = None, False
+    inst, HAVE, HAVE_1118 = None, False, False
 
 pytestmark = pytest.mark.skipif(not HAVE, reason="installer without the Wine pin")
 
@@ -62,3 +63,13 @@ def test_the_right_tarball_is_accepted(tmp_path):
 def test_an_unpinned_build_is_not_checked(tmp_path):
     ok, logged = check(tmp_path / "missing.tar.xz", {"wine_display_name": "Wine 10.10"})
     assert ok and logged == []
+
+
+@pytest.mark.skipif(not HAVE_1118, reason="installer without Wine 11.18")
+def test_the_11_18_download_carries_its_own_pin():
+    assert re.fullmatch(r"[0-9a-f]{64}", inst.WINE_11_18_SHA256)
+    assert inst.WINE_11_18_SHA256 != inst.WINE_11_16_SHA256
+    config = inst.AffinityInstallerGUI._get_wine_version_config(None, "11.18")
+    assert config["wine_sha256"] == inst.WINE_11_18_SHA256
+    assert config["wine_url"].endswith("/ElementalWarrior-wine-11.18.tar.xz")
+    assert config["wine_dir_pattern"] == "ElementalWarrior-wine-11.18*"
