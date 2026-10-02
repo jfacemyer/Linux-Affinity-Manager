@@ -1,9 +1,9 @@
 // affinity-on-linux.exe -- open documents in Affinity from a Linux file manager.
 //
-// SOURCE OF TRUTH: affinity-linux/src/affinity-on-linux/Program.cs. The copy in
-// AffinityOnLinux/AffinityHandler/ is what the installer ships and is synced from
-// there. Edit one place: they drifted once, by 511 lines, and the shipped copy
-// kept a watchdog that killed live sessions.
+// SOURCE OF TRUTH: this file is developed in a separate repository, next to the
+// Wine patches it depends on; the copy in AffinityHandler/ is what the installer
+// ships and is synced from there. Keep the two identical: they drifted once, by
+// 511 lines, and the shipped copy kept a watchdog that killed live sessions.
 //
 // Replaces the affinity-open shell script. Set it as the .desktop Exec target:
 //
