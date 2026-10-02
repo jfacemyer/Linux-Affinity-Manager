@@ -12698,7 +12698,8 @@ class AffinityInstallerGUI(QMainWindow):
             QMessageBox.information(
                 self,
                 "Wine Version Not Supported",
-                "The Canva sign-in fix supports Wine 9.14 and 10.10.\n\n"
+                "The Canva sign-in fix supports Wine 9.14, 10.10, and the 11.16 build "
+                "with the Affinity patches.\n\n"
                 "With Wine 11.12 the sign-in also needs the Windows WinMetadata and wintypes.dll, "
                 "which this installer only sets up for Wine 9.14 and 10.10.",
             )
@@ -16771,6 +16772,12 @@ Would you like to continue with {distro_name} anyway?"""
         wine = self.get_wine_path("wine")
         if not wine.exists():
             return "unknown"
+        # A build that resolves WinRT namespaces itself -- the 11.16 build with
+        # the Affinity patches -- has what 11.12 lacks: with the WinMetadata and
+        # the facades installed, the callback method compiles. Detected, not
+        # listed by version, for the same reason as wine_resolves_winrt_namespaces.
+        if self.wine_resolves_winrt_namespaces():
+            return "supported"
         success, stdout, _ = self._run_uncancellable([str(wine), "--version"])
         match = re.search(r"wine-(\d+)\.", stdout) if success else None
         if not match:
@@ -18535,7 +18542,8 @@ Would you like to continue with {distro_name} anyway?"""
             # A handler left from an earlier Wine version would crash the running Affinity.
             if handler_file.exists():
                 self.remove_affinity_url_handler()
-            self.log("Not registering the affinity:// handler: the Canva sign-in fix supports Wine 9.14 and 10.10", "info")
+            self.log("Not registering the affinity:// handler: the Canva sign-in fix supports Wine 9.14, 10.10 "
+                     "and the 11.16 build with the Affinity patches", "info")
             return False
         if not self.windowsruntime_facades_installed() or not self.winmetadata_installed():
             self.log("WinRT facades or WinMetadata missing, not registering the affinity:// handler", "warning")
