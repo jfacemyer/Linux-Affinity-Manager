@@ -44,7 +44,7 @@ working install untouched.
 AFFINITY_INSTALL_DIR=~/.AffinityLinux-3.3 python3 AffinityScripts/AffinityLinuxInstaller.py
 ```
 
-Or through [Affinity on Linux Manager](https://forgejo.facemyer.net/facemyer/AffinityLinuxManager),
+Or through [Affinity on Linux Manager](../AffinityManager/README.md),
 which was written for this and keeps track of the prefixes afterwards.
 
 To put a known version back:

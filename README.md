@@ -47,23 +47,25 @@ AffinityOnLinux provides an easy way to install and run Affinity Photo, Designer
 curl -sSL https://raw.githubusercontent.com/ryzendew/AffinityOnLinux/refs/heads/main/AffinityScripts/AffinityLinuxInstaller.py | python3
 ```
 
-> **Testing this branch?** `main` does not have any of it. Install from a
-> **clone**, not from a pipe:
+> **This fork.** The command above is upstream's installer. This fork carries
+> the Affinity 3.3 work — Wine builds with the Affinity patches, opening
+> documents from the file manager, the plugin loader with its newest fixes —
+> and installs with:
 >
 > ```bash
-> git clone -b experimental/affinity-3.3 https://forgejo.facemyer.net/facemyer/AffinityOnLinux.git
-> python3 AffinityOnLinux/AffinityScripts/AffinityLinuxInstaller.py
+> curl -sSL https://github.com/jfacemyer/Linux-Affinity-Manager/raw/main/AffinityScripts/AffinityLinuxInstaller.py | python3
 > ```
 >
-> The pipe used to be the instruction here and it named an older branch, whose
-> `affinity-on-linux.exe` is eight commits behind this one — including *"stop
-> shipping the watchdog that kills sessions"*. The installer now pins that
-> binary by SHA-256 and declines to install a different one, so a piped install
-> sets up everything except file-manager integration and says why. A clone has
-> the file beside it and needs no download at all.
+> or from a clone, which needs no downloads for its own files:
 >
-> The temporary mirror URLs are listed, with what each must become before
-> merging, in [`AffinityHandler/README.md`](AffinityHandler/README.md#temporary-download-sources--must-be-repointed-before-merging).
+> ```bash
+> git clone https://github.com/jfacemyer/Linux-Affinity-Manager.git
+> python3 Linux-Affinity-Manager/AffinityScripts/AffinityLinuxInstaller.py
+> ```
+>
+> The installer pins the Wine builds, the plugin loader and the file-manager
+> handler by SHA-256 and refuses any other copy. The download sources that are
+> forks rather than upstream are listed, with what each must become, in [`AffinityHandler/README.md`](AffinityHandler/README.md#temporary-download-sources--must-be-repointed-before-merging).
 
 > **Several prefixes to keep track of?** [`AffinityManager/`](AffinityManager/README.md)
 > is optional and changes nothing about the above. The installer stays a single
@@ -75,7 +77,7 @@ curl -sSL https://raw.githubusercontent.com/ryzendew/AffinityOnLinux/refs/heads/
 > Run it straight from the repository, the same way as the installer:
 >
 > ```bash
-> curl -sSL https://forgejo.facemyer.net/facemyer/AffinityOnLinux/raw/branch/experimental/affinity-3.3/AffinityManager/run.py | python3
+> curl -sSL https://github.com/jfacemyer/Linux-Affinity-Manager/raw/main/AffinityManager/run.py | python3
 > ```
 >
 > That pipes a single small file, `run.py`, which downloads this branch, keeps

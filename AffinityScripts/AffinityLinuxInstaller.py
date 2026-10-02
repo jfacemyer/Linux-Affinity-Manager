@@ -271,6 +271,33 @@ def _sha256_of(path):
     return digest.hexdigest()
 
 
+# Where this installer's own files are fetched from when there is no checkout
+# beside it (the piped install). The public home by default; the manager's
+# run.py passes on whichever repository and branch it was started from, so a
+# staging run fetches from staging and never mixes in files from main.
+# POC SOURCE -- repoint at upstream if this work is merged there.
+SOURCE_REPO = "https://github.com/jfacemyer/Linux-Affinity-Manager"
+SOURCE_BRANCH = "main"
+
+
+def source_repo():
+    return os.environ.get("AFFINITY_MANAGER_REPO", "").strip().rstrip("/") or SOURCE_REPO
+
+
+def source_branch():
+    return os.environ.get("AFFINITY_MANAGER_BRANCH", "").strip() or SOURCE_BRANCH
+
+
+def source_raw_url(path):
+    """A file on the source branch, spelled the way the host wants: GitHub
+    serves <repo>/raw/<branch>/<path>, Forgejo and Gitea
+    <repo>/raw/branch/<branch>/<path>."""
+    repo, branch = source_repo(), source_branch()
+    if repo.startswith("https://github.com/"):
+        return f"{repo}/raw/{branch}/{path}"
+    return f"{repo}/raw/branch/{branch}/{path}"
+
+
 # The handler this installer is meant to install, by content. The piped install
 # fetches it over the network from a branch that can be older than this file,
 # and "it starts with MZ and is over 4KB" does not tell those apart.
@@ -13747,9 +13774,9 @@ class AffinityInstallerGUI(QMainWindow):
             }
         elif wine_version == "11.16":
             return {
-                # POC SOURCE -- a personal Forgejo build, not an upstream release.
-                # Repoint this at the upstream 11.16 release before merging.
-                "wine_url": "https://forgejo.facemyer.net/facemyer/Affinity-Wine-Builder/releases/download/11.16-r3/ElementalWarrior-wine-11.16.tar.xz",
+                # POC SOURCE -- the fork that carries the patches' upstream pull
+                # request. Repoint at the upstream 11.16 release.
+                "wine_url": "https://github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.16-r3/ElementalWarrior-wine-11.16.tar.xz",
                 "wine_file_name": "ElementalWarrior-wine-11.16.tar.xz",
                 "wine_sha256": WINE_11_16_SHA256,
                 "wine_dir_name": "ElementalWarriorWine",
@@ -18976,24 +19003,19 @@ Would you like to continue with {distro_name} anyway?"""
         self.clear_shadowing_winmds(quiet=True)
 
         dest = install_dir / "affinity-on-linux.exe"
-        # POC SOURCE -- a personal Forgejo fork, not upstream. Repoint at the
-        # upstream raw URL before merging; the file has to be fetchable because
-        # the documented install pipes this script straight into python3, where
-        # there is no checkout to copy from.
+        # Fetched from the source branch (source_raw_url). It has to be
+        # fetchable because the documented install pipes this script straight
+        # into python3, where there is no checkout to copy from.
         #
-        # The branch named here is the branch this installer ships on, and
-        # that is not cosmetic. It used to name an older PR branch that was
+        # The branch is the one this installer ships on, and that is not
+        # cosmetic. It used to name an older PR branch that was
         # eight handler commits behind, whose binary still contained the
         # startup watchdog that kills sessions -- so a piped install fetched
         # and ran that one, silently, while a checkout install got the current
         # one. HANDLER_SHA256 below is what this installer expects, checked on
         # the download and on the checkout copy alike; anything else is refused
         # rather than installed.
-        raw_url = (
-            "https://forgejo.facemyer.net/facemyer/AffinityOnLinux/raw/branch/"
-            "experimental/affinity-3.3/"
-            "AffinityHandler/affinity-on-linux.exe"
-        )
+        raw_url = source_raw_url("AffinityHandler/affinity-on-linux.exe")
 
         try:
             # Same fast path as the icons: use the checkout when there is one,
@@ -19078,11 +19100,8 @@ Would you like to continue with {distro_name} anyway?"""
             "x-wine-extension-afdesign.xml",
             "x-wine-extension-afpub.xml",
         ]
-        # POC SOURCE -- see install_file_manager_handler().
-        raw_base = (
-            "https://forgejo.facemyer.net/facemyer/AffinityOnLinux/raw/branch/"
-            "experimental/affinity-3.3/mime/"
-        )
+        # From the source branch -- see install_file_manager_handler().
+        raw_base = source_raw_url("mime/")
 
         try:
             mime_dir = Path.home() / ".local" / "share" / "mime" / "packages"

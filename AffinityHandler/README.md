@@ -91,81 +91,51 @@ committed binary is built from the `Program.cs` beside it.
 
 ## Temporary download sources — must be repointed before merging
 
-Five downloads in `AffinityScripts/AffinityLinuxInstaller.py` point at a
-personal mirror or fork rather than upstream. They have to be *downloads* at all
-because the documented install pipes the installer straight into `python3`,
-where there is no checkout to copy from; and they
-have to point somewhere other than upstream because none of these files exist
-upstream until this branch is merged.
+Some downloads point at this fork, or at forks that carry pull requests to the
+projects concerned, rather than at upstream. They have to be *downloads* at
+all because the documented install pipes the installer straight into
+`python3`, where there is no checkout to copy from; and they point at the forks
+because none of these files exist upstream until the pull requests are merged
+and released.
 
 Each site is marked `POC SOURCE`:
 
 ```sh
-grep -n 'POC SOURCE' AffinityScripts/AffinityLinuxInstaller.py
+grep -n 'POC SOURCE' AffinityScripts/AffinityLinuxInstaller.py AffinityManager/run.py
 ```
 
 | What | Points at now | Should point at |
 |---|---|---|
-| Wine 11.16 tarball | `forgejo.facemyer.net/facemyer/Affinity-Wine-Builder/releases/download/11.16-r3/ElementalWarrior-wine-11.16.tar.xz`, pinned by `WINE_11_16_SHA256` | `github.com/ryzendew/Affinity-Wine-Builder/releases/download/11.16/ElementalWarrior-wine-11.16.tar.xz` — rebuilt from the same patch set, and the checksum updated with it |
-| Wine 11.18 tarball | `github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.18-r1/ElementalWarrior-wine-11.18.tar.xz`, pinned by `WINE_11_18_SHA256` — the fork carrying the patches' upstream pull request | an upstream 11.18 release, once that pull request is merged |
-| AffinityPluginLoader + WineFix | `github.com/jfacemyer/AffinityPluginLoader`, release `wine-fixes-1` (`APL_RELEASE_REPO`, `APL_RELEASE_TAG`), each zip pinned in `APL_ASSET_SHA256` | `noahc3/AffinityPluginLoader`'s next release, once it carries upstream `dev` and the two fixes on the fork's `wine-fixes` branch |
-| `affinity-on-linux.exe` | `forgejo.facemyer.net/facemyer/AffinityOnLinux/raw/branch/experimental/affinity-3.3/AffinityHandler/` | `raw.githubusercontent.com/ryzendew/AffinityOnLinux/main/AffinityHandler/` |
-| MIME definitions | `forgejo.facemyer.net/facemyer/AffinityOnLinux/raw/branch/experimental/affinity-3.3/mime/` | `raw.githubusercontent.com/ryzendew/AffinityOnLinux/main/mime/` |
-| The manager, via `AffinityManager/run.py` (`REPO`, `BRANCH`) | `forgejo.facemyer.net/facemyer/AffinityOnLinux`, branch `experimental/affinity-3.3` | `github.com/ryzendew/AffinityOnLinux`, branch `main` — GitHub serves `/archive/<branch>.tar.gz` the same way |
+| Wine 11.16 tarball | `github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.16-r3/ElementalWarrior-wine-11.16.tar.xz`, pinned by `WINE_11_16_SHA256` | an upstream 11.16 release, once [ryzendew/Affinity-Wine-Builder#9](https://github.com/ryzendew/Affinity-Wine-Builder/pull/9) is merged |
+| Wine 11.18 tarball | `github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.18-r1/ElementalWarrior-wine-11.18.tar.xz`, pinned by `WINE_11_18_SHA256` | an upstream 11.18 release, likewise |
+| AffinityPluginLoader + WineFix | `github.com/jfacemyer/AffinityPluginLoader`, release `wine-fixes-1` (`APL_RELEASE_REPO`, `APL_RELEASE_TAG`), each zip pinned in `APL_ASSET_SHA256` | `noahc3/AffinityPluginLoader`'s next release, once it carries upstream `dev` and the fork's two fixes |
+| `affinity-on-linux.exe`, MIME definitions | the source branch: `SOURCE_REPO` / `SOURCE_BRANCH` (`github.com/jfacemyer/Linux-Affinity-Manager`, `main`), or whatever the manager was started from | upstream's repository, if this work is merged there |
+| The manager, via `AffinityManager/run.py` (`REPO`, `BRANCH`) | `github.com/jfacemyer/Linux-Affinity-Manager`, branch `main` | likewise |
 
-The fourth is not in the installer: it is the bootstrap that lets the manager be
-run with `curl … | python3`, and the one-line command in the top-level README
-and in `AffinityManager/README.md` names the same URL. A test in the manager
-fails if the README and the code disagree, so repoint both together.
+`run.py` passes the repository and branch it was started from to the manager,
+and the installer fetches its own files from the same place
+(`AFFINITY_MANAGER_REPO`, `AFFINITY_MANAGER_BRANCH`). So the same commit can be
+tried from a staging branch before it reaches `main`:
 
-The Wine one also depends on a release that does not exist upstream yet: 11.16
-built with the Affinity patch set, from the matching branch of
-`Affinity-Wine-Builder`. Publishing that release is a prerequisite for merging
-this, not a follow-up.
+```sh
+curl -sSL https://github.com/jfacemyer/Linux-Affinity-Manager/raw/staging/AffinityManager/run.py | AFFINITY_MANAGER_BRANCH=staging python3
+```
 
-The handler and MIME downloads are only reached when the installer was NOT run
-from a checkout of this repository. Run from one it copies the files from
-there, so a reviewer testing from a clone exercises everything except the URLs
-themselves.
-
-`__file__` is not the test for that, and used to be. Python sets it to the
-string `"<stdin>"` when a script is read from stdin rather than leaving it
-unset, so `Path(__file__).parent` was the *current working directory* and the
-`except NameError` guards written for the piped case never fired. It is now
-`script_dir()`, which requires the file to be a real file in a directory named
-`AffinityScripts` -- the second half matters because the other documented
-install is `curl ... -o install.py && python3 install.py`, which people run
-from `~/Downloads`.
-
-### The handler binary is pinned by content
-
-`HANDLER_SHA256` in the installer is the SHA-256 of the
-`affinity-on-linux.exe` committed beside this README, and a download that does
-not match it is refused rather than installed.
-
-That is not theoretical. The URL used to name an older PR branch that was
-**eight handler commits behind** this one, and the two binaries differ -- one of
-the commits in between is *"stop shipping the watchdog that kills sessions"*. So
-a piped install fetched and ran a handler with a known session-killing watchdog
-in it, silently, while a checkout install got the current one.
-
-Both are fixed: the URL names the branch this installer ships on, and that
-branch has been pushed, so the blob it serves is the one pinned here. The
-checksum stays regardless -- it is what turns "the branch drifted" from a silent
-substitution into a refusal.
+A test in the manager fails if a README's one-liner and the code disagree, and
+another if the tree names anything but public sources.
 
 ## Installing from this branch
 
-The published one-liner installs `main`, which has none of this. To test the
-branch, install from it instead:
+Upstream's one-liner installs upstream's installer, which has none of this.
+Install this fork's instead:
 
 ```bash
-curl -sSL https://forgejo.facemyer.net/facemyer/AffinityOnLinux/raw/branch/experimental/affinity-3.3/AffinityScripts/AffinityLinuxInstaller.py | python3
+curl -sSL https://github.com/jfacemyer/Linux-Affinity-Manager/raw/main/AffinityScripts/AffinityLinuxInstaller.py | python3
 ```
 
-Then in *Choose Wine Version* pick **Wine 11.16 (opens documents from the file
-manager)**. The handler, the MIME definitions and the desktop entry are only
-installed on 11.16 — on an older build the installer says so and skips them,
+Then in *Choose Wine Version* pick **Wine 11.18 (Affinity patches)**, or 11.16.
+The handler, the MIME definitions and the desktop entry are only installed on
+those builds — on an older one the installer says so and skips them,
 because those Wine versions cannot open a document handed to them and claiming
 the file types would make double-clicking do nothing.
 
@@ -175,7 +145,6 @@ repairs just this part without reinstalling Affinity or Wine.
 Or from a clone, which skips the downloads above:
 
 ```bash
-git clone -b experimental/affinity-3.3 \
-  https://forgejo.facemyer.net/facemyer/AffinityOnLinux.git
-python3 AffinityOnLinux/AffinityScripts/AffinityLinuxInstaller.py
+git clone https://github.com/jfacemyer/Linux-Affinity-Manager.git
+python3 Linux-Affinity-Manager/AffinityScripts/AffinityLinuxInstaller.py
 ```
