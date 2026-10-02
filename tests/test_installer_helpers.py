@@ -11,6 +11,7 @@ under pytest's ``tmp_path`` — plus a unique prefix marker for the startup swee
 """
 
 import importlib.util
+import inspect
 import os
 import shutil
 import subprocess
@@ -71,7 +72,12 @@ def harness(ali, tmp_path):
         pass
 
     for name in HELPER_METHODS:
-        setattr(StandIn, name, getattr(ali.AffinityInstallerGUI, name))
+        # getattr_static keeps @staticmethod wrappers. Plain getattr unwraps
+        # them, so _pump_child_output became an instance method here, every
+        # call passed one argument too many, the reader thread died before
+        # posting its EOF sentinel, and the streaming tests hung for the full
+        # stall timeout (1800s). The real class was never affected.
+        setattr(StandIn, name, inspect.getattr_static(ali.AffinityInstallerGUI, name))
 
     obj = StandIn()
     obj.directory = str(tmp_path)
