@@ -24,6 +24,7 @@ FORBIDDEN = {
     "AI co-author line": "co-authored-by: " + "claude",
     "AI session link": "claude" + ".ai/code",
     "AI generated-with line": "generated with " + "claude",
+    "private development repository": "affinity" + "-linux",
 }
 SKIP_DIRS = {".git", "__pycache__", ".pytest_cache", "node_modules"}
 
