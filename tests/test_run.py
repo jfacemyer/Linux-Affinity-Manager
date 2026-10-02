@@ -1,6 +1,6 @@
 """run.py: the single file that starts the manager straight from the repository.
 
-Never touches the network. Each test builds a tarball shaped like Forgejo's --
+Never touches the network. Each test builds a tarball shaped like a git forge's --
 one top directory, the commit in the pax header -- and hands it to run.py in
 place of the download.
 """
@@ -199,7 +199,7 @@ def test_a_missing_pyqt6_stops_before_downloading(env, monkeypatch, capsys):
 def test_the_url_in_the_docstring_is_the_one_the_code_uses():
     """The docstring's curl line is what people copy. It must name this file
     on the branch the code downloads."""
-    expected = (f"{run.REPO}/raw/branch/{run.BRANCH}/AffinityManager/run.py")
+    expected = run.raw_url(run.REPO, run.BRANCH, "AffinityManager/run.py")
     assert expected in run.__doc__
 
 
@@ -216,5 +216,22 @@ def test_the_readme_gives_the_same_command():
     """The README's curl line is the one people copy. If the repository or
     branch moves, it must move with the code."""
     readme = (ROOT / "README.md").read_text()
-    url = f"{run.REPO}/raw/branch/{run.BRANCH}/AffinityManager/run.py"
+    url = run.raw_url(run.REPO, run.BRANCH, "AffinityManager/run.py")
     assert f"curl -sSL {url} | python3" in readme
+
+
+def test_raw_urls_are_spelled_for_the_service():
+    assert run.raw_url("https://github.com/o/r", "main", "a/b.py") == \
+        "https://github.com/o/r/raw/main/a/b.py"
+    assert run.raw_url("https://git.example.org/o/r", "dev", "a/b.py") == \
+        "https://git.example.org/o/r/raw/branch/dev/a/b.py"
+
+
+def test_the_source_used_is_passed_on(env, monkeypatch):
+    """The installer fetches its own files from wherever this run came from,
+    so a staging run must hand its repository and branch down."""
+    monkeypatch.setenv("AFFINITY_MANAGER_REPO", "https://git.example.org/o/r")
+    monkeypatch.setenv("AFFINITY_MANAGER_BRANCH", "staging")
+    env.go()
+    assert os.environ["AFFINITY_MANAGER_REPO"] == "https://git.example.org/o/r"
+    assert os.environ["AFFINITY_MANAGER_BRANCH"] == "staging"

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run the Affinity on Linux Manager straight from the repository.
 
-    curl -sSL https://forgejo.facemyer.net/facemyer/AffinityOnLinux/raw/branch/experimental/affinity-3.3/AffinityManager/run.py | python3
+    curl -sSL https://github.com/jfacemyer/Linux-Affinity-Manager/raw/main/AffinityManager/run.py | python3
 
 The installer can be piped into python3 because it is one file. The manager is
 a package -- a dozen modules, and it loads the installer from beside itself --
@@ -22,9 +22,15 @@ Offline, it starts the newest copy it already has and says so.
 
 Lives in AffinityLinuxManager, which is carried inside AffinityOnLinux as
 AffinityManager/ by git subtree, so the URL above serves this file from there.
-REPO and BRANCH are temporary sources like the installer's other POC URLs and
-must be repointed before this goes upstream. AFFINITY_MANAGER_REPO and
-AFFINITY_MANAGER_BRANCH override them.
+REPO and BRANCH name where the public build lives. AFFINITY_MANAGER_REPO and
+AFFINITY_MANAGER_BRANCH override them -- that is how the same commit is tried
+from a staging branch, or from another server, before it is promoted:
+
+    curl -sSL <repo>/raw/<branch>/AffinityManager/run.py | \
+        AFFINITY_MANAGER_REPO=<repo> AFFINITY_MANAGER_BRANCH=<branch> python3
+
+Whatever source this run used is passed on to the manager, and from there to
+the installer, which fetches its own files from the same place.
 """
 
 from __future__ import annotations
@@ -40,10 +46,11 @@ import time
 import urllib.request
 from pathlib import Path
 
-# POC SOURCE -- repoint before merging, with the installer's own (see
-# AffinityHandler/README.md, "Temporary download sources").
-REPO = "https://forgejo.facemyer.net/facemyer/AffinityOnLinux"
-BRANCH = "experimental/affinity-3.3"
+# The public home: a fork of the upstream installer that carries this work.
+# Repoint at upstream if it is merged there (AffinityHandler/README.md,
+# "Temporary download sources").
+REPO = "https://github.com/jfacemyer/Linux-Affinity-Manager"
+BRANCH = "main"
 
 ENTRY = Path("AffinityManager") / "AffinityLinuxManager.py"
 INSTALLER = Path("AffinityScripts") / "AffinityLinuxInstaller.py"
@@ -68,6 +75,17 @@ def repo() -> str:
 
 def branch() -> str:
     return os.environ.get("AFFINITY_MANAGER_BRANCH", "").strip() or BRANCH
+
+
+def raw_url(repo_url: str, for_branch: str, path: str) -> str:
+    """A file on a branch, as the hosting service spells it.
+
+    GitHub serves <repo>/raw/<branch>/<path> (a redirect to
+    raw.githubusercontent.com); Forgejo and Gitea want
+    <repo>/raw/branch/<branch>/<path>."""
+    if repo_url.startswith("https://github.com/"):
+        return f"{repo_url}/raw/{for_branch}/{path}"
+    return f"{repo_url}/raw/branch/{for_branch}/{path}"
 
 
 def cache_root(for_branch: str) -> Path:
@@ -274,6 +292,11 @@ def main(argv=None, run=None) -> int:
     # A tarball is not a git checkout, so the manager cannot ask git which
     # build it is. Tell it, so the status line can say what is running.
     os.environ["AFFINITY_MANAGER_SOURCE"] = f"{branch()} @ {copy.name}"
+    # And where it came from, so the installer fetches anything it needs from
+    # the same repository and branch rather than from the public default --
+    # a staging run must not quietly mix in files from main.
+    os.environ["AFFINITY_MANAGER_REPO"] = repo()
+    os.environ["AFFINITY_MANAGER_BRANCH"] = branch()
     # exec, not a child process: the manager then IS this process, so closing
     # it ends everything and its single-instance check sees one manager.
     (run or os.execv)(sys.executable, command)

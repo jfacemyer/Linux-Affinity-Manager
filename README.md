@@ -19,7 +19,7 @@ part that was missing: *which prefix*, and *which build*.
 The same way the installer is run — nothing to clone, always the latest:
 
 ```sh
-curl -sSL https://forgejo.facemyer.net/facemyer/AffinityOnLinux/raw/branch/experimental/affinity-3.3/AffinityManager/run.py | python3
+curl -sSL https://github.com/jfacemyer/Linux-Affinity-Manager/raw/main/AffinityManager/run.py | python3
 ```
 
 The installer can be piped into `python3` because it is one file. The manager
@@ -48,8 +48,8 @@ or branch.
 ### From a clone
 
 ```sh
-git clone -b experimental/affinity-3.3 https://forgejo.facemyer.net/facemyer/AffinityOnLinux.git
-python3 AffinityOnLinux/AffinityManager/AffinityLinuxManager.py
+git clone https://github.com/jfacemyer/Linux-Affinity-Manager.git
+python3 Linux-Affinity-Manager/AffinityManager/AffinityLinuxManager.py
 ```
 
 ### From this repository
