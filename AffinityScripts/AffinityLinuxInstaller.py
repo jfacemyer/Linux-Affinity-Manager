@@ -17,12 +17,37 @@ import urllib.request
 import urllib.error
 import re
 import json
-import tempfile
 import hashlib
+import tempfile
+import queue
 from pathlib import Path
 import time
 import signal
 import shlex
+
+# Single source of truth for the winetricks components this installer sets up.
+# Order matters: .NET first (the runtimes and Affinity itself check against it),
+# then fonts and runtimes, then the rest. Keep in sync with
+# _check_winetricks_component().
+WINETRICKS_COMPONENTS = [
+    ("dotnet35sp1", ".NET Framework 3.5 SP1"),
+    ("dotnet48", ".NET Framework 4.8"),
+    ("corefonts", "Windows Core Fonts"),
+    ("vcrun2022", "Visual C++ Redistributables 2022"),
+    ("msxml3", "MSXML 3.0"),
+    ("msxml6", "MSXML 6.0"),
+    ("crypt32", "Cryptographic API 32"),
+    ("tahoma", "Tahoma Font"),
+    ("renderer=vulkan", "Vulkan Renderer"),
+]
+
+# Side column (Quick Start / Troubleshooting) sizing. The floor keeps a column
+# wide enough for its icon plus a few words of label; MIN_WINDOW_WIDTH is the
+# budget the floors are trimmed to so the log column and the gaps still fit and
+# the window never has to grow past it to avoid clipping (see _size_side_columns).
+SIDE_PANEL_MIN_WIDTH = 190
+SIDE_PANEL_MIN_FLOOR = 150
+MIN_WINDOW_WIDTH = 620
 
 
 def detect_distro_for_install():
@@ -106,9 +131,10 @@ try:
         QLineEdit,
         QSizePolicy,
     )
-    from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize, QTimer
+    from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize, QTimer, QEvent
     from PyQt6.QtGui import (
         QFont,
+        QFontMetrics,
         QColor,
         QPalette,
         QIcon,
@@ -166,9 +192,10 @@ except ImportError:
                 QLineEdit,
                 QSizePolicy,
             )
-            from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize, QTimer
+            from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize, QTimer, QEvent
             from PyQt6.QtGui import (
                 QFont,
+                QFontMetrics,
                 QColor,
                 QPalette,
                 QIcon,
@@ -552,6 +579,161 @@ def repair_font_registrations(prefix, wine, log=None):
         return []
 
 
+
+class ElidedLabel(QLabel):
+    """QLabel that shrinks with its panel instead of forcing its text width.
+
+    The side columns sit next to the log pane, so on a narrow window there is
+    less room than the labels ask for. A normal QLabel demands its full text
+    width as a minimum, which pushes the column wider than its scroll area and
+    gets the text clipped mid-word. Reporting a zero-width minimum lets the
+    layout shrink us, and we show an ellipsis for whatever room is left.
+    """
+
+    def __init__(self, text="", parent=None):
+        super().__init__(text, parent)
+        self._full_text = text
+        self._full_hint = super().sizeHint()
+
+    def text(self):
+        """The complete label - layout code gets the elided one, callers don't."""
+        return getattr(self, "_full_text", "")
+
+    def setText(self, text):
+        self._full_text = text
+        super().setText(text)
+        self._refresh_hint()
+        self._apply_elision()
+
+    def minimumSizeHint(self):
+        hint = super().minimumSizeHint()
+        return QSize(0, hint.height())
+
+    def sizeHint(self):
+        # The preferred width still covers the whole label, so wide windows lay
+        # out exactly as they did before; only the minimum collapses to zero.
+        return getattr(self, "_full_hint", super().sizeHint())
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._apply_elision()
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() in (QEvent.Type.FontChange, QEvent.Type.StyleChange):
+            self._refresh_hint()
+            self._apply_elision()
+
+    def _refresh_hint(self):
+        """Re-measure the whole label with the font/style currently in effect."""
+        full = getattr(self, "_full_text", None)
+        if full is None:
+            return
+        current = super().text()
+        super().setText(full)
+        try:
+            self._full_hint = super().sizeHint()
+        finally:
+            super().setText(current)
+
+    def _apply_elision(self):
+        full = getattr(self, "_full_text", "")
+        if not full or self.width() <= 0:
+            return
+        shown = QFontMetrics(self.font()).elidedText(
+            full, Qt.TextElideMode.ElideRight, max(0, self.width() - 4)
+        )
+        if shown != super().text():
+            super().setText(shown)
+
+
+class ElidedActionButton(QPushButton):
+    """QPushButton that shrinks with its panel and ellipsizes its label.
+
+    Qt never elides button text on its own - it clips it - and the full text
+    width becomes the panel's minimum, which is what used to cut these buttons
+    off when the window was resized narrow. Same contract as ElidedLabel: the
+    minimum collapses, the preferred width keeps describing the whole label,
+    and text() keeps returning the unabbreviated label for callers that logic on.
+    """
+
+    # 12px + 24px of padding and a 1px border per side, from every #actionButton
+    # rule in the stylesheets, plus a little slack for font/padding rounding.
+    _TEXT_CHROME = 58
+
+    def __init__(self, text="", parent=None):
+        super().__init__(text, parent)
+        self._full_text = text
+        self._full_hint = super().sizeHint()
+
+    def text(self):
+        """The complete label - layout code gets the elided one, callers don't."""
+        return getattr(self, "_full_text", "")
+
+    def setText(self, text):
+        previous = getattr(self, "_full_text", None)
+        self._full_text = text
+        super().setText(text)
+        self._refresh_hint()
+        if previous is not None and self.toolTip() == previous:
+            # The tooltip was mirroring the label (set because the label can be
+            # abbreviated); keep it accurate when the label itself changes.
+            self.setToolTip(text)
+        self._apply_elision()
+
+    def minimumSizeHint(self):
+        hint = super().minimumSizeHint()
+        return QSize(0, hint.height())
+
+    def sizeHint(self):
+        return getattr(self, "_full_hint", super().sizeHint())
+
+    def setIcon(self, icon):
+        super().setIcon(icon)
+        self._apply_elision()
+
+    def setIconSize(self, size):
+        super().setIconSize(size)
+        self._apply_elision()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._apply_elision()
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() in (QEvent.Type.FontChange, QEvent.Type.StyleChange):
+            self._refresh_hint()
+            self._apply_elision()
+
+    def _refresh_hint(self):
+        """Re-measure the whole label with the font/style currently in effect."""
+        full = getattr(self, "_full_text", None)
+        if full is None:
+            return
+        current = super().text()
+        super().setText(full)
+        try:
+            self._full_hint = super().sizeHint()
+        finally:
+            super().setText(current)
+
+    def _apply_elision(self):
+        full = getattr(self, "_full_text", "")
+        if not full or self.width() <= 0:
+            return
+        icon_width = 0
+        if not self.icon().isNull():
+            icon_width = self.iconSize().width() + 8  # icon plus the gap to the text
+        shown = QFontMetrics(self.font()).elidedText(
+            full,
+            Qt.TextElideMode.ElideRight,
+            max(0, self.width() - icon_width - self._TEXT_CHROME),
+        )
+        if shown != super().text():
+            super().setText(shown)
+
+
 class ZoomableTextEdit(QTextEdit):
     """QTextEdit with Ctrl+Wheel zoom support"""
 
@@ -624,6 +806,13 @@ class ProgressSpinner(QWidget):
 
 
 class AffinityInstallerGUI(QMainWindow):
+    AFFINITY_URL_HANDLER = "affinity-url-handler.desktop"
+    # .NET Framework WinRT facades copied from the .NET 4.8 offline installer (SHA-256).
+    WINRT_FACADES = {
+        "System.Runtime.WindowsRuntime": "1e1e6b4ac4e758fe1066e315f7928c393e1216dbe55c318803dd107123e1a8e3",
+        "System.Runtime.WindowsRuntime.UI.Xaml": "8e035a8667213e5a87b69757251a00c7c5f72c5b1b8f7578ec20688629b189e1",
+    }
+
     log_signal = pyqtSignal(str, str)
     progress_signal = pyqtSignal(float)
     progress_text_signal = pyqtSignal(str)
@@ -713,6 +902,12 @@ class AffinityInstallerGUI(QMainWindow):
         self.cancel_event = threading.Event()
         self._process_lock = threading.Lock()
         self._active_processes = set()
+        # Winetricks verbs that already stalled once this session: a wedged
+        # ngen.exe wedges again, so we must not blindly retry them.
+        self._stalled_components = set()
+        # Log lines waiting to be painted (see _flush_log_queue).
+        self._log_queue = []
+        self._log_queue_lock = threading.Lock()
         self._button_spinner_map = {}
         self._last_clicked_button = None
         self._operation_button = None
@@ -1056,14 +1251,11 @@ class AffinityInstallerGUI(QMainWindow):
             env["WINEPREFIX"] = self.directory
             wine = self.get_wine_path("wine")
 
+            # renderer=vulkan has its own dedicated check below.
             winetricks_components = [
-                ("dotnet35sp1", ".NET Framework 3.5 SP1"),
-                ("dotnet48", ".NET Framework 4.8"),
-                ("corefonts", "Windows Core Fonts"),
-                ("vcrun2022", "Visual C++ Redistributables 2022"),
-                ("msxml3", "MSXML 3.0"),
-                ("msxml6", "MSXML 6.0"),
-                ("crypt32", "Cryptographic API 32"),
+                (component, description)
+                for component, description in WINETRICKS_COMPONENTS
+                if component != "renderer=vulkan"
             ]
 
             for component, description in winetricks_components:
@@ -1830,6 +2022,9 @@ class AffinityInstallerGUI(QMainWindow):
         else:
             self._apply_mattscreative_theme()
         self._update_section_titles()
+        # Fonts/padding just changed (and the titles were re-cased), so the
+        # columns' real minimum width is known now - re-assert it.
+        self._refresh_window_minimum_width()
 
     def _apply_dark_theme(self):
         """Apply modern dark theme with card-based design"""
@@ -2785,6 +2980,51 @@ class AffinityInstallerGUI(QMainWindow):
                 font.setLetterSpacing(QFont.SpacingType.PercentageSpacing, 100)
             label.setFont(font)
 
+    def _size_side_columns(self, content_layout, status_panel, side_panels):
+        """Give the side button columns a minimum width inside a fixed budget.
+
+        Each column needs room for its icon plus a few words of label; the rest
+        of MIN_WINDOW_WIDTH is left for the log column and the gaps. The floors
+        matter because Qt clips layout items it cannot fit rather than scrolling
+        them, so a column that asks for its full text width (or a log column
+        whose minimum grew with a long status line) would otherwise push the
+        window wider than it is allowed to be.
+        """
+        try:
+            margins = content_layout.contentsMargins()
+            gaps = margins.left() + margins.right()
+            # one gap per side column: 2 side columns -> 3 columns -> 2 gaps
+            gaps += content_layout.spacing() * len(side_panels)
+            status_layout = status_panel.layout() if status_panel is not None else None
+            status_min = status_layout.minimumSize().width() if status_layout else 0
+            budget = MIN_WINDOW_WIDTH - gaps - status_min
+            floor = max(
+                SIDE_PANEL_MIN_FLOOR,
+                min(SIDE_PANEL_MIN_WIDTH, budget // max(1, len(side_panels))),
+            )
+        except Exception:
+            floor = SIDE_PANEL_MIN_WIDTH
+        for scroll in side_panels:
+            scroll.setMinimumWidth(floor)
+
+    def _refresh_window_minimum_width(self):
+        """Keep the window from being squeezed narrower than its columns need.
+
+        Qt honours a top-level minimum on resize but does not raise it when the
+        content grows, so without this the layout ends up asking for more room
+        than the window has and the buttons clip instead of scrolling/eliding.
+        """
+        try:
+            central = self.centralWidget()
+            layout = central.layout() if central is not None else None
+            if layout is None:
+                return
+            minimum = layout.minimumSize().width()
+            if minimum > 0:
+                self.setMinimumWidth(minimum)
+        except Exception:
+            pass
+
     def create_ui(self):
         """Create the modern user interface"""
         central_widget = QWidget()
@@ -2930,7 +3170,6 @@ class AffinityInstallerGUI(QMainWindow):
 
         left_panel = self.create_button_sections()
         left_scroll.setWidget(left_panel)
-        left_scroll.setMinimumWidth(left_panel.minimumSizeHint().width() + 18)
         left_scroll.setMaximumWidth(right_panel_max)
 
         content_layout.addWidget(left_scroll, stretch=2)
@@ -2951,12 +3190,14 @@ class AffinityInstallerGUI(QMainWindow):
 
         right_panel = self.create_troubleshooting_sections()
         right_scroll.setWidget(right_panel)
-        right_scroll.setMinimumWidth(right_panel.minimumSizeHint().width() + 18)
         right_scroll.setMaximumWidth(right_panel_max)
 
         content_layout.addWidget(right_scroll, stretch=2)
 
         main_layout.addWidget(content_widget, stretch=1)
+
+        self._size_side_columns(content_layout, status_panel, (left_scroll, right_scroll))
+        self._refresh_window_minimum_width()
 
     def create_status_section(self):
         """Create the modern status/log output section (responsive)"""
@@ -2999,6 +3240,11 @@ class AffinityInstallerGUI(QMainWindow):
         self.progress_label = QLabel("Ready")
         self.progress_label.setObjectName("progressLabel")
         self.progress_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # Status lines are long ("Wine environment ready. Configure your
+        # distribution below."). A single-line label would demand its full text
+        # width as a minimum and drag the whole window's minimum width up with
+        # it; wrapping keeps the log column's footprint stable.
+        self.progress_label.setWordWrap(True)
         progress_layout.addWidget(self.progress_label)
 
         progress_container = QHBoxLayout()
@@ -3096,6 +3342,16 @@ class AffinityInstallerGUI(QMainWindow):
         else:
             self.log_text.setMinimumHeight(200)
         log_layout.addWidget(self.log_text)
+
+        # The log pane used to grow without bound: a --verbose winetricks run
+        # pushes thousands of lines, and painting one HTML block per message was
+        # what made the GUI crawl. Cap what we keep on screen and paint in
+        # batches every 100 ms (see _log_safe / _flush_log_queue).
+        self.log_text.document().setMaximumBlockCount(5000)
+        self._log_flush_timer = QTimer(self)
+        self._log_flush_timer.setInterval(100)
+        self._log_flush_timer.timeout.connect(self._flush_log_queue)
+        self._log_flush_timer.start()
 
         card_layout.addWidget(log_section)
 
@@ -3228,6 +3484,12 @@ class AffinityInstallerGUI(QMainWindow):
                     "Start Affinity V3 unified application",
                     "play",
                 ),
+                (
+                    "Launch Affinity v3 (Ubuntu Snapshot)",
+                    self.launch_affinity_v3_ubuntu_snapshot,
+                    "Start Affinity V3 using the preserved Ubuntu/KDE/Wayland/NVIDIA runtime path",
+                    "play",
+                ),
             ],
         )
         container_layout.addWidget(launch_group)
@@ -3313,6 +3575,12 @@ class AffinityInstallerGUI(QMainWindow):
                     "loop",
                 ),
                 (
+                    "Fix Canva Sign-in (v3)",
+                    self.fix_canva_sign_in,
+                    "Install the .NET WinRT facades and the affinity:// handler the Canva sign-in needs",
+                    "wrench",
+                ),
+                (
                     "WebView2 Runtime (v3)",
                     self.install_webview2_runtime,
                     "Install WebView2 for Affinity V3 Help system",
@@ -3391,7 +3659,7 @@ class AffinityInstallerGUI(QMainWindow):
         card_layout.setSpacing(card_spacing)
         card_layout.setContentsMargins(card_margin, 16, card_margin, card_margin)
 
-        title_label = QLabel(title)
+        title_label = ElidedLabel(title)
         title_label.setObjectName("sectionTitle")
         self._section_title_labels.append((title_label, title))
         if screen_width < 1024:
@@ -3423,7 +3691,7 @@ class AffinityInstallerGUI(QMainWindow):
             else:
                 text, command = button_data[0], button_data[1]
 
-            btn = QPushButton(text)
+            btn = ElidedActionButton(text)
             btn.setObjectName("actionButton")
 
             if text == "One-Click Full Setup":
@@ -3445,6 +3713,10 @@ class AffinityInstallerGUI(QMainWindow):
 
             if tooltip:
                 btn.setToolTip(tooltip)
+            else:
+                # The label can be abbreviated when the window is narrow
+                # (see ElidedActionButton); keep the full text reachable.
+                btn.setToolTip(text)
 
             btn.setMinimumHeight(button_height)
             btn.setSizePolicy(
@@ -3610,7 +3882,40 @@ class AffinityInstallerGUI(QMainWindow):
         threading.Thread(target=check_and_load_icon, daemon=True).start()
 
     def closeEvent(self, event):
-        """Handle window close event - close log file"""
+        """Handle window close event - stop children, flush log, close file"""
+        if self.operation_in_progress:
+            reply = QMessageBox.question(
+                self,
+                "Operation In Progress",
+                f"'{self.current_operation or 'Unknown'}' is still running.\n\n"
+                "Quit anyway and stop the running process(es)?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
+
+            # Worker threads are daemons and every child gets its own session,
+            # so without this a quit orphans winetricks/wine — exactly what
+            # wedges the next run.
+            self.operation_cancelled = True
+            self.cancel_event.set()
+            try:
+                self.terminate_active_processes()
+            except Exception:
+                pass
+            try:
+                self.stop_prefix_wine_processes(
+                    reason="installer is closing", wait_seconds=5, force=True
+                )
+            except Exception:
+                pass
+
+        try:
+            self._flush_log_queue()
+        except Exception:
+            pass
         if self.log_file:
             try:
                 log_footer = f"{'=' * 80}\n"
@@ -3784,10 +4089,11 @@ class AffinityInstallerGUI(QMainWindow):
         else:
             full_message = f'<div style="padding: 2px 4px; margin: 1px 0;">{timestamp_html} {icon_html} <span style="color: {color};">{message}</span></div>'
 
-        self.log_text.append(full_message)
-        self.log_text.verticalScrollBar().setValue(
-            self.log_text.verticalScrollBar().maximum()
-        )
+        # Queue instead of painting: one QTextEdit append + relayout per message
+        # is what made verbose winetricks runs crawl. _flush_log_queue paints
+        # them in batches; the file still receives every line immediately.
+        with self._log_queue_lock:
+            self._log_queue.append(full_message)
 
         if self.log_file:
             try:
@@ -3796,6 +4102,24 @@ class AffinityInstallerGUI(QMainWindow):
                 self.log_file.flush()
             except Exception:
                 pass
+
+    def _flush_log_queue(self):
+        """Paint every queued log line in one batch (GUI thread, 10 Hz)."""
+        try:
+            with self._log_queue_lock:
+                if not self._log_queue:
+                    return
+                batch = "\n".join(self._log_queue)
+                self._log_queue.clear()
+        except Exception:
+            return
+        try:
+            self.log_text.append(batch)
+            self.log_text.verticalScrollBar().setValue(
+                self.log_text.verticalScrollBar().maximum()
+            )
+        except Exception:
+            pass
 
     def update_progress(self, value):
         """Update progress bar (thread-safe via signal)"""
@@ -3833,6 +4157,17 @@ class AffinityInstallerGUI(QMainWindow):
                 self.terminate_active_processes()
             except Exception:
                 pass
+            # Killing the winetricks process group still leaves wineserver and
+            # its children behind; sweep them up off the GUI thread.
+            threading.Thread(
+                target=self.stop_prefix_wine_processes,
+                kwargs={
+                    "reason": "operation cancelled",
+                    "wait_seconds": 10,
+                    "force": True,
+                },
+                daemon=True,
+            ).start()
             self.log(
                 "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
                 "warning",
@@ -4599,7 +4934,7 @@ class AffinityInstallerGUI(QMainWindow):
         options_layout.addWidget(wine_1112v4_frame)
         button_group.addButton(wine_1112v4_radio, 1)
 
-        # Wine 10.10 option - clean frame with radio button and description
+        # Alternate Wine option - clean frame with radio button and description
         wine_1010_frame = QFrame()
         wine_1010_frame.setObjectName("optionFrame")
         wine_1010_layout = QVBoxLayout(wine_1010_frame)
@@ -4730,6 +5065,14 @@ class AffinityInstallerGUI(QMainWindow):
         msg_box.setWindowTitle(title)
         msg_box.setText(message)
         msg_box.setStandardButtons(qbuttons)
+        default_button = {
+            "Yes": QMessageBox.StandardButton.Yes,
+            "No": QMessageBox.StandardButton.No,
+            "Retry": QMessageBox.StandardButton.Retry,
+            "Cancel": QMessageBox.StandardButton.Cancel,
+        }.get(getattr(self, "question_dialog_default", None))
+        if default_button is not None:
+            msg_box.setDefaultButton(default_button)
         msg_box.setStyleSheet(self.get_messagebox_stylesheet())
         msg_box.adjustSize()
         reply = msg_box.exec()
@@ -4748,9 +5091,10 @@ class AffinityInstallerGUI(QMainWindow):
 
         self.waiting_for_question_response = False
 
-    def show_question_dialog(self, title, message, buttons=["Yes", "No"]):
-        """Show question dialog (thread-safe)"""
+    def show_question_dialog(self, title, message, buttons=["Yes", "No"], default_button=None):
+        """Show question dialog (thread-safe). default_button names the button Enter selects."""
         self.question_dialog_response = None
+        self.question_dialog_default = default_button
         self.waiting_for_question_response = True
         self.question_dialog_signal.emit(title, message, buttons)
 
@@ -5763,6 +6107,362 @@ class AffinityInstallerGUI(QMainWindow):
         env["WINESERVER_TIMEOUT"] = "60"
         return env
 
+    def get_winetricks_env(self, base_env=None):
+        """Build the environment used for winetricks runs"""
+        env = os.environ.copy() if base_env is None else base_env.copy()
+        env["WINEPREFIX"] = self.directory
+        env["WINETRICKS_GUI"] = "0"
+        env["DISPLAY"] = env.get("DISPLAY", ":0")
+
+        # Prevent Wine from blocking headless setup with Mono/Gecko download prompts.
+        dll_overrides = [entry for entry in env.get("WINEDLLOVERRIDES", "").split(";") if entry]
+        for required_override in ("mscoree=", "mshtml="):
+            if required_override not in dll_overrides:
+                dll_overrides.append(required_override)
+        env["WINEDLLOVERRIDES"] = ";".join(dll_overrides)
+
+        # Always prefer the Wine build that owns the prefix, on every distro.
+        # Running winetricks under a *second* Wine build lets two wineservers
+        # alternate on one prefix — which is where the .NET installers wedge.
+        local_wine = self.get_wine_path("wine")
+        if local_wine.exists():
+            env = self._use_wine_in_env(env, local_wine)
+            self.log(f"winetricks: using the prefix's Wine ({local_wine})", "info")
+            self._warn_new_wow64_wine(local_wine)
+            return env
+
+        if self.is_ubuntu_family_distro():
+            self.log("Local installer Wine not found; winetricks will fall back to system Wine.", "warning")
+            return env
+
+        # No prefix Wine at all: fall back, preferring a pre-11 Wine when we get
+        # to choose. AffinityLinuxInstaller.sh refuses Wine >= 11 for winetricks
+        # because of hangs in Wine's new WoW64 mode.
+        self.log("Setting up wine-tkg for winetricks...", "info")
+        if self.ensure_wine_tkg():
+            wine_tkg_bin = self.get_wine_tkg_path("wine")
+            if (
+                wine_tkg_bin
+                and wine_tkg_bin.exists()
+                and self._wine_binary_is_functional(wine_tkg_bin)
+            ):
+                system_wine = shutil.which("wine")
+                tkg_major = self._wine_major_version(wine_tkg_bin)
+                system_major = (
+                    self._wine_major_version(system_wine) if system_wine else None
+                )
+                if (
+                    tkg_major is not None
+                    and tkg_major >= 11
+                    and system_major is not None
+                    and system_major < 11
+                ):
+                    self.log(
+                        f"Preferring system Wine {system_major}.x over wine-tkg "
+                        f"{tkg_major}.x for winetricks (Wine 11+ new WoW64 hangs winetricks).",
+                        "warning",
+                    )
+                    return self._pin_system_wine_in_env(env)
+                return self.get_winetricks_env_with_tkg(env)
+        self.log("Failed to setup wine-tkg, continuing with system wine", "warning")
+        return self._pin_system_wine_in_env(env)
+
+    def _use_wine_in_env(self, env, wine_bin):
+        """Point WINE/WINELOADER/WINESERVER/PATH at one specific Wine build."""
+        wine_bin = Path(wine_bin)
+        env["WINE"] = str(wine_bin)
+        env["WINELOADER"] = str(wine_bin)
+        env["PATH"] = f"{wine_bin.parent}:{env.get('PATH', '')}"
+        wineserver = wine_bin.parent / "wineserver"
+        if wineserver.exists():
+            env["WINESERVER"] = str(wineserver)
+        return env
+
+    def _wine_major_version(self, wine_bin):
+        """Major version of a Wine binary (11 for "wine-11.18"), or None."""
+        if not wine_bin:
+            return None
+        wine_bin = str(wine_bin)
+        if not Path(wine_bin).exists() and not shutil.which(wine_bin):
+            return None
+        try:
+            result = subprocess.run(
+                [wine_bin, "--version"],
+                capture_output=True,
+                text=True,
+                errors="replace",
+                timeout=15,
+            )
+            match = re.search(
+                r"wine-(\d+)\.", f"{result.stdout or ''}{result.stderr or ''}"
+            )
+            if match:
+                return int(match.group(1))
+        except Exception:
+            pass
+        return None
+
+    def _warn_new_wow64_wine(self, wine_bin):
+        """Say out loud when winetricks is about to run on a Wine 11+ build.
+
+        AffinityLinuxInstaller.sh refuses Wine >= 11 for winetricks (hangs in
+        the new WoW64 mode). We cannot always avoid that build, so at least
+        tell the user what to try when a component stalls."""
+        major = self._wine_major_version(wine_bin)
+        if major is not None and major >= 11:
+            self.log(
+                f"winetricks is running on Wine {major}.x. Wine 11+ new WoW64 mode is "
+                "known to hang the .NET installers — if a component stalls, re-run "
+                "Wine setup with Wine 10.10 and try again.",
+                "warning",
+            )
+        return major
+
+    def build_winetricks_command(self, component, extra_flags=(), verbose=True):
+        """Build a winetricks command line for a single verb.
+
+        `--force` means "don't check whether packages were already installed",
+        so without it winetricks skips a verb it can already see is installed.
+        That matters for the .NET verbs: forcing them re-runs the whole
+        multi-minute .NET chain on every attempt, and that chain is exactly
+        where Wine wedges (the 64-bit ngen.exe never returns).
+        """
+        skip_force = {
+            "dotnet20",
+            "dotnet20sp1",
+            "dotnet30",
+            "dotnet30sp1",
+            "dotnet35",
+            "dotnet35sp1",
+            "dotnet40",
+            "dotnet45",
+            "dotnet471",
+            "dotnet472",
+            "dotnet48",
+        }
+        verb = str(component).split("=", 1)[0]
+        command = ["winetricks", "--unattended"]
+        if verbose:
+            command.append("--verbose")
+        command.extend(["--no-isolate", "--optout"])
+        if verb not in skip_force:
+            command.append("--force")
+        command.extend(str(flag) for flag in extra_flags)
+        command.append(component)
+        return command
+
+    def _prefix_wine_pids(self):
+        """PIDs of processes whose environment points at our WINEPREFIX.
+
+        Never returns our own process or anything in our process group."""
+        # Compare against every spelling of the prefix path we may have handed
+        # out (raw string, normalised, trailing slash).
+        prefixes = {
+            str(self.directory),
+            str(Path(self.directory)),
+            str(Path(self.directory)) + os.sep,
+        }
+        pids = []
+        try:
+            own_pgid = os.getpgrp()
+        except Exception:
+            own_pgid = None
+        try:
+            entries = os.listdir("/proc")
+        except Exception:
+            return pids
+
+        for entry in entries:
+            if not entry.isdigit():
+                continue
+            pid = int(entry)
+            if pid == os.getpid():
+                continue
+            try:
+                with open(f"/proc/{pid}/environ", "rb") as handle:
+                    data = handle.read()
+            except Exception:
+                continue
+            matched = False
+            for item in data.split(b"\0"):
+                if item.startswith(b"WINEPREFIX="):
+                    value = item.split(b"=", 1)[1].decode("utf-8", "replace")
+                    matched = value in prefixes
+                    break
+            if not matched:
+                continue
+            if own_pgid is not None:
+                try:
+                    if os.getpgid(pid) == own_pgid:
+                        continue
+                except Exception:
+                    pass
+            pids.append(pid)
+        return pids
+
+    def stop_prefix_wine_processes(
+        self, env=None, reason="", wait_seconds=20, force=False
+    ):
+        """Stop every process still running against our WINEPREFIX.
+
+        Left-over Wine work — a wedged .NET installer, an abandoned winetricks
+        run, a wineserver started by a different Wine build — keeps Windows
+        Installer busy, so the next winetricks run blocks forever waiting for a
+        lock nobody will release. Returns True when the prefix is quiet.
+
+        `force=True` runs even after the user cancelled (the cancel/close paths
+        must clean up on their way out); `wait_seconds` keeps short-lived calls
+        off the GUI thread for long."""
+        if not force and self.cancel_event.is_set():
+            return False
+
+        pids = self._prefix_wine_pids()
+        if not pids:
+            return True
+
+        what = "leftover Wine process(es)"
+        if reason:
+            self.log(f"Stopping {len(pids)} {what} in {self.directory} — {reason}", "info")
+        else:
+            self.log(f"Stopping {len(pids)} {what} in {self.directory}", "info")
+
+        # 1. Ask politely first
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except Exception:
+                pass
+
+        # 2. Let the prefix's wineserver release its locks as well
+        run_env = dict(env) if env else os.environ.copy()
+        run_env.setdefault("WINEPREFIX", self.directory)
+        wineserver = None
+        for candidate in (
+            run_env.get("WINESERVER"),
+            str(self.get_wine_path("wineserver")),
+            shutil.which("wineserver"),
+        ):
+            if candidate and Path(candidate).exists():
+                wineserver = candidate
+                break
+        if wineserver:
+            try:
+                subprocess.run(
+                    [wineserver, "-k"],
+                    env=run_env,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=min(30, max(3, wait_seconds)),
+                    check=False,
+                )
+            except Exception:
+                pass
+
+        # 3. Wait for them to leave, then force whatever is left
+        remaining = list(pids)
+        deadline = time.monotonic() + max(1, wait_seconds)
+        while remaining and time.monotonic() < deadline:
+            if not force and self.cancel_event.is_set():
+                return False
+            time.sleep(0.5)
+            remaining = [
+                pid for pid in remaining if Path(f"/proc/{pid}").exists()
+            ]
+        for pid in remaining:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except Exception:
+                pass
+        if remaining:
+            self.log(f"Force-killed {len(remaining)} stuck Wine process(es)", "warning")
+        else:
+            self.log("Prefix is clean", "success")
+        return True
+
+    def prefix_has_installed_affinity(self):
+        """Return True when the prefix already contains an installed Affinity executable"""
+        exe_paths = [
+            Path(self.directory) / "drive_c" / "Program Files" / "Affinity" / "Photo 2" / "Photo.exe",
+            Path(self.directory) / "drive_c" / "Program Files" / "Affinity" / "Designer 2" / "Designer.exe",
+            Path(self.directory) / "drive_c" / "Program Files" / "Affinity" / "Publisher 2" / "Publisher.exe",
+            Path(self.directory) / "drive_c" / "Program Files" / "Affinity" / "Affinity" / "Affinity.exe",
+        ]
+        return any(path.exists() for path in exe_paths)
+
+    def backup_incomplete_ubuntu_prefix(self):
+        """Back up incomplete Ubuntu-family prefixes before recreating them"""
+        prefix_dir = Path(self.directory)
+        if not self.is_ubuntu_family_distro():
+            return True
+        if not (prefix_dir / "system.reg").exists():
+            return True
+        if self.prefix_has_installed_affinity():
+            return True
+
+        backup_dir = prefix_dir.parent / f"{prefix_dir.name}.backup-{time.strftime('%Y%m%d-%H%M%S')}"
+        try:
+            self.log(
+                "Detected an existing Ubuntu-family Wine prefix without installed Affinity applications.",
+                "warning"
+            )
+            self.log(f"Backing it up to {backup_dir} so setup can continue from a clean prefix.", "info")
+            # Nothing may still be running inside the prefix we are about to move:
+            # a live wineserver keeps writing files under it mid-copy.
+            self.stop_prefix_wine_processes(
+                reason="backing up an incomplete prefix", wait_seconds=8
+            )
+            shutil.move(str(prefix_dir), str(backup_dir))
+            prefix_dir.mkdir(parents=True, exist_ok=True)
+            self.log("Incomplete Wine prefix backed up", "success")
+            return True
+        except Exception as e:
+            self.log(f"Failed to back up incomplete Wine prefix: {e}", "error")
+            return False
+
+    def has_dotnet48_runtime(self):
+        """Return True when .NET Framework 4.8 is registered in the prefix"""
+        reg_file = Path(self.directory) / "system.reg"
+        if not reg_file.exists():
+            return False
+
+        try:
+            content = reg_file.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            return False
+
+        keys = [
+            r"\[Software\\\\Microsoft\\\\NET Framework Setup\\\\NDP\\\\v4\\\\Full\](.*?)(?=\n\[|\Z)",
+            r"\[Software\\\\Wow6432Node\\\\Microsoft\\\\NET Framework Setup\\\\NDP\\\\v4\\\\Full\](.*?)(?=\n\[|\Z)",
+        ]
+        for pattern in keys:
+            match = re.search(pattern, content, re.DOTALL)
+            if not match:
+                continue
+            block = match.group(1)
+            if '"Install"=dword:00000001' not in block:
+                continue
+
+            release_match = re.search(r'"Release"=dword:([0-9a-fA-F]+)', block)
+            if release_match and int(release_match.group(1), 16) >= 0x80e18:
+                return True
+
+            version_match = re.search(r'"Version"="([^"]+)"', block)
+            if version_match and version_match.group(1).startswith("4.8"):
+                return True
+        return False
+
+    def verify_required_wine_runtimes(self):
+        """Ensure the prefix contains the minimum runtimes required by Affinity installers"""
+        if self.has_dotnet48_runtime():
+            return True
+
+        self.log(".NET Framework 4.8 is not installed in the Wine prefix.", "error")
+        self.log("Affinity's SetupUI.exe crashes without it, which matches the JIT/debugger failures seen on Ubuntu.", "info")
+        if self.is_ubuntu_family_distro():
+            self.log("Ubuntu-family systems should use Wine 10.x during setup until the Wine 11 new WoW64 path is reliable here.", "info")
+        self.log("Aborting before launching the Affinity installer.", "info")
+        return False
+
     def _register_process(self, proc):
         """Track a running subprocess for potential cancellation."""
         try:
@@ -5811,8 +6511,16 @@ class AffinityInstallerGUI(QMainWindow):
         except Exception:
             pass
 
-    def run_command(self, command, check=True, shell=False, capture=True, env=None):
-        """Execute shell command with GUI sudo password support and cancellation."""
+    def run_command(
+        self, command, check=True, shell=False, capture=True, env=None, timeout=None
+    ):
+        """Execute shell command with GUI sudo password support and cancellation.
+
+        `timeout` is a hard deadline (seconds): the polling loops below check it
+        along with cancel_event, so a wedged command can no longer freeze the GUI
+        forever. Defaults to AFFINITY_STALL_TIMEOUT (30 min), or 1 h for sudo —
+        package installs are allowed to run long."""
+        proc = None
         try:
             # Convert command to list if it's a string
             if isinstance(command, str) and not shell:
@@ -5842,6 +6550,16 @@ class AffinityInstallerGUI(QMainWindow):
             # This prevents errors when askpass programs (like ksshaskpass) don't exist
             if is_sudo:
                 env.pop("SUDO_ASKPASS", None)  # Remove SUDO_ASKPASS if it exists
+
+            # Hard deadline for this command (see docstring).
+            if timeout is None:
+                timeout = 3600 if is_sudo else self.get_stall_timeout()
+            deadline = (time.monotonic() + timeout) if timeout else None
+            cmd_display = (
+                " ".join(str(c) for c in command[:6])
+                if isinstance(command, list)
+                else str(command)[:80]
+            )
 
             if is_sudo:
                 # Get password if needed
@@ -5894,144 +6612,61 @@ class AffinityInstallerGUI(QMainWindow):
                     stdout=subprocess.PIPE if capture else None,
                     stderr=subprocess.PIPE if capture else None,
                     text=True,
+                    errors="replace",  # never die on undecodable output
                     env=env,  # Use the modified env that has SUDO_ASKPASS removed
                     preexec_fn=os.setsid,
                 )
                 self._register_process(proc)
                 try:
-                    # Send password to sudo via stdin using communicate() which handles stdin properly
+                    # Hand the password over and close stdin right away, so the
+                    # loop below stays free to poll for cancellation and the
+                    # deadline (one blocking communicate() made Cancel a no-op).
                     password_input = f"{self.sudo_password}\n"
+                    try:
+                        proc.stdin.write(password_input)
+                        proc.stdin.close()
+                    except Exception:
+                        pass
 
-                    if capture:
-                        stdout_acc = ""
-                        stderr_acc = ""
-                        # Read output without timeout for long-running commands like package installation
-                        try:
-                            # Use communicate with input - this is the safest way
-                            out, err = proc.communicate(
-                                input=password_input, timeout=None
+                    stdout_acc = ""
+                    stderr_acc = ""
+                    while True:
+                        if self.cancel_event.is_set():
+                            self._terminate_process(proc)
+                            return False, stdout_acc, "Cancelled"
+                        if deadline is not None and time.monotonic() >= deadline:
+                            display = (
+                                " ".join(str(c) for c in command[:6])
+                                if isinstance(command, list)
+                                else str(command)[:80]
                             )
+                            self.log(
+                                f"Command timed out after {timeout}s: {display}",
+                                "error",
+                            )
+                            self._terminate_process(proc)
+                            return False, stdout_acc, f"Timed out after {timeout}s"
+                        try:
+                            out, err = proc.communicate(timeout=0.2)
+                        except subprocess.TimeoutExpired:
+                            continue
+                        except Exception as e:
+                            # Decode/closed-pipe race: the command itself may
+                            # still have succeeded, so trust its exit status.
+                            error_msg = str(e)
+                            if proc.poll() is None:
+                                self._terminate_process(proc)
+                            if proc.returncode == 0:
+                                return True, stdout_acc, stderr_acc
+                            self.log(
+                                f"Error during command execution ({type(e).__name__}): {error_msg}",
+                                "error",
+                            )
+                            return False, stdout_acc, error_msg
+                        if capture:
                             stdout_acc += out or ""
                             stderr_acc += err or ""
-                        except subprocess.TimeoutExpired:
-                            # This shouldn't happen with timeout=None, but handle it just in case
-                            if self.cancel_event.is_set():
-                                self._terminate_process(proc)
-                                return False, stdout_acc, "Cancelled"
-                            # Force read remaining output
-                            try:
-                                out, err = proc.communicate()
-                                stdout_acc += out or ""
-                                stderr_acc += err or ""
-                            except Exception:
-                                pass
-                        except Exception as e:
-                            # Catch all exceptions including "I/O operation on closed file"
-                            error_msg = str(e)
-                            error_type = type(e).__name__
-
-                            # Check if process completed successfully despite the error
-                            try:
-                                if proc.poll() is None:
-                                    # Process still running, wait a bit
-                                    proc.wait(timeout=2)
-                            except Exception:
-                                pass
-
-                            # If return code is 0, the operation succeeded despite the exception
-                            if proc.returncode == 0:
-                                # Try to read any remaining output
-                                try:
-                                    if proc.stdout and not proc.stdout.closed:
-                                        remaining = proc.stdout.read()
-                                        if remaining:
-                                            stdout_acc += remaining
-                                except Exception:
-                                    pass
-                                try:
-                                    if proc.stderr and not proc.stderr.closed:
-                                        remaining = proc.stderr.read()
-                                        if remaining:
-                                            stderr_acc += remaining
-                                except Exception:
-                                    pass
-                                # Operation succeeded, return success
-                                return True, stdout_acc, stderr_acc
-
-                            # Only report error if return code indicates failure
-                            if (
-                                "closed file" in error_msg.lower()
-                                or "I/O operation" in error_msg
-                            ):
-                                # This is often a harmless error if the process succeeded
-                                if proc.returncode == 0:
-                                    return True, stdout_acc, stderr_acc
-                                # If it failed, log it
-                                self.log(
-                                    f"Error during command execution ({error_type}): {error_msg}",
-                                    "error",
-                                )
-                            else:
-                                self.log(
-                                    f"Error during command execution ({error_type}): {error_msg}",
-                                    "error",
-                                )
-
-                            self._terminate_process(proc)
-                            return False, stdout_acc, stderr_acc or error_msg
-
-                        success = proc.returncode == 0
-                        return success, stdout_acc, stderr_acc
-                    else:
-                        # No capture: send password and wait for completion
-                        try:
-                            proc.communicate(input=password_input, timeout=None)
-                        except Exception as e:
-                            # Catch all exceptions including "I/O operation on closed file"
-                            error_msg = str(e)
-
-                            # Check if process completed successfully despite the error
-                            try:
-                                if proc.poll() is None:
-                                    proc.wait(timeout=2)
-                            except Exception:
-                                pass
-
-                            # If return code is 0, operation succeeded despite the exception
-                            if proc.returncode == 0:
-                                return True, "", ""
-
-                            # Only report error if return code indicates failure
-                            if (
-                                "closed file" in error_msg.lower()
-                                or "I/O operation" in error_msg
-                            ):
-                                # This is often a harmless error if the process succeeded
-                                if proc.returncode == 0:
-                                    return True, "", ""
-                                # If it failed, log it
-                                self.log(
-                                    f"Error during command execution: {error_msg}",
-                                    "error",
-                                )
-                            else:
-                                self.log(
-                                    f"Error during command execution: {error_msg}",
-                                    "error",
-                                )
-
-                            self._terminate_process(proc)
-                            return False, "", error_msg
-                        except subprocess.TimeoutExpired:
-                            # This shouldn't happen with timeout=None, but handle it just in case
-                            if self.cancel_event.is_set():
-                                self._terminate_process(proc)
-                                return False, "", "Cancelled"
-                            try:
-                                proc.communicate()
-                            except Exception:
-                                pass
-                        return proc.returncode == 0, "", ""
+                        return proc.returncode == 0, stdout_acc, stderr_acc
                 finally:
                     self._unregister_process(proc)
             else:
@@ -6044,6 +6679,7 @@ class AffinityInstallerGUI(QMainWindow):
                     stdout=subprocess.PIPE if capture else None,
                     stderr=subprocess.PIPE if capture else None,
                     text=capture,
+                    errors="replace" if capture else None,  # never die on undecodable output
                     env=env if env else os.environ.copy(),
                     preexec_fn=os.setsid,
                 )
@@ -6053,16 +6689,39 @@ class AffinityInstallerGUI(QMainWindow):
                         stdout_acc = ""
                         stderr_acc = ""
                         while True:
+                            if deadline is not None and time.monotonic() >= deadline:
+                                self._terminate_process(proc)
+                                self.log(
+                                    f"Command timed out after {timeout}s: {cmd_display}",
+                                    "error",
+                                )
+                                return (
+                                    False,
+                                    stdout_acc,
+                                    f"Timed out after {timeout}s",
+                                )
                             try:
-                                out, err = proc.communicate(timeout=0.1)
-                                stdout_acc += out or ""
-                                stderr_acc += err or ""
-                                break
+                                out, err = proc.communicate(timeout=0.2)
                             except subprocess.TimeoutExpired:
                                 if self.cancel_event.is_set():
                                     self._terminate_process(proc)
                                     return False, stdout_acc, "Cancelled"
                                 continue
+                            except Exception as e:
+                                # Decode/closed-pipe race: trust the exit status.
+                                error_msg = str(e)
+                                if proc.poll() is None:
+                                    self._terminate_process(proc)
+                                if proc.returncode == 0:
+                                    return True, stdout_acc, stderr_acc
+                                self.log(
+                                    f"Error during command execution ({type(e).__name__}): {error_msg}",
+                                    "error",
+                                )
+                                return False, stdout_acc, error_msg
+                            stdout_acc += out or ""
+                            stderr_acc += err or ""
+                            break
                         success = proc.returncode == 0
                         return success, stdout_acc, stderr_acc
                     else:
@@ -6070,6 +6729,13 @@ class AffinityInstallerGUI(QMainWindow):
                             if self.cancel_event.is_set():
                                 self._terminate_process(proc)
                                 return False, "", "Cancelled"
+                            if deadline is not None and time.monotonic() >= deadline:
+                                self._terminate_process(proc)
+                                self.log(
+                                    f"Command timed out after {timeout}s: {cmd_display}",
+                                    "error",
+                                )
+                                return False, "", f"Timed out after {timeout}s"
                             if proc.poll() is not None:
                                 break
                             time.sleep(0.1)
@@ -6077,16 +6743,72 @@ class AffinityInstallerGUI(QMainWindow):
                 finally:
                     self._unregister_process(proc)
         except Exception as e:
+            # Never leave the child behind: an orphaned wine/winecfg process is
+            # what makes the *next* run queue up and hang.
+            try:
+                if proc is not None:
+                    self._terminate_process(proc)
+            except Exception:
+                pass
             return False, "", str(e)
 
-    def run_command_streaming(self, command, env=None, progress_callback=None):
-        """Execute command and stream output to log in real-time, cancellable.
-        Also stores the full streamed text in self._last_stream_output_text for post-run heuristics."""
-        self._last_stream_output_text = ""
-        try:
-            if isinstance(command, str):
-                command = command.split()
+    @staticmethod
+    def _pump_child_output(stream, out_queue):
+        """Read a child's stdout line by line and push lines onto `out_queue`.
 
+        Runs in its own thread so the caller can keep polling for cancellation
+        and stalls while the child is silent. A `None` sentinel marks EOF.
+        """
+        try:
+            for line in iter(stream.readline, ""):
+                out_queue.put(line)
+        except Exception:
+            pass
+        finally:
+            try:
+                stream.close()
+            except Exception:
+                pass
+            out_queue.put(None)
+
+    def get_stall_timeout(self, default=1800):
+        """Seconds a streamed command may run without printing anything.
+
+        Override with the AFFINITY_STALL_TIMEOUT environment variable.
+        """
+        try:
+            value = int(os.environ.get("AFFINITY_STALL_TIMEOUT", ""))
+            if value > 0:
+                return value
+        except (TypeError, ValueError):
+            pass
+        return default
+
+    def run_command_streaming(
+        self, command, env=None, progress_callback=None, stall_timeout=None
+    ):
+        """Execute command and stream output to log in real-time, cancellable.
+
+        A reader thread decodes the child's output (leniently, so a stray
+        non-UTF-8 byte from Wine can never abort the run) while this loop:
+          * honours cancel_event even while the child prints nothing,
+          * kills the child once it has been silent for `stall_timeout`
+            seconds — winetricks wedged inside a .NET installer otherwise
+            blocks forever with the progress bar frozen at "Installing".
+
+        Also stores the full streamed text in self._last_stream_output_text
+        for post-run heuristics.
+        """
+        self._last_stream_output_text = ""
+        self._last_command_stalled = False
+        if stall_timeout is None:
+            stall_timeout = self.get_stall_timeout()
+        if isinstance(command, str):
+            command = command.split()
+        display_cmd = " ".join(str(part) for part in command[:8])
+
+        process = None
+        try:
             # Set up environment for non-interactive operation
             if env is None:
                 env = os.environ.copy()
@@ -6111,6 +6833,7 @@ class AffinityInstallerGUI(QMainWindow):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
+                errors="replace",  # never die on undecodable Wine output
                 bufsize=1,
                 universal_newlines=True,
                 env=env,
@@ -6118,18 +6841,62 @@ class AffinityInstallerGUI(QMainWindow):
             )
             self._register_process(process)
 
-            # Stream output line by line
+            # Stream output line by line without ever blocking indefinitely
+            lines = queue.Queue()
+            threading.Thread(
+                target=self._pump_child_output,
+                args=(process.stdout, lines),
+                daemon=True,
+            ).start()
+
             buffer = []
-            for line in iter(process.stdout.readline, ""):
+            last_output = time.monotonic()
+            warned_stall = False
+
+            while True:
                 if self.cancel_event.is_set():
                     self._terminate_process(process)
                     self._last_stream_output_text = "".join(buffer)
                     return False
+
+                try:
+                    line = lines.get(timeout=0.5)
+                except queue.Empty:
+                    idle = time.monotonic() - last_output
+                    if idle >= stall_timeout:
+                        self._last_command_stalled = True
+                        self.log(
+                            f"  ✗ No output from '{display_cmd}' for {int(idle)}s — "
+                            "assuming it is stuck and stopping it.",
+                            "error",
+                        )
+                        self.log(
+                            "  (Set AFFINITY_STALL_TIMEOUT to raise the limit, or "
+                            "check the last log lines above for the step it died on.)",
+                            "info",
+                        )
+                        self._terminate_process(process)
+                        self._last_stream_output_text = "".join(buffer)
+                        return False
+                    if not warned_stall and idle >= stall_timeout / 2:
+                        warned_stall = True
+                        self.log(
+                            f"  Waiting on '{display_cmd}' — no output for "
+                            f"{int(idle)}s (stall limit {stall_timeout}s)...",
+                            "warning",
+                        )
+                    continue
+
+                if line is None:  # EOF sentinel from the reader thread
+                    break
+
+                last_output = time.monotonic()
                 if line:
                     # Clean up the line and log it
                     line = line.rstrip()
                     if line:
                         buffer.append(line + "\n")
+                        warned_stall = False
                         # Show important progress messages
                         line_lower = line.lower()
                         # Always show progress-related messages
@@ -6158,8 +6925,6 @@ class AffinityInstallerGUI(QMainWindow):
 
                             # Try to extract progress percentage if callback provided
                             if progress_callback:
-                                import re
-
                                 percent_match = re.search(
                                     r"(\d+)\s*%", line, re.IGNORECASE
                                 )
@@ -6177,17 +6942,35 @@ class AffinityInstallerGUI(QMainWindow):
                             # Show other non-debug messages
                             self.log(f"  {line}", "info")
 
-            process.wait()
+            # Reader hit EOF: give the child a moment to exit on its own, but do
+            # not block forever if it hung up after closing its output.
+            try:
+                process.wait(timeout=60)
+            except subprocess.TimeoutExpired:
+                self.log(
+                    f"  '{display_cmd}' closed its output but is still running — "
+                    "stopping it.",
+                    "warning",
+                )
+                self._terminate_process(process)
             self._last_stream_output_text = "".join(buffer)
             return process.returncode == 0
         except Exception as e:
             self.log(f"Error running command: {e}", "error")
+            if process is not None:
+                # Never leave the child running on its own — orphaned winetricks
+                # runs are what wedge the next attempt.
+                try:
+                    self._terminate_process(process)
+                except Exception:
+                    pass
             return False
         finally:
-            try:
-                self._unregister_process(process)
-            except Exception:
-                pass
+            if process is not None:
+                try:
+                    self._unregister_process(process)
+                except Exception:
+                    pass
 
     def _to_windows_path(self, unix_path, env=None):
         """Convert a UNIX path to a Windows path for Wine 'start' using winepath.
@@ -6261,7 +7044,8 @@ class AffinityInstallerGUI(QMainWindow):
         2) If it exits too quickly or returns non-zero with no activity, try 'wine <file>'
         3) After launch, wait on 'wineserver -w' to ensure child processes finish (cancellable)
 
-        For Affinity v3, uses system wine instead of patched wine.
+        Affinity installers still use system Wine, but WebView2 must stay on the
+        same Wine runtime as the prefix to avoid wineserver/runtime mismatches.
         """
         # Check if this is Affinity v3 or WebView2 installer
         installer_name = installer_file.name.lower()
@@ -6275,12 +7059,19 @@ class AffinityInstallerGUI(QMainWindow):
         is_webview2 = "webview" in installer_name or "edge" in installer_name
 
         # Set Windows 11 before installing Affinity
+        # (clear leftovers first: a wedged process would make winecfg queue)
+        self.stop_prefix_wine_processes(env, reason="launching an installer")
         if is_affinity_v3 or is_affinity_v2:
             self.log(
                 "Setting Windows version to 11 before Affinity installation...", "info"
             )
             # Use system winecfg for Affinity installers (they use system wine)
             self.run_command(["winecfg", "-v", "win11"], check=False, env=env)
+            self.log("✓ Windows version set to 11", "success")
+        elif is_webview2:
+            webview2_tools = self.get_webview2_wine_tools()
+            self.log("Setting Windows version to 11 before WebView2 installation...", "info")
+            self.run_command([webview2_tools["winecfg"], "-v", "win11"], check=False, env=env)
             self.log("✓ Windows version set to 11", "success")
 
         # Use system Wine for Affinity installations (custom Wine doesn't work
@@ -6306,9 +7097,12 @@ class AffinityInstallerGUI(QMainWindow):
             else:
                 self.log("Using system Wine for Affinity installation", "info")
         elif is_webview2:
-            # Use system wine for WebView2
-            wine = "wine"
-            self.log("Using system Wine for WebView2 installation", "info")
+            webview2_tools = self.get_webview2_wine_tools()
+            wine = webview2_tools["wine"]
+            if webview2_tools["source"] == "bundled":
+                self.log("Using bundled installer Wine for WebView2 installation", "info")
+            else:
+                self.log("Using system Wine for WebView2 installation", "info")
         else:
             # Use custom Wine for other installers
             wine = str(self.get_wine_path("wine"))
@@ -6329,7 +7123,9 @@ class AffinityInstallerGUI(QMainWindow):
                 cmd_str = " ".join(shlex.quote(c) for c in cmd)
                 self.log(f"Running ({label}) attempt {idx}: {cmd_str}", "info")
                 t0 = time.time()
-                ok = self.run_command_streaming(cmd, env=env)
+                # Affinity/WebView2 installers print nothing while they work
+                # (WINEDEBUG is silenced), so give them a long leash.
+                ok = self.run_command_streaming(cmd, env=env, stall_timeout=3600)
                 dt = time.time() - t0
 
                 # For Affinity installers, check if installer is actually running despite exceptions
@@ -6480,7 +7276,7 @@ class AffinityInstallerGUI(QMainWindow):
                         try:
                             # Use timeout for wineserver wait (30 seconds max)
                             process = subprocess.Popen(
-                                ["wineserver", "-w"],
+                                [self.get_webview2_wine_tools()["wineserver"], "-w"],
                                 env=env_wait,
                                 stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE,
@@ -6705,13 +7501,19 @@ class AffinityInstallerGUI(QMainWindow):
             with open("/etc/os-release", "r") as f:
                 content = f.read()
 
+            raw_distro = None
+            distro_like = ""
             for line in content.split("\n"):
                 if line.startswith("ID="):
-                    self.distro = (
-                        line.split("=", 1)[1].strip().strip('"').lower()
-                    )
+                    raw_distro = line.split("=", 1)[1].strip().strip('"')
                 elif line.startswith("VERSION_ID="):
                     self.distro_version = line.split("=", 1)[1].strip().strip('"')
+                elif line.startswith("ID_LIKE="):
+                    distro_like = line.split("=", 1)[1].strip().strip('"')
+
+            self.raw_distro = raw_distro
+            self.distro_like = distro_like
+            self.distro = raw_distro.lower() if raw_distro else raw_distro
 
             # Normalize "pika" to "pikaos" if detected
             if self.distro == "pika":
@@ -6720,6 +7522,19 @@ class AffinityInstallerGUI(QMainWindow):
             # Normalize "pop" to "pop" if detected
             if self.distro == "pop":
                 self.distro = "pop"
+
+            distro_like_tokens = {token.strip().lower() for token in distro_like.replace(",", " ").split() if token.strip()}
+            if (
+                self.distro not in {"ubuntu", "linuxmint", "zorin", "pop"}
+                and "ubuntu" in distro_like_tokens
+            ):
+                detected_name = self.format_distro_name(self.distro)
+                self.log(
+                    f"Detected Ubuntu-compatible derivative: {detected_name}. Using Ubuntu dependency path.",
+                    "info"
+                )
+                self.distro = "ubuntu"
+
 
             return True
         except Exception as e:
@@ -7455,6 +8270,76 @@ class AffinityInstallerGUI(QMainWindow):
             return " ".join(env_vars) + " "
         return ""
 
+    def get_vulkan_device_select_env(self, gpu_id=None):
+        """Return Vulkan device-selection env vars for the selected GPU, when available."""
+        if gpu_id is None:
+            gpu_id = self.get_selected_gpu()
+
+        if not gpu_id or gpu_id == "auto":
+            return {}
+
+        match = re.match(r"^(nvidia|amd|intel)_(\d+)$", gpu_id)
+        if not match:
+            return {}
+
+        target_type = match.group(1)
+        target_index = int(match.group(2))
+
+        lspci_success, lspci_stdout, _ = self.run_command(
+            ["lspci", "-nn"],
+            check=False,
+            capture=True
+        )
+        if not lspci_success or not lspci_stdout:
+            return {}
+
+        def line_matches_gpu_type(line):
+            line_lower = line.lower()
+            if target_type == "nvidia":
+                return "nvidia" in line_lower
+            if target_type == "amd":
+                return any(keyword in line_lower for keyword in ("amd", "radeon", "amd/ati"))
+            if target_type == "intel":
+                return "intel" in line_lower
+            return False
+
+        gpu_lines = []
+        for line in lspci_stdout.splitlines():
+            line_lower = line.lower()
+            if not any(keyword in line_lower for keyword in ("vga", "3d controller", "display controller", "graphics")):
+                continue
+            if line_matches_gpu_type(line):
+                gpu_lines.append(line)
+
+        if not gpu_lines:
+            return {}
+
+        if target_index >= len(gpu_lines):
+            # Older saved GPU selections may use a stale index; fall back to the first match.
+            target_index = 0
+
+        pci_id_match = re.search(r"\[([0-9a-fA-F]{4}):([0-9a-fA-F]{4})\]", gpu_lines[target_index])
+        if not pci_id_match:
+            return {}
+
+        selector = f"{pci_id_match.group(1).lower()}:{pci_id_match.group(2).lower()}"
+        return {
+            "MESA_VK_DEVICE_SELECT": selector,
+            "MESA_VK_DEVICE_SELECT_FORCE_DEFAULT_DEVICE": "1",
+        }
+
+    def get_gpu_launch_prefix(self, gpu_id=None):
+        """Return an optional launch wrapper for the selected GPU."""
+        if gpu_id is None:
+            gpu_id = self.get_selected_gpu()
+
+        if gpu_id.startswith("nvidia_"):
+            switcherooctl = shutil.which("switcherooctl")
+            if switcherooctl:
+                return [switcherooctl, "launch", "env"]
+
+        return []
+
     def get_current_backend(self):
         """Detect which graphics backend is currently being used (dxvk or vkd3d)"""
         # Check preference first (applies to all GPU types)
@@ -7488,6 +8373,52 @@ class AffinityInstallerGUI(QMainWindow):
         ):
             return 'DXVK_ASYNC=0 DXVK_CONFIG="d3d9.deferSurfaceCreation = True; d3d9.shaderModel = 1" '
         return ""
+
+    def get_vulkan_runtime_env_vars(self, gpu_id=None):
+        """Return the Vulkan runtime environment shared by direct launches and desktop launchers."""
+        session_type = (os.environ.get("XDG_SESSION_TYPE") or "").lower()
+        if gpu_id is None:
+            gpu_id = self.get_selected_gpu()
+
+        env_vars = {
+            "DXVK_ASYNC": "0",
+            "DXVK_CONFIG": "d3d9.deferSurfaceCreation = True; d3d9.shaderModel = 1",
+            "DXVK_LOG_LEVEL": "none",
+            "VKD3D_DEBUG": "none",
+            "VKD3D_FEATURE_LEVEL": "12_1",
+            "VKD3D_SHADER_DEBUG": "none",
+            "VKD3D_SHADER_MODEL": "6_5",
+        }
+
+        if session_type == "wayland":
+            env_vars["VKD3D_DISABLE_EXTENSIONS"] = "VK_KHR_present_id,VK_KHR_present_wait"
+            if self.has_nvidia_gpu() and (gpu_id.startswith("nvidia_") or gpu_id == "auto"):
+                env_vars["VKD3D_CONFIG"] = "swapchain_legacy"
+        else:
+            env_vars["VKD3D_DISABLE_EXTENSIONS"] = "VK_KHR_present_id"
+
+        return env_vars
+
+    def get_desktop_launch_env_parts(self):
+        """Return desktop-launch env assignments for the currently selected GPU/backend."""
+        env_parts = []
+
+        gpu_env = self.get_gpu_env_vars()
+        if gpu_env:
+            env_parts.extend(gpu_env.strip().split())
+
+        if self.get_renderer_setting() == "vulkan":
+            for key, value in self.get_vulkan_runtime_env_vars().items():
+                if any(char.isspace() for char in value):
+                    env_parts.append(f'{key}="{value}"')
+                else:
+                    env_parts.append(f"{key}={value}")
+
+            vulkan_device_env = self.get_vulkan_device_select_env(self.get_selected_gpu())
+            for key, value in vulkan_device_env.items():
+                env_parts.append(f"{key}={value}")
+
+        return env_parts
 
     def _configure_gpu_selection_safe(self):
         """Configure GPU selection for dual GPU setups (safe UI slot)"""
@@ -7883,14 +8814,13 @@ class AffinityInstallerGUI(QMainWindow):
                                 wine = self.get_wine_path("wine")
                                 wine_path = str(wine)
 
-                                # Get GPU environment variables (but NOT DXVK)
-                                gpu_env = self.get_gpu_env_vars()
+                                desktop_env_parts = self.get_desktop_launch_env_parts()
                                 directory_str = str(self.directory).rstrip("/")
 
-                                # Rebuild Exec line WITHOUT DXVK env vars
+                                # Rebuild Exec line with the current launch environment
                                 exec_line = f"Exec=env WINEPREFIX={directory_str}"
-                                if gpu_env:
-                                    exec_line += f" {gpu_env.strip()}"
+                                if desktop_env_parts:
+                                    exec_line += f' {" ".join(desktop_env_parts)}'
                                 exec_line += f" {wine_path}"
                                 if app_path:
                                     if " " in app_path or not app_path.startswith("/"):
@@ -7924,6 +8854,7 @@ class AffinityInstallerGUI(QMainWindow):
 
             # Update button text
             self.update_switch_backend_button()
+            self.create_affinity_url_handler()
 
             self.show_message(
                 "Switch to VKD3D Complete",
@@ -8135,17 +9066,13 @@ class AffinityInstallerGUI(QMainWindow):
                                 wine = self.get_wine_path("wine")
                                 wine_path = str(wine)
 
-                                # Get GPU and DXVK environment variables
-                                gpu_env = self.get_gpu_env_vars()
-                                dxvk_env = self.get_dxvk_env_vars()
+                                desktop_env_parts = self.get_desktop_launch_env_parts()
                                 directory_str = str(self.directory).rstrip("/")
 
-                                # Rebuild Exec line with DXVK env vars
+                                # Rebuild Exec line with the current launch environment
                                 exec_line = f"Exec=env WINEPREFIX={directory_str}"
-                                if gpu_env:
-                                    exec_line += f" {gpu_env.strip()}"
-                                if dxvk_env:
-                                    exec_line += f" {dxvk_env.strip()}"
+                                if desktop_env_parts:
+                                    exec_line += f' {" ".join(desktop_env_parts)}'
                                 exec_line += f" {wine_path}"
                                 if app_path:
                                     if " " in app_path or not app_path.startswith("/"):
@@ -8180,6 +9107,7 @@ class AffinityInstallerGUI(QMainWindow):
 
             # Update button text
             self.update_switch_backend_button()
+            self.create_affinity_url_handler()
 
             self.show_message(
                 "Switch to DXVK Complete",
@@ -8205,10 +9133,9 @@ class AffinityInstallerGUI(QMainWindow):
         if not desktop_dir.exists():
             return
 
-        # Get current GPU environment variables
-        gpu_env = self.get_gpu_env_vars()
-        # Get DXVK environment variables if AMD GPU is detected
-        dxvk_env = self.get_dxvk_env_vars()
+        # Get current launch environment variables
+        desktop_env_parts = self.get_desktop_launch_env_parts()
+        launch_prefix = self.get_gpu_launch_prefix()
         directory_str = str(self.directory).rstrip("/")
 
         # Find all Affinity desktop entries
@@ -8258,26 +9185,23 @@ class AffinityInstallerGUI(QMainWindow):
                         wine_path = str(wine)
 
                         # Rebuild Exec line with new GPU env vars
-                        exec_line = f"Exec=env WINEPREFIX={directory_str}"
-                        if gpu_env:
-                            exec_line += f" {gpu_env.strip()}"
-                        if dxvk_env:
-                            exec_line += f" {dxvk_env.strip()}"
-                        exec_line += f" {wine_path}"
+                        exec_parts = ["Exec="]
+                        if launch_prefix:
+                            exec_parts.append(" ".join(shlex.quote(part) for part in launch_prefix))
+                        exec_parts.append(f"env WINEPREFIX={directory_str}")
+                        exec_parts.extend(desktop_env_parts)
+                        exec_parts.append(wine_path)
                         if app_path:
                             # Quote the app path if it contains spaces or special characters
                             if " " in app_path or not app_path.startswith("/"):
-                                exec_line += f' "{app_path}"'
+                                exec_parts.append(f'"{app_path}"')
                             else:
-                                exec_line += f" {app_path}"
+                                exec_parts.append(app_path)
                         else:
                             # If we couldn't parse app_path, log a warning but still update GPU env
-                            self.log(
-                                f"Warning: Could not parse app path from {desktop_file.name}, updating GPU env only",
-                                "warning",
-                            )
+                            self.log(f"Warning: Could not parse app path from {desktop_file.name}, updating GPU env only", "warning")
 
-                        new_lines.append(exec_line + "\n")
+                        new_lines.append(" ".join(exec_parts) + "\n")
                         exec_updated = True
                     else:
                         new_lines.append(line)
@@ -8299,6 +9223,9 @@ class AffinityInstallerGUI(QMainWindow):
             )
         else:
             self.log("No desktop entries found to update", "info")
+
+        # The affinity:// handler reuses the Exec= line of Affinity.desktop.
+        self.create_affinity_url_handler()
 
     def format_distro_name(self, distro=None):
         """Format distribution name for display with proper capitalization"""
@@ -8327,6 +9254,77 @@ class AffinityInstallerGUI(QMainWindow):
         return distro_names.get(
             distro.lower() if distro else "", distro.title() if distro else "Unknown"
         )
+
+    def is_ubuntu_family_distro(self, distro=None):
+        """Return True for distributions that should use the Ubuntu compatibility path"""
+        if distro is None:
+            distro = self.distro
+        return (distro or "").lower() in {"ubuntu", "linuxmint", "zorin", "pop"}
+
+    def get_recommended_wine_version(self):
+        """Return the preferred bundled Wine version for the current distro"""
+        if self.is_ubuntu_family_distro():
+            return "10.10"
+        return "11.0"
+
+    def get_wine_version_dialog_options(self):
+        """Return Wine version labels and descriptions for UI prompts"""
+        if self.is_ubuntu_family_distro():
+            return [
+                (
+                    "Wine 10.10 (Recommended)",
+                    "Stable bundled Wine build recommended on Ubuntu-family systems while Wine 11 new WoW64 issues are still affecting winetricks and Affinity setup."
+                ),
+                (
+                    "Wine 11.0",
+                    "Latest bundled Wine build with AMD GPU and OpenCL patches. Available, but not recommended on Ubuntu-family systems right now."
+                ),
+                (
+                    "Wine 9.14 (Legacy)",
+                    "Legacy version with AMD GPU and OpenCL patches. Fallback option if you encounter issues with newer versions."
+                ),
+            ]
+        return [
+            (
+                "Wine 11.0 (Recommended)",
+                "ElementalWarrior Wine 11.0 with AMD GPU and OpenCL patches. Latest version with best compatibility and performance for most systems."
+            ),
+            (
+                "Wine 10.10",
+                "ElementalWarrior Wine 10.10 with AMD GPU and OpenCL patches. Previous stable version."
+            ),
+            (
+                "Wine 9.14 (Legacy)",
+                "Legacy version with AMD GPU and OpenCL patches. Fallback option if you encounter issues with newer versions."
+            ),
+        ]
+
+    def get_wine_version_prompt_message(self):
+        """Build the shared Wine version chooser prompt"""
+        option_lines = []
+        for label, description in self.get_wine_version_dialog_options():
+            option_lines.append(f"• {label} - {description}")
+
+        note = "Note: You can switch versions later by running this setup again."
+        if self.is_ubuntu_family_distro():
+            note = (
+                "Note: Ubuntu-family systems currently default to Wine 10.10 here to avoid Wine 11 new WoW64 issues during setup. "
+                "You can switch versions later by running this setup again."
+            )
+
+        return "Which Wine version would you like to install?\n\n" + "\n".join(option_lines) + f"\n\n{note}"
+
+    def map_wine_dialog_choice_to_version(self, wine_choice):
+        """Map a dialog label back to an internal Wine version"""
+        if not wine_choice:
+            return None
+        if wine_choice.startswith("Wine 11.0"):
+            return "11.0"
+        if wine_choice.startswith("Wine 10.10"):
+            return "10.10"
+        if wine_choice.startswith("Wine 9.14"):
+            return "9.14"
+        return None
 
     def download_file(self, url, output_path, description=""):
         """Download file with progress tracking"""
@@ -9448,7 +10446,7 @@ class AffinityInstallerGUI(QMainWindow):
 
         # Install missing dependencies (only for supported distributions)
         # For Ubuntu/Mint/Zorin, always run WineHQ setup to ensure proper Wine version
-        if self.distro in ["ubuntu", "linuxmint", "zorin"]:
+        if self.is_ubuntu_family_distro():
             # Always run WineHQ setup for Ubuntu-based distros
             self.log(f"\nSetting up WineHQ for {self.format_distro_name()}...", "info")
             self.update_progress_text(
@@ -9575,7 +10573,7 @@ class AffinityInstallerGUI(QMainWindow):
             return self.install_pikaos_dependencies()
         if self.distro == "pop":
             return self.install_popos_dependencies()
-        if self.distro in ["ubuntu", "linuxmint", "zorin"]:
+        if self.is_ubuntu_family_distro():
             return self.install_ubuntu_based_dependencies()
 
         commands = {
@@ -10468,6 +11466,7 @@ class AffinityInstallerGUI(QMainWindow):
                 self.log(f"Setting up WineHQ staging for {distro_name}...\n", "info")
             return self.install_ubuntu_winehq_staging(codename)
 
+
     def install_ubuntu_official_wine(self, codename):
         """Install Wine using official Ubuntu repositories for 24.04+"""
         distro_name = self.format_distro_name()
@@ -10530,22 +11529,20 @@ class AffinityInstallerGUI(QMainWindow):
         )
         self.update_progress(current_step / total_steps)
         self.log("Installing remaining dependencies...", "info")
+        # apt aborts the whole transaction if any requested package does not exist.
+        # Ubuntu 26.04 no longer ships p7zip-full (7zip provides the 7z command)
+        # or dotnet-sdk-8.0, so only request what this release actually has.
+        remaining_packages = ["winetricks", "wget", "curl", "tar", "jq", "zstd"]
+        remaining_packages.append(
+            "p7zip-full" if self._apt_package_available("p7zip-full") else "7zip"
+        )
+        remaining_packages += [
+            pkg
+            for pkg in ("dotnet-sdk-8.0", "dotnet-sdk-10.0")
+            if self._apt_package_available(pkg)
+        ]
         success, _, _ = self.run_command(
-            [
-                "sudo",
-                "apt",
-                "install",
-                "-y",
-                "winetricks",
-                "wget",
-                "curl",
-                "p7zip-full",
-                "tar",
-                "jq",
-                "zstd",
-                "dotnet-sdk-8.0",
-                "dotnet-sdk-10.0",
-            ]
+            ["sudo", "apt", "install", "-y"] + remaining_packages
         )
         if not success:
             self.log("Failed to install remaining dependencies", "error")
@@ -10559,6 +11556,33 @@ class AffinityInstallerGUI(QMainWindow):
         self.update_progress_text(f"{distro_name} dependencies installed")
         self.log(f"All dependencies installed for {distro_name}", "success")
         return True
+
+    def _apt_package_available(self, package):
+        """Return True if apt has an install candidate for the package."""
+        success, stdout, _ = self.run_command(
+            ["apt-cache", "policy", package], check=False, capture=True
+        )
+        if not success or not stdout:
+            return False
+        for line in stdout.splitlines():
+            line = line.strip()
+            if line.startswith("Candidate:"):
+                return line.split(":", 1)[1].strip() not in ("", "(none)")
+        return False
+
+    def get_preferred_ubuntu_winehq_version(self, codename):
+        """Return the preferred WineHQ package version for Ubuntu-family systems"""
+        return f"10.20~{codename}-1"
+
+    def get_preferred_ubuntu_winehq_packages(self, codename):
+        """Return the pinned WineHQ staging package set used on Ubuntu-family systems"""
+        version = self.get_preferred_ubuntu_winehq_version(codename)
+        return [
+            f"winehq-staging={version}",
+            f"wine-staging={version}",
+            f"wine-staging-amd64={version}",
+            f"wine-staging-i386:i386={version}",
+        ]
 
     def install_ubuntu_winehq_staging(self, codename):
         """Install WineHQ staging for older Ubuntu versions (< 24.04)"""
@@ -10794,10 +11818,25 @@ class AffinityInstallerGUI(QMainWindow):
             f"Step {current_step}/{total_steps}: Installing WineHQ staging..."
         )
         self.update_progress(current_step / total_steps)
+        preferred_version = self.get_preferred_ubuntu_winehq_version(codename)
         self.log("Installing WineHQ staging...", "info")
-        success, stdout, stderr = self.run_command(
-            ["sudo", "apt", "install", "--install-recommends", "-y", "winehq-staging"]
-        )
+
+        available, stdout, _ = self.run_command(["apt-cache", "madison", "winehq-staging"], check=False)
+        pinned_packages = self.get_preferred_ubuntu_winehq_packages(codename)
+        if available and stdout and preferred_version in stdout:
+            self.log(
+                f"Pinning WineHQ staging to {preferred_version} to avoid Wine 11 new WoW64 issues on Ubuntu-family systems.",
+                "info"
+            )
+            wine_install_cmd = ["sudo", "apt", "install", "--install-recommends", "--allow-downgrades", "-y", *pinned_packages]
+        else:
+            self.log(
+                f"Preferred WineHQ version {preferred_version} is unavailable for {codename}. Falling back to the latest WineHQ staging package.",
+                "warning"
+            )
+            wine_install_cmd = ["sudo", "apt", "install", "--install-recommends", "-y", "winehq-staging"]
+
+        success, stdout, stderr = self.run_command(wine_install_cmd)
         if not success:
             self.log("Failed to install WineHQ staging", "error")
             if stdout:
@@ -10901,6 +11940,10 @@ class AffinityInstallerGUI(QMainWindow):
             self.run_command(["wineserver", "-k"], check=False, env=_env)
 
             if self.check_cancelled():
+                return False
+
+            if not self.backup_incomplete_ubuntu_prefix():
+                self.update_progress_text("Failed to prepare Wine prefix")
                 return False
 
             # Create directory
@@ -11143,7 +12186,8 @@ class AffinityInstallerGUI(QMainWindow):
             # Configure Wine
             self.update_progress_text("Configuring Wine with winetricks...")
             self.update_progress(0.90)
-            self.configure_wine()
+            if not self.configure_wine():
+                return False
 
             if self.check_cancelled():
                 return False
@@ -11640,6 +12684,39 @@ class AffinityInstallerGUI(QMainWindow):
         finally:
             self.end_operation()
 
+    def fix_canva_sign_in(self):
+        """Install what the Canva sign-in callback needs in an existing Affinity v3 prefix"""
+        if not self.affinity_v3_exe_path().exists():
+            QMessageBox.warning(self, "Affinity Not Found", f"Affinity v3 is not installed:\n{self.affinity_v3_exe_path()}")
+            return
+        wine_support = self.canva_sign_in_wine_support()
+        if wine_support == "unknown":
+            QMessageBox.warning(self, "Wine Not Found", "Could not run the Wine of this prefix.")
+            return
+        if wine_support == "unsupported":
+            self.remove_affinity_url_handler()
+            QMessageBox.information(
+                self,
+                "Wine Version Not Supported",
+                "The Canva sign-in fix supports Wine 9.14 and 10.10.\n\n"
+                "With Wine 11.12 the sign-in also needs the Windows WinMetadata and wintypes.dll, "
+                "which this installer only sets up for Wine 9.14 and 10.10.",
+            )
+            return
+        self.start_operation("Fix Canva Sign-in")
+        threading.Thread(target=self._fix_canva_sign_in_entry, daemon=True).start()
+
+    def _fix_canva_sign_in_entry(self):
+        """Wrapper: install the WinRT facades and the affinity:// handler, then end the operation."""
+        try:
+            facades_installed = self.install_windowsruntime_facades()
+            if self.create_affinity_url_handler() and facades_installed:
+                self.log("\n✓ Canva sign-in fix installed", "success")
+            else:
+                self.log("\n✗ Canva sign-in fix not installed, see the messages above", "error")
+        finally:
+            self.end_operation()
+
     def reinstall_winmetadata(self):
         """Remove old WinMetadata folder and reinstall fresh"""
         self.log(
@@ -11776,6 +12853,9 @@ class AffinityInstallerGUI(QMainWindow):
     def _reinstall_winmetadata_thread(self):
         """Reinstall WinMetadata in background thread"""
         self.refresh_winmetadata(context="reinstall")
+        if self.affinity_v3_exe_path().exists():
+            self.install_windowsruntime_facades()
+            self.create_affinity_url_handler()
 
         self.log("\n✓ WinMetadata reinstallation completed!", "success")
 
@@ -11923,21 +13003,13 @@ class AffinityInstallerGUI(QMainWindow):
         self.log("Installing DXVK via winetricks...", "info")
 
         env = os.environ.copy()
-        env["WINEPREFIX"] = self.directory
-        env["WINETRICKS_GUI"] = "0"
-        env["DISPLAY"] = env.get("DISPLAY", ":0")
-        env = self.get_winetricks_env_with_tkg(env)
+        env = self.get_winetricks_env(env)
+
+        # A leftover winetricks/Wine process would make this run queue behind it.
+        self.stop_prefix_wine_processes(env, reason="winetricks needs an idle prefix")
 
         success = self.run_command_streaming(
-            [
-                "winetricks",
-                "--unattended",
-                "--verbose",
-                "--force",
-                "--no-isolate",
-                "--optout",
-                "dxvk",
-            ],
+            self.build_winetricks_command("dxvk", verbose=False),
             env=env,
             progress_callback=None,
         )
@@ -12188,26 +13260,31 @@ class AffinityInstallerGUI(QMainWindow):
         """Set up DLL overrides for d3d12.dll and d3d12core.dll"""
         self.log("Setting up DLL overrides for d3d12...", "info")
 
-        reg_file = Path(self.directory) / "dll_overrides.reg"
-        with open(reg_file, "w") as f:
-            f.write("REGEDIT4\n")
-            f.write("[HKEY_CURRENT_USER\\Software\\Wine\\DllOverrides]\n")
-            f.write('"d3d12"="native"\n')
-            f.write('"d3d12core"="native"\n')
+        env = self.get_winetricks_env()
+        wine = self.get_wine_path("wine")
+        override_key = "HKEY_CURRENT_USER\\Software\\Wine\\DllOverrides"
+        override_failures = []
 
-        regedit = self.get_wine_path("regedit")
-        env = os.environ.copy()
-        env["WINEPREFIX"] = self.directory
+        for dll_name in ("d3d12", "d3d12core"):
+            success, _, stderr = self.run_command(
+                [str(wine), "reg", "add", override_key, "/v", dll_name, "/t", "REG_SZ", "/d", "native,builtin", "/f"],
+                check=False,
+                env=env,
+                capture=True
+            )
+            if success:
+                self.log(f"Configured DLL override for {dll_name}", "success")
+            else:
+                override_failures.append(f"{dll_name}: {stderr.strip() or 'unknown error'}")
 
-        success, _, stderr = self.run_command(
-            [str(regedit), str(reg_file)], check=False, env=env, capture=True
-        )
-        reg_file.unlink()
-
-        if success:
-            self.log("DLL overrides configured for d3d12", "success")
+        if override_failures:
+            self.log(
+                f"Warning: Could not configure all DLL overrides: {'; '.join(override_failures)}",
+                "warning"
+            )
         else:
-            self.log(f"Warning: Could not configure DLL overrides: {stderr}", "warning")
+            self.log("DLL overrides configured for d3d12", "success")
+
 
     def setup_dxvk_overrides(self):
         """
@@ -12219,10 +13296,7 @@ class AffinityInstallerGUI(QMainWindow):
         self.log("Verifying DXVK installation via winetricks...", "info")
 
         env = os.environ.copy()
-        env["WINEPREFIX"] = self.directory
-        env["WINETRICKS_GUI"] = "0"
-        env["DISPLAY"] = env.get("DISPLAY", ":0")
-        env = self.get_winetricks_env_with_tkg(env)
+        env = self.get_winetricks_env(env)
 
         wine = self.get_wine_path("wine")
 
@@ -12261,10 +13335,7 @@ class AffinityInstallerGUI(QMainWindow):
         self.log("Removing DXVK via winetricks...", "info")
 
         env = os.environ.copy()
-        env["WINEPREFIX"] = self.directory
-        env["WINETRICKS_GUI"] = "0"
-        env["DISPLAY"] = env.get("DISPLAY", ":0")
-        env = self.get_winetricks_env_with_tkg(env)
+        env = self.get_winetricks_env(env)
 
         wine = self.get_wine_path("wine")
 
@@ -12468,49 +13539,34 @@ class AffinityInstallerGUI(QMainWindow):
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         )
 
-        # Ensure wine-tkg is available for winetricks
-        self.log("Setting up wine-tkg for winetricks...", "info")
-        sys.stderr.write("\n[WINE-TKG] Calling ensure_wine_tkg() for winetricks...\n")
-        sys.stderr.flush()
-        wine_tkg_result = self.ensure_wine_tkg()
-        sys.stderr.write(f"[WINE-TKG] ensure_wine_tkg() returned: {wine_tkg_result}\n")
-        sys.stderr.flush()
-        if not wine_tkg_result:
-            error_msg = "Failed to setup wine-tkg, continuing with system wine"
-            sys.stderr.write(f"[WINE-TKG] WARNING: {error_msg}\n")
-            sys.stderr.flush()
-            self.log(error_msg, "warning")
+        env = self.get_winetricks_env()
 
-        env = os.environ.copy()
-        env["WINEPREFIX"] = self.directory
-        # Prevent winetricks from showing GUI dialogs
-        env["WINETRICKS_GUI"] = "0"
-        env["DISPLAY"] = env.get(
-            "DISPLAY", ":0"
-        )  # Ensure display is set but winetricks won't use GUI
-
-        # Use wine-tkg for winetricks if available
-        env = self.get_winetricks_env_with_tkg(env)
 
         wine_cfg = self.get_wine_path("winecfg")
 
-        components = [
-            "dotnet35sp1",
-            "dotnet48",
-            "corefonts",
-            "vcrun2022",
-            "msxml3",
-            "msxml6",
-            "tahoma",
-            "renderer=vulkan",
-            "crypt32",
-        ]
+        components = [component for component, _ in WINETRICKS_COMPONENTS]
+
+        # Clear out anything still holding the prefix (a wedged installer from a
+        # previous attempt, an abandoned winetricks, a wineserver from another
+        # Wine build) — otherwise Windows Installer keeps the next run waiting.
+        self.stop_prefix_wine_processes(
+            env, reason="winetricks needs an idle prefix"
+        )
 
         self.log(
             "Installing Wine components (this may take several minutes)...", "info"
         )
         total_components = len(components)
         for idx, component in enumerate(components):
+            if self.cancel_event.is_set():
+                return False
+
+            # Every verb starts from a quiet prefix: leftovers from the previous
+            # verb are what make Windows Installer queue and the run hang.
+            self.stop_prefix_wine_processes(
+                env, reason=f"starting '{component}'"
+            )
+
             # Calculate base progress for this component (0.0 to 1.0 across all components)
             base_progress = idx / total_components
             component_progress_range = 1.0 / total_components
@@ -12533,25 +13589,34 @@ class AffinityInstallerGUI(QMainWindow):
                 self.update_progress(overall_progress)
 
             # Use streaming to show progress
-            self.run_command_streaming(
-                [
-                    "winetricks",
-                    "--unattended",
-                    "--verbose",
-                    "--force",
-                    "--no-isolate",
-                    "--optout",
-                    component,
-                ],
+            component_ok = self.run_command_streaming(
+                self.build_winetricks_command(component),
                 env=env,
                 progress_callback=update_component_progress,
+                stall_timeout=1200,
             )
+            if not component_ok and not self.cancel_event.is_set():
+                if self._last_command_stalled:
+                    self._stalled_components.add(component)
+                    self.log(
+                        f"'{component}' stalled — Wine stopped responding and was stopped.",
+                        "error",
+                    )
+                    self.log(
+                        "If this repeats, re-run Wine setup with Wine 10.10 (Wine 11+ new WoW64 hangs winetricks).",
+                        "warning",
+                    )
+                else:
+                    self.log(f"'{component}' failed — continuing with the rest", "warning")
 
             # Mark this component as complete
             self.update_progress(base_progress + component_progress_range)
 
         # Set Windows version to 11
         self.log("Setting Windows version to 11...", "info")
+        # A leftover process would make winecfg queue behind it (or talk to a
+        # wineserver belonging to a different Wine build).
+        self.stop_prefix_wine_processes(env, reason="setting Windows version")
         self.run_command([str(wine_cfg), "-v", "win11"], check=False, env=env)
 
         # Apply dark theme
@@ -12566,8 +13631,14 @@ class AffinityInstallerGUI(QMainWindow):
             self.run_command([str(regedit), str(theme_file)], check=False, env=env)
             theme_file.unlink()
 
+        if not self.verify_required_wine_runtimes():
+            self.update_progress_text("Missing required Wine runtimes")
+            return False
+
         self.log("Wine configuration completed", "success")
         self.update_progress_text("Ready")
+        return True
+
 
     def show_main_menu(self):
         """Display main application menu"""
@@ -13417,188 +14488,113 @@ Would you like to continue with {distro_name} anyway?"""
         """Install winetricks dependencies in thread"""
         try:
             if self.check_cancelled():
-                return
+                return False
 
-            # Ensure wine-tkg is available for winetricks
-            self.log("Setting up wine-tkg for winetricks...", "info")
-            if not self.ensure_wine_tkg():
-                self.log(
-                    "Failed to setup wine-tkg, continuing with system wine", "warning"
-                )
+            env = self.get_winetricks_env()
+            wine_cfg = self.get_wine_path("winecfg")
+            components = list(WINETRICKS_COMPONENTS)
 
-            env = os.environ.copy()
-            env["WINEPREFIX"] = self.directory
-            # Prevent winetricks from showing GUI dialogs
-            env["WINETRICKS_GUI"] = "0"
-            env["DISPLAY"] = env.get(
-                "DISPLAY", ":0"
-            )  # Ensure display is set but winetricks won't use GUI
+            had_failures = False
 
-            # Use wine-tkg for winetricks if available
-            env = self.get_winetricks_env_with_tkg(env)
-
-            components = [
-                ("dotnet35sp1", ".NET Framework 3.5 SP1"),
-                ("dotnet48", ".NET Framework 4.8"),
-                ("corefonts", "Windows Core Fonts"),
-                ("vcrun2022", "Visual C++ Redistributables 2022"),
-                ("msxml3", "MSXML 3.0"),
-                ("msxml6", "MSXML 6.0"),
-                ("crypt32", "Cryptographic API 32"),
-                ("tahoma", "Tahoma Font"),
-                ("renderer=vulkan", "Vulkan Renderer"),
-            ]
-        except Exception as e:
-            self.log(
-                f"Error in winetricks dependencies installation: {str(e)}", "error"
-            )
-            self.log("Please check the logs and try again.", "error")
-            self.end_operation()
-            return
-
-        self.log(
-            "Installing Wine components (this may take several minutes)...", "info"
-        )
-
-        total_components = len(components)
-        for idx, (component, description) in enumerate(components):
-            # Calculate base progress for this component (0.0 to 1.0 across all components)
-            base_progress = idx / total_components
-            component_progress_range = 1.0 / total_components
-
-            # Update progress label to show current component
-            self.update_progress_text(
-                f"Installing: {description} ({idx + 1}/{total_components})"
-            )
-
-            self.log(
-                f"Installing {description} ({component})... [{idx + 1}/{total_components}]",
-                "info",
-            )
-            self.log(
-                "  (This may take several minutes - progress will be shown below)",
-                "info",
-            )
-
-            # Progress callback that updates based on component progress
-            def update_component_progress(percent):
-
-                # Update progress label to show current component
-                self.update_progress_text(
-                    f"Installing: {description} ({idx + 1}/{total_components})"
-                )
-
-                self.log(
-                    f"Installing {description} ({component})... [{idx + 1}/{total_components}]",
-                    "info",
-                )
-                self.log(
-                    "  (This may take several minutes - progress will be shown below)",
-                    "info",
-                )
-
-                # Progress callback that updates based on component progress
+            def make_progress_callback(base_progress, component_progress_range):
                 def update_component_progress(percent):
-                    # percent is 0.0-1.0 for this component
-                    # Map it to overall progress
-                    overall_progress = base_progress + (
-                        percent * component_progress_range
-                    )
+                    overall_progress = base_progress + (percent * component_progress_range)
                     self.update_progress(overall_progress)
+                return update_component_progress
 
-                # Check for cancellation before starting installation
+            self.log("Installing Wine components (this may take several minutes)...", "info")
+
+            # Clear out anything still holding the prefix (a wedged installer
+            # from a previous attempt, an abandoned winetricks, a wineserver
+            # from another Wine build) before Windows Installer is touched.
+            self.stop_prefix_wine_processes(
+                env, reason="winetricks needs an idle prefix"
+            )
+
+            total_components = len(components)
+            for idx, (component, description) in enumerate(components):
                 if self.check_cancelled():
-                    return
+                    return False
 
-                # Use streaming to show progress in real-time
-                # Keep --unattended to prevent dialogs, but remove it for verbose output
-                # We'll use verbose mode to see progress
-                try:
-                    success = self.run_command_streaming(
-                        [
-                            "winetricks",
-                            "--unattended",
-                            "--verbose",
-                            "--force",
-                            "--no-isolate",
-                            "--optout",
-                            component,
-                        ],
-                        env=env,
-                        progress_callback=update_component_progress,
-                    )
+                # Every verb starts from a quiet prefix: leftovers from the
+                # previous verb are what make Windows Installer queue and hang.
+                self.stop_prefix_wine_processes(
+                    env, reason=f"starting '{component}'"
+                )
 
-                    if success and not self.check_cancelled():
-                        self.log(f"✓ {description} installed", "success")
-                    elif not success and not self.check_cancelled():
-                        # If installation failed, try once more with force
+                base_progress = idx / total_components
+                component_progress_range = 1.0 / total_components
+                progress_callback = make_progress_callback(base_progress, component_progress_range)
+
+                self.update_progress_text(f"Installing: {description} ({idx + 1}/{total_components})")
+                self.log(f"Installing {description} ({component})... [{idx + 1}/{total_components}]", "info")
+                self.log("  (This may take several minutes - progress will be shown below)", "info")
+
+                command = self.build_winetricks_command(component)
+                success = self.run_command_streaming(
+                    command,
+                    env=env,
+                    progress_callback=progress_callback,
+                    stall_timeout=1200,
+                )
+
+                stalled = self._last_command_stalled
+                if not success and not self.check_cancelled():
+                    if stalled and component in self._stalled_components:
+                        # Second stall of the same verb: another attempt would
+                        # just burn another 20 minutes on the same deadlock.
                         self.log(
-                            f"⚠ {description} installation failed, retrying...",
+                            f"{description} stalled twice in a row — not retrying it.",
+                            "error",
+                        )
+                        self.log(
+                            "This is the known Wine 11+ new WoW64 hang: the 64-bit ngen.exe never returns.",
+                            "info",
+                        )
+                        self.log(
+                            "Close the installer, re-run Wine setup with Wine 10.10, then try again.",
                             "warning",
                         )
-                        time.sleep(2)  # Brief pause before retry
-
-                        self.log(f"Retrying {description} installation...", "info")
-                        retry_success = self.run_command_streaming(
-                            [
-                                "winetricks",
-                                "--unattended",
-                                "--verbose",
-                                "--force",
-                                "--no-isolate",
-                                "--optout",
-                                component,
-                            ],
-                            env=env,
-                            progress_callback=update_component_progress,
+                    else:
+                        if stalled:
+                            self._stalled_components.add(component)
+                        self.log(f"{description} installation failed, retrying once...", "warning")
+                        # A failed run can leave a half-finished installer behind;
+                        # clear it out so the retry does not queue behind it.
+                        self.stop_prefix_wine_processes(
+                            env, reason="retrying after a failed/stalled run"
                         )
+                        time.sleep(2)
+                        success = self.run_command_streaming(
+                            command,
+                            env=env,
+                            progress_callback=progress_callback,
+                            stall_timeout=1200,
+                        )
+                        if not success and self._last_command_stalled:
+                            self._stalled_components.add(component)
 
-                        # Mark component as complete after retry
-                        self.update_progress(base_progress + component_progress_range)
+                self.update_progress(base_progress + component_progress_range)
 
-                        if retry_success:
-                            self.log(
-                                f"✓ {description} installed successfully on retry",
-                                "success",
-                            )
-                        else:
-                            # Check if it might already be installed by checking the component
-                            if self._check_winetricks_component(
-                                component.split("=")[0]
-                                if "=" in component
-                                else component,
-                                self.get_wine_path("wine"),
-                                env,
-                            ):
-                                self.log(
-                                    f"✓ {description} appears to already be installed",
-                                    "success",
-                                )
-                            else:
-                                self.log(
-                                    f"✗ {description} installation failed after retry. You may need to install manually.",
-                                    "error",
-                                )
+                component_key = component.split("=", 1)[0]
+                if success:
+                    self.log(f"✓ {description} installed", "success")
+                    continue
 
-                except Exception as e:
-                    if not self.check_cancelled():
-                        self.log(f"Error during Winetricks installation: {e}", "error")
-                finally:
-                    # Make sure to end the operation even if there was an error or cancellation
-                    if (
-                        hasattr(self, "current_operation")
-                        and self.current_operation
-                        == "Installing Winetricks Dependencies"
-                    ):
-                        self.end_operation()
-                    # Windows 11 compatibility will be set below
+                if self._check_winetricks_component(component_key, self.get_wine_path("wine"), env):
+                    self.log(f"✓ {description} appears to already be installed", "success")
+                    continue
 
-            # Set Windows version to 11
-            wine_cfg = self.get_wine_path("winecfg")
+                had_failures = True
+                self.log(f"✗ {description} installation failed after retry. You may need to install it manually.", "error")
+
+            if self.check_cancelled():
+                return False
+
             self.log("Setting Windows version to 11...", "info")
+            self.stop_prefix_wine_processes(env, reason="setting Windows version")
             self.run_command([str(wine_cfg), "-v", "win11"], check=False, env=env)
 
-            # Apply dark theme
             self.log("Applying Wine dark theme...", "info")
             theme_file = Path(self.directory) / "wine-dark-theme.reg"
             if self.download_file(
@@ -13611,9 +14607,27 @@ Would you like to continue with {distro_name} anyway?"""
                 theme_file.unlink()
                 self.log("Dark theme applied", "success")
 
-            self.log("\n✓ Winetricks dependencies installation completed!", "success")
+
+            if not self.verify_required_wine_runtimes():
+                self.update_progress_text("Missing required Wine runtimes")
+                return False
+
+            if had_failures:
+                self.log("Winetricks dependencies completed with warnings. Check the log above for any manual follow-up.", "warning")
+            else:
+                self.log("\n✓ Winetricks dependencies installation completed!", "success")
+
+            self.update_progress(1.0)
             self.update_progress_text("Ready")
-            self.end_operation()
+            return not had_failures
+        except Exception as e:
+            self.log(f"Error in winetricks dependencies installation: {str(e)}", "error")
+            self.log("Please check the logs and try again.", "error")
+            return False
+        finally:
+            if hasattr(self, "current_operation") and self.current_operation == "Installing Winetricks Dependencies":
+                self.end_operation()
+
 
     def _seed_settings(self, settings_source, target_dir):
         """Copy the repository's stock Settings in without overwriting the user's.
@@ -13752,14 +14766,7 @@ Would you like to continue with {distro_name} anyway?"""
                 if install == 1:
                     return True
             elif component == "dotnet48":
-                # Check for .NET 4.8 in registry
-                release = self._read_wine_reg_value(
-                    "HKLM",
-                    r"Software\Microsoft\NET Framework Setup\NDP\v4\Full",
-                    "Release",
-                )
-                if isinstance(release, int) and release >= 528040:  # .NET 4.8
-                    return True
+                return self.has_dotnet48_runtime()
             elif component == "corefonts":
                 # Check if core fonts directory exists
                 fonts_dir = Path(self.directory) / "drive_c" / "windows" / "Fonts"
@@ -13862,6 +14869,83 @@ Would you like to continue with {distro_name} anyway?"""
 
         return False
 
+    def get_webview2_install_env(self, base_env=None):
+        """Build a consistent Wine environment for WebView2 installation and launch."""
+        env = os.environ.copy() if base_env is None else base_env.copy()
+        env["WINEPREFIX"] = self.directory
+
+        local_wine = self.get_wine_path("wine")
+        local_wineserver = self.get_wine_path("wineserver")
+        if local_wine.exists():
+            env["WINE"] = str(local_wine)
+            env["WINELOADER"] = str(local_wine)
+            env["PATH"] = f"{local_wine.parent}:{env.get('PATH', '')}"
+            if local_wineserver.exists():
+                env["WINESERVER"] = str(local_wineserver)
+        return env
+
+    def get_webview2_wine_tools(self):
+        """Return Wine tools for WebView2, preferring the bundled installer Wine."""
+        local_wine = self.get_wine_path("wine")
+        local_winecfg = self.get_wine_path("winecfg")
+        local_regedit = self.get_wine_path("regedit")
+        local_wineserver = self.get_wine_path("wineserver")
+
+        if local_wine.exists():
+            return {
+                "wine": str(local_wine),
+                "winecfg": str(local_winecfg) if local_winecfg.exists() else "winecfg",
+                "regedit": str(local_regedit) if local_regedit.exists() else "regedit",
+                "wineserver": str(local_wineserver) if local_wineserver.exists() else "wineserver",
+                "source": "bundled",
+            }
+
+        return {
+            "wine": "wine",
+            "winecfg": "winecfg",
+            "regedit": "regedit",
+            "wineserver": "wineserver",
+            "source": "system",
+        }
+
+    def configure_webview2_runtime(self, env=None):
+        """Apply the post-install WebView2 configuration used by Affinity v3."""
+        env = self.get_webview2_install_env(env)
+        tools = self.get_webview2_wine_tools()
+        regedit = tools["regedit"]
+        wine = tools["wine"]
+
+        self.log("Ensuring Edge Update services are disabled...", "info")
+        disable_edge_update_reg = Path(self.directory) / "disable-edge-update.reg"
+        with open(disable_edge_update_reg, "w") as f:
+            f.write("Windows Registry Editor Version 5.00\n\n")
+            f.write("[HKEY_LOCAL_MACHINE\\System\\CurrentControlSet\\Services\\edgeupdate]\n")
+            f.write("\"Start\"=dword:00000004\n\n")
+            f.write("[HKEY_LOCAL_MACHINE\\System\\CurrentControlSet\\Services\\edgeupdatem]\n")
+            f.write("\"Start\"=dword:00000004\n")
+
+        self.run_command([str(regedit), str(disable_edge_update_reg)], check=False, env=env)
+        disable_edge_update_reg.unlink()
+
+        # With Wine 10.10 and msedgewebview2.exe as Windows 11, the WebView2 GPU
+        # process fails at startup and the Affinity v3 Help window stays empty.
+        # As Windows 7 it renders.
+        self.log("Setting msedgewebview2.exe to Windows 7 compatibility...", "info")
+        self.run_command(
+            [
+                str(wine), "reg", "add",
+                "HKEY_CURRENT_USER\\Software\\Wine\\AppDefaults\\msedgewebview2.exe",
+                "/v", "Version",
+                "/d", "win7",
+                "/f",
+            ],
+            check=False,
+            env=env,
+            capture=True,
+        )
+
+        return True
+
     def install_webview2_runtime(self):
         """Install Microsoft Edge WebView2 Runtime for Affinity v3 (Unified)"""
         self.log(
@@ -13872,15 +14956,13 @@ Would you like to continue with {distro_name} anyway?"""
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         )
 
-        # Check if system Wine is available (WebView2 uses system wine, not patched wine)
-        if not shutil.which("wine"):
-            self.log(
-                "System Wine is not installed. Please install Wine first.", "error"
-            )
+        tools = self.get_webview2_wine_tools()
+        if tools["source"] == "system" and not shutil.which("wine"):
+            self.log("No Wine runtime is available for WebView2 installation.", "error")
             QMessageBox.warning(
                 self,
                 "Wine Not Installed",
-                "System Wine is required for WebView2 Runtime installation.\n\n"
+                "Wine is required for WebView2 Runtime installation.\n\n"
                 "Please install Wine using your distribution's package manager:\n"
                 "  • Arch/Artix/CachyOS/EndeavourOS/XeroLinux: sudo pacman -S wine\n"
                 "  • Fedora/Nobara: sudo dnf install wine\n"
@@ -13903,30 +14985,20 @@ Would you like to continue with {distro_name} anyway?"""
 
     def _install_webview2_runtime_thread(self):
         """Install Microsoft Edge WebView2 Runtime in background thread"""
-        # Check if system Wine is available (WebView2 uses system wine, not patched wine)
-        if not shutil.which("wine"):
-            self.log(
-                "System Wine is not installed. Please install Wine first.", "error"
-            )
-            self.log(
-                "You can install Wine using your distribution's package manager.",
-                "info",
-            )
+        tools = self.get_webview2_wine_tools()
+        if tools["source"] == "system" and not shutil.which("wine"):
+            self.log("No Wine runtime is available for WebView2 installation.", "error")
+            self.log("You can install Wine using your distribution's package manager.", "info")
             return False
 
-        env = os.environ.copy()
-        env["WINEPREFIX"] = self.directory
+        env = self.get_webview2_install_env()
+        wine_cfg = tools["winecfg"]
+        wine = tools["wine"]
 
-        # Use system wine tools for WebView2 (not patched wine)
-        wine_cfg = "winecfg"
-        regedit = "regedit"
-        wine = "wine"
-
-        self.log(
-            f"Using system Wine for WebView2 installation (WINEPREFIX={self.directory})",
-            "info",
-        )
-
+        if tools["source"] == "bundled":
+            self.log(f"Using bundled installer Wine for WebView2 installation (WINEPREFIX={self.directory})", "info")
+        else:
+            self.log(f"Using system Wine for WebView2 installation (WINEPREFIX={self.directory})", "info")
         # Check if WebView2 Runtime is already installed
         self.log("Checking if WebView2 Runtime is already installed...", "info")
         webview2_installed = False
@@ -13981,45 +15053,7 @@ Would you like to continue with {distro_name} anyway?"""
                 "WebView2 Runtime is already installed. Skipping installation.", "info"
             )
             self.log("Verifying configuration...", "info")
-
-            # Still configure the compatibility settings even if already installed
-            # Step 1: Disable Microsoft Edge Update services (if not already done)
-            self.log("Ensuring Edge Update services are disabled...", "info")
-            disable_edge_update_reg = Path(self.directory) / "disable-edge-update.reg"
-            with open(disable_edge_update_reg, "w") as f:
-                f.write("Windows Registry Editor Version 5.00\n\n")
-                f.write(
-                    "[HKEY_LOCAL_MACHINE\\System\\CurrentControlSet\\Services\\edgeupdate]\n"
-                )
-                f.write('"Start"=dword:00000004\n\n')
-                f.write(
-                    "[HKEY_LOCAL_MACHINE\\System\\CurrentControlSet\\Services\\edgeupdatem]\n"
-                )
-                f.write('"Start"=dword:00000004\n')
-
-            self.run_command(
-                [str(regedit), str(disable_edge_update_reg)], check=False, env=env
-            )
-            disable_edge_update_reg.unlink()
-
-            # Step 2: Set msedgewebview2.exe to Windows 7 compatibility (if not already set)
-            self.log(
-                "Ensuring msedgewebview2.exe Windows 7 compatibility is set...", "info"
-            )
-            webview2_win7_reg = Path(self.directory) / "webview2-win7-cap.reg"
-            with open(webview2_win7_reg, "w") as f:
-                f.write("Windows Registry Editor Version 5.00\n\n")
-                f.write("[HKEY_CURRENT_USER\\Software\\Wine\\AppDefaults]\n\n")
-                f.write(
-                    "[HKEY_CURRENT_USER\\Software\\Wine\\AppDefaults\\msedgewebview2.exe]\n"
-                )
-                f.write('"Version"="win7"\n')
-
-            self.run_command(
-                [str(regedit), str(webview2_win7_reg)], check=False, env=env
-            )
-            webview2_win7_reg.unlink()
-
+            self.configure_webview2_runtime(env)
             self.log("\n✓ WebView2 Runtime configuration verified!", "success")
             self.log("WebView2 Runtime is installed and configured correctly.", "info")
             return True
@@ -14030,6 +15064,7 @@ Would you like to continue with {distro_name} anyway?"""
         try:
             # Step 1: Set Windows 11 compatibility mode
             self.log("Setting Windows 11 compatibility mode...", "info")
+            self.stop_prefix_wine_processes(env, reason="setting Windows version")
             self.run_command([str(wine_cfg), "-v", "win11"], check=False, env=env)
             self.log("Windows 11 compatibility mode set", "success")
 
@@ -14051,14 +15086,13 @@ Would you like to continue with {distro_name} anyway?"""
             # Step 3: Install WebView2 Runtime using system wine (like Affinity v3)
             self.log("Installing Microsoft Edge WebView2 Runtime...", "info")
             self.log("This may take a few minutes...", "info")
-            self.log("Using system Wine for WebView2 installation", "info")
+            if tools["source"] == "bundled":
+                self.log("Using bundled installer Wine for WebView2 installation", "info")
+            else:
+                self.log("Using system Wine for WebView2 installation", "info")
             env["WINEDEBUG"] = "-all"
 
-            # Use system wine for WebView2 installer (like Affinity v3)
-            # Use the installer capture method which has better timeout handling
-            success = self._run_installer_and_capture(
-                webview2_file, env, label="WebView2 installer"
-            )
+            success = self._run_installer_and_capture(webview2_file, env, label="WebView2 installer")
             if not success:
                 self.log(
                     "WebView2 installer may have completed despite non-zero exit code",
@@ -14069,43 +15103,8 @@ Would you like to continue with {distro_name} anyway?"""
             time.sleep(3)
             self.log("WebView2 Runtime installation completed", "success")
 
-            # Step 4: Disable Microsoft Edge Update services
-            self.log("Disabling Microsoft Edge Update services...", "info")
-            disable_edge_update_reg = Path(self.directory) / "disable-edge-update.reg"
-            with open(disable_edge_update_reg, "w") as f:
-                f.write("Windows Registry Editor Version 5.00\n\n")
-                f.write(
-                    "[HKEY_LOCAL_MACHINE\\System\\CurrentControlSet\\Services\\edgeupdate]\n"
-                )
-                f.write('"Start"=dword:00000004\n\n')
-                f.write(
-                    "[HKEY_LOCAL_MACHINE\\System\\CurrentControlSet\\Services\\edgeupdatem]\n"
-                )
-                f.write('"Start"=dword:00000004\n')
-
-            self.run_command(
-                [str(regedit), str(disable_edge_update_reg)], check=False, env=env
-            )
-            disable_edge_update_reg.unlink()
-            self.log("Edge Update services disabled", "success")
-
-            # Step 5: Set msedgewebview2.exe to Windows 7 compatibility
-            self.log("Setting msedgewebview2.exe to Windows 7 compatibility...", "info")
-            webview2_win7_reg = Path(self.directory) / "webview2-win7-cap.reg"
-            with open(webview2_win7_reg, "w") as f:
-                f.write("Windows Registry Editor Version 5.00\n\n")
-                f.write("[HKEY_CURRENT_USER\\Software\\Wine\\AppDefaults]\n\n")
-                f.write(
-                    "[HKEY_CURRENT_USER\\Software\\Wine\\AppDefaults\\msedgewebview2.exe]\n"
-                )
-                f.write('"Version"="win7"\n')
-
-            self.run_command(
-                [str(regedit), str(webview2_win7_reg)], check=False, env=env
-            )
-            webview2_win7_reg.unlink()
-            self.log("msedgewebview2.exe Windows 7 compatibility set", "success")
-
+            self.configure_webview2_runtime(env)
+            self.log("WebView2 Runtime configuration applied", "success")
             # Clean up installer file
             if webview2_file.exists():
                 webview2_file.unlink()
@@ -14123,6 +15122,9 @@ Would you like to continue with {distro_name} anyway?"""
                 self.log(f"Error installing WebView2 Runtime: {e}", "error")
             # Try to restore Windows 11 compatibility even if something failed
             try:
+                self.stop_prefix_wine_processes(
+                    env, reason="restoring Windows version"
+                )
                 self.run_command([str(wine_cfg), "-v", "win11"], check=False, env=env)
             except:
                 pass
@@ -14577,6 +15579,13 @@ Would you like to continue with {distro_name} anyway?"""
         try:
             self.log(f"Selected installer: {installer_path}", "success")
 
+            if not self.verify_required_wine_runtimes():
+                self.show_message(
+                    "Wine Runtime Missing",
+                    ".NET Framework 4.8 is missing in the Wine prefix. Run 'Setup Wine Environment' or 'Install Winetricks Dependencies' again before launching the installer.",
+                    "error"
+                )
+                return
             # Copy installer with sanitized filename (remove spaces)
             original_filename = Path(installer_path).name
             sanitized_filename = self.sanitize_filename(original_filename)
@@ -14594,6 +15603,9 @@ Would you like to continue with {distro_name} anyway?"""
 
             env = os.environ.copy()
             env["WINEPREFIX"] = self.directory
+            self.stop_prefix_wine_processes(
+                env, reason="launching the Affinity installer"
+            )
             self.run_command([str(wine_cfg), "-v", "win11"], check=False, env=env)
 
             # Run installer
@@ -14615,6 +15627,16 @@ Would you like to continue with {distro_name} anyway?"""
             #     installer_file.unlink()
             # self.log("Installer file removed", "success")
 
+            if app_name == "Add" and not self.affinity_v3_exe_path().exists():
+                if self.check_cancelled():
+                    return
+                self.log("The Affinity setup finished without installing Affinity", "warning")
+                installed, reason = self.install_affinity_v3_from_msi(installer_file, env)
+                if not installed:
+                    if not self.cancel_event.is_set():
+                        self.show_affinity_not_installed(reason, declined=reason == self.MSI_DECLINED)
+                    return
+
             # Restore WinMetadata (only needed for Wine 9.14 and 10.10, not 11.12+)
             wine_version = self.get_current_wine_version()
             if wine_version in ["9.14", "10.10"]:
@@ -14623,6 +15645,10 @@ Would you like to continue with {distro_name} anyway?"""
                 self.log(
                     "Skipping WinMetadata restore for Wine 11.12+ (not needed)", "info"
                 )
+
+            if app_name == "Add" and self.affinity_v3_exe_path().exists():
+                self.install_windowsruntime_facades()
+                self.create_affinity_url_handler()
 
             # Set up wintypes.dll and Wine overrides for Affinity apps (v2 and v3) - only for Wine < 11.12
             if app_name in ["Photo", "Designer", "Publisher", "Add"]:
@@ -14788,10 +15814,8 @@ Would you like to continue with {distro_name} anyway?"""
         if exe_path_normalized.startswith("C:/"):
             exe_path_normalized = directory_str + "/drive_c" + exe_path_normalized[2:]
 
-        # Get GPU environment variables if configured
-        gpu_env = self.get_gpu_env_vars()
-        # Get DXVK environment variables if AMD GPU is detected
-        dxvk_env = self.get_dxvk_env_vars()
+        desktop_env_parts = self.get_desktop_launch_env_parts()
+        launch_prefix = self.get_gpu_launch_prefix()
 
         with open(desktop_file, "w") as f:
             f.write("[Desktop Entry]\n")
@@ -14803,13 +15827,14 @@ Would you like to continue with {distro_name} anyway?"""
             f.write(f"Path={directory_str}\n")
             # Use Linux path format with proper quoting for spaces
             # Include GPU environment variables if configured
-            exec_line = f"Exec=env WINEPREFIX={directory_str}"
-            if gpu_env:
-                exec_line += f" {gpu_env.strip()}"
-            if dxvk_env:
-                exec_line += f" {dxvk_env.strip()}"
-            exec_line += f' {wine_str} "{exe_path_normalized}"'
-            f.write(f"{exec_line}\n")
+            exec_parts = ["Exec="]
+            if launch_prefix:
+                exec_parts.append(" ".join(shlex.quote(part) for part in launch_prefix))
+            exec_parts.append(f"env WINEPREFIX={directory_str}")
+            exec_parts.extend(desktop_env_parts)
+            exec_parts.append(wine_str)
+            exec_parts.append(f'"{exe_path_normalized}"')
+            f.write(" ".join(exec_parts) + "\n")
             f.write("Terminal=false\n")
             f.write("Type=Application\n")
             f.write("Categories=Application;\n")
@@ -14886,6 +15911,13 @@ Would you like to continue with {distro_name} anyway?"""
             self.update_progress(0.0)
             self.log(f"Selected installer: {installer_path}", "success")
 
+            if not self.verify_required_wine_runtimes():
+                self.show_message(
+                    "Wine Runtime Missing",
+                    ".NET Framework 4.8 is missing in the Wine prefix. Run 'Setup Wine Environment' or 'Install Winetricks Dependencies' again before launching the updater.",
+                    "error"
+                )
+                return
             # Copy installer to Wine prefix with sanitized filename (remove spaces)
             self.update_progress_text("Copying installer...")
             self.update_progress(0.2)
@@ -14906,6 +15938,9 @@ Would you like to continue with {distro_name} anyway?"""
 
             # Use regular Wine for all installations (wine-tkg is only for winetricks)
             wine_cfg = self.get_wine_path("winecfg")
+            self.stop_prefix_wine_processes(
+                env, reason="running the updater"
+            )
             self.run_command([str(wine_cfg), "-v", "win11"], check=False, env=env)
 
             env["WINEDEBUG"] = "-all"
@@ -15027,6 +16062,10 @@ Would you like to continue with {distro_name} anyway?"""
                         "warning",
                     )
 
+                if self.affinity_v3_exe_path().exists():
+                    self.install_windowsruntime_facades()
+                    self.create_affinity_url_handler()
+
             self.update_progress(1.0)
             self.update_progress_text("Update complete!")
             self.log(f"\n✓ {display_name} update completed!", "success")
@@ -15059,6 +16098,141 @@ Would you like to continue with {distro_name} anyway?"""
         finally:
             self.end_operation()
 
+    MSI_DECLINED = "You chose not to install Affinity from its MSI package."
+    AFFINITY_KNOWN_ISSUES_URL = (
+        "https://github.com/ryzendew/Linux-Affinity-Installer/blob/main/docs/Known-issues.md"
+        "#affinity-installer-setupuiexe-crashes"
+    )
+
+    def install_affinity_v3_from_msi(self, installer_file, env):
+        """Install Affinity v3 from the MSI package embedded in its setup executable.
+
+        The WPF setup window in Affinity-x64.exe (SetupUI.exe) crashes on some Wine
+        builds before it installs anything, such as the Wine 10.0 that Ubuntu 26.04
+        packages. That window installs the same MSI package, so it is installed here with
+        msiexec and the prefix's own Wine.
+
+        Returns (installed, reason), where reason explains a failure to the user.
+        """
+        for stale in Path(self.directory).glob(".affinity-msi-*"):
+            shutil.rmtree(stale, ignore_errors=True)
+        if not self.check_command("7z"):
+            self.log("7z not found, cannot extract the Affinity MSI package", "error")
+            return False, (
+                "Installing Affinity from its MSI package needs 7z. Install 7-Zip and run the "
+                "installation again."
+            )
+
+        reply = self.show_question_dialog(
+            "Install Affinity from its MSI package?",
+            "The Affinity setup finished, but Affinity.exe is not in "
+            "C:\\Program Files\\Affinity\\Affinity. The setup window crashes on some Wine "
+            "builds, such as the Wine 10.0 in Ubuntu 26.04.\n\n"
+            "The setup file contains the MSI package that the setup window installs. This "
+            "installer can install it into the default folder. It needs about 700 MB of "
+            "temporary space in the prefix.\n\n"
+            "Install Affinity this way? If you closed the setup yourself or chose another "
+            "folder, choose No.",
+            ["Yes", "No"],
+            default_button="No",
+        )
+        if reply != "Yes":
+            if self.cancel_event.is_set():
+                return False, "The installation was cancelled."
+            self.log("MSI installation declined", "info")
+            return False, self.MSI_DECLINED
+
+        # The prefix is on disk; /tmp may be RAM-backed and the MSI is about 640 MB.
+        with tempfile.TemporaryDirectory(prefix=".affinity-msi-", dir=self.directory) as temp_dir:
+            self.update_progress_text("Extracting the Affinity MSI package...")
+            # 7z exits with 1 on warnings, so the extracted files decide success.
+            _, stdout, stderr = self.run_command(
+                ["7z", "x", "-t#", "-y", f"-o{temp_dir}", str(installer_file)], check=False
+            )
+            if self.cancel_event.is_set():
+                return False, "The installation was cancelled."
+            msi_files = sorted(
+                Path(temp_dir).glob("*.msi"), key=lambda path: path.stat().st_size, reverse=True
+            )
+            for msi in msi_files:
+                self.log(f"  Found {msi.name} ({msi.stat().st_size // (1024 * 1024)} MB)", "info")
+            if not msi_files:
+                self.log(f"7z could not extract an MSI package from {installer_file.name}: {(stdout + stderr).strip()}", "error")
+                return False, (
+                    f"7z could not extract the MSI package from {installer_file.name}. "
+                    "Check the free disk space. Details are in the log."
+                )
+
+            # The setup ran with the system Wine; wait for its wineserver to exit before
+            # the prefix's own Wine uses the same prefix.
+            try:
+                subprocess.run(["wineserver", "-w"], env=env, timeout=60, check=False)
+            except subprocess.TimeoutExpired:
+                self.log("The system wineserver is still running after 60 seconds", "error")
+                return False, (
+                    "Wine processes from the setup are still running. Close them, or stop them "
+                    f"with: WINEPREFIX={self.directory} wineserver -k\n"
+                    "Then run the installation again."
+                )
+            except OSError:
+                self.log("System wineserver not found, not waiting for the setup's Wine processes", "warning")
+            if self.cancel_event.is_set():
+                return False, "The installation was cancelled."
+
+            wine = self.get_wine_path("wine")
+            if not wine.exists():
+                self.log(f"Wine not found at {wine}", "error")
+                return False, f"The prefix's Wine was not found at {wine}."
+            msi_log = Path(self.directory) / "affinity-msi.log"
+            self.update_progress_text("Installing Affinity from its MSI package...")
+            self.log(
+                f"Installing {msi_files[0].name} with msiexec (log: {msi_log})...",
+                "info",
+            )
+            # The setup window also passes REBOOT=ReallySuppress. Its desktop shortcut
+            # checkbox sets INSTALL_DESKTOP_SHORTCUT_PROPERTY; this installer makes its own
+            # shortcuts, so the MSI's is turned off.
+            success, _, _ = self.run_command(
+                [
+                    str(wine), "msiexec", "/i",
+                    self._to_windows_path(msi_files[0], env=env),
+                    "REBOOT=ReallySuppress",
+                    "INSTALL_DESKTOP_SHORTCUT_PROPERTY=#0",
+                    "/l*v", self._to_windows_path(msi_log, env=env),
+                ],
+                check=False,
+                env=env,
+                timeout=3600,  # a big MSI install legitimately runs for a while
+            )
+            if not success:
+                self.log(f"msiexec did not succeed, see {msi_log}", "warning")
+            self.log("Waiting for Wine processes to finish...", "info")
+            # Bounded: a leftover process would otherwise block here forever.
+            self.run_command(
+                [str(self.get_wine_path("wineserver")), "-w"],
+                check=False,
+                env=env,
+                timeout=600,
+            )
+
+        if self.affinity_v3_exe_path().exists():
+            self.log("Affinity installed from its MSI package", "success")
+            return True, ""
+        return False, f"msiexec did not install Affinity. See {msi_log}."
+
+    def show_affinity_not_installed(self, reason, declined=False):
+        """Report that Affinity v3 was not installed, with the reason and where to look next"""
+        self.log(
+            f"Affinity was not installed: {reason} See {self.AFFINITY_KNOWN_ISSUES_URL}",
+            "warning" if declined else "error",
+        )
+        self.show_message(
+            "Affinity Not Installed",
+            f"Affinity was not installed.\n\n{reason}\n\n"
+            f"See 'Affinity Installer (SetupUI.exe) Crashes':\n{self.AFFINITY_KNOWN_ISSUES_URL}",
+            "warning" if declined else "error",
+        )
+
     def run_installation(self, app_name, installer_path):
         """Run the installation process"""
         try:
@@ -15066,6 +16240,13 @@ Would you like to continue with {distro_name} anyway?"""
             self.update_progress(0.0)
             self.log(f"Selected installer: {installer_path}", "success")
 
+            if not self.verify_required_wine_runtimes():
+                self.show_message(
+                    "Wine Runtime Missing",
+                    ".NET Framework 4.8 is missing in the Wine prefix. Run 'Setup Wine Environment' or 'Install Winetricks Dependencies' again before launching the installer.",
+                    "error"
+                )
+                return
             # Check if installer is already in .AffinityLinux/Installer/ (downloaded installer)
             installer_path_obj = Path(installer_path)
             installer_dir = Path(self.directory) / "Installer"
@@ -15112,6 +16293,9 @@ Would you like to continue with {distro_name} anyway?"""
 
             env = os.environ.copy()
             env["WINEPREFIX"] = self.directory
+            self.stop_prefix_wine_processes(
+                env, reason="launching the installer"
+            )
             self.run_command([str(wine_cfg), "-v", "win11"], check=False, env=env)
 
             # Run installer
@@ -15130,6 +16314,13 @@ Would you like to continue with {distro_name} anyway?"""
             if not success and not self.check_cancelled():
                 self.log("Installer process exited with a non-zero status", "warning")
 
+            installs_unified = app_name in ("Add", "Affinity (Unified)")
+            affinity_v3_exe = self.affinity_v3_exe_path()
+            msi_failure = "The Affinity setup finished without installing Affinity."
+            if installs_unified and not affinity_v3_exe.exists() and not self.check_cancelled():
+                self.log("The Affinity setup finished without installing Affinity", "warning")
+                _, msi_failure = self.install_affinity_v3_from_msi(installer_file, env)
+
             # Clean up installer (only if it was copied to Wine prefix, not if it's in .AffinityLinux/Installer/)
             self.update_progress(0.5)
             if installer_file.parent != installer_dir:
@@ -15143,6 +16334,13 @@ Would you like to continue with {distro_name} anyway?"""
                     "info",
                 )
 
+            if installs_unified:
+                if self.check_cancelled():
+                    return
+                if not affinity_v3_exe.exists():
+                    self.show_affinity_not_installed(msi_failure, declined=msi_failure == self.MSI_DECLINED)
+                    return
+
             # Restore WinMetadata (only needed for Wine 9.14 and 10.10, not 11.12+)
             wine_version = self.get_current_wine_version()
             if wine_version in ["9.14", "10.10"]:
@@ -15153,6 +16351,9 @@ Would you like to continue with {distro_name} anyway?"""
                 self.log(
                     "Skipping WinMetadata restore for Wine 11.12+ (not needed)", "info"
                 )
+
+            if app_name == "Add" and self.affinity_v3_exe_path().exists():
+                self.install_windowsruntime_facades()
 
             # Configure OpenCL (if enabled)
             if self.is_opencl_enabled():
@@ -15498,6 +16699,172 @@ Would you like to continue with {distro_name} anyway?"""
         except Exception as e:
             self.log(f"Failed to restore WinMetadata: {e}", "warning")
 
+    def affinity_v3_exe_path(self):
+        """Return the path of the Affinity v3 (Unified) executable in the prefix"""
+        return Path(self.directory) / "drive_c" / "Program Files" / "Affinity" / "Affinity" / "Affinity.exe"
+
+    def get_winetricks_cache_dir(self):
+        """Return the winetricks download cache, resolved the same way winetricks does"""
+        if os.environ.get("W_CACHE"):
+            return Path(os.environ["W_CACHE"])
+        if os.environ.get("WINETRICKS_DIR"):
+            return Path(os.environ["WINETRICKS_DIR"]) / "cache"
+        xdg_cache = os.environ.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
+        return Path(xdg_cache) / "winetricks"
+
+    def _download_dotnet48_installer(self, installer, url, sha256):
+        """Download the .NET 4.8 offline installer into the winetricks cache and verify it"""
+
+        def matches(path):
+            digest = hashlib.sha256()
+            with open(path, "rb") as f:
+                for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            return digest.hexdigest() == sha256
+
+        if installer.exists():
+            if matches(installer):
+                return True
+            # Same recovery as winetricks: keep the bad file aside and download again.
+            os.replace(installer, installer.with_name(installer.name + ".bak"))
+            self.log(f"Checksum mismatch for {installer.name}, downloading it again", "warning")
+
+        installer.parent.mkdir(parents=True, exist_ok=True)
+        partial = installer.with_name(installer.name + ".part")
+        try:
+            if not self.download_file(url, str(partial), ".NET Framework 4.8 offline installer"):
+                return False
+            if not matches(partial):
+                self.log(f"Checksum mismatch for the downloaded {installer.name}", "warning")
+                return False
+            os.replace(partial, installer)
+            return True
+        finally:
+            if partial.exists():
+                partial.unlink()
+
+    def windowsruntime_facade_paths(self):
+        """Return the GAC path of each WinRT facade in the prefix"""
+        gac_dir = (
+            Path(self.directory) / "drive_c" / "windows" / "Microsoft.NET" / "assembly" / "GAC_MSIL"
+        )
+        return {
+            name: gac_dir / name / "v4.0_4.0.0.0__b77a5c561934e089" / f"{name}.dll"
+            for name in self.WINRT_FACADES
+        }
+
+    def windowsruntime_facades_installed(self):
+        """Return True when both WinRT facades are in the prefix GAC"""
+        try:
+            return all(path.exists() for path in self.windowsruntime_facade_paths().values())
+        except OSError:
+            return False
+
+    def canva_sign_in_wine_support(self):
+        """Return "supported", "unsupported" or "unknown" for the prefix's Wine.
+
+        The Canva sign-in fix supports Wine 9.x and 10.x (the installer's 9.14 and 10.10).
+        With Wine 11.12 the callback method also needs the Windows WinMetadata and the
+        native wintypes.dll, which this installer only sets up for Wine 9.14 and 10.10.
+        "unknown" means the prefix's Wine could not be run.
+        """
+        wine = self.get_wine_path("wine")
+        if not wine.exists():
+            return "unknown"
+        success, stdout, _ = self._run_uncancellable([str(wine), "--version"])
+        match = re.search(r"wine-(\d+)\.", stdout) if success else None
+        if not match:
+            return "unknown"
+        return "supported" if match.group(1) in ("9", "10") else "unsupported"
+
+    def install_windowsruntime_facades(self):
+        """Install the .NET Framework WinRT facades that `winetricks dotnet48` leaves out.
+
+        Affinity handles the affinity:// callback of the Canva sign-in in
+        Serif.Affinity.Application.ProcessCommandLineArguments. The CLR cannot JIT that
+        method without System.Runtime.WindowsRuntime, and also needs WinMetadata. The
+        .NET 4.8 offline installer only carries these facades inside its Windows 8+
+        servicing packages, which are not installed under Wine, so they are copied into the GAC.
+        """
+        installer_name = "ndp48-x86-x64-allos-enu.exe"
+        installer_url = (
+            "https://download.visualstudio.microsoft.com/download/pr/"
+            "7afca223-55d2-470a-8edc-6a1739ae3252/abd170b4b0ec15ad0222a809b761a036/"
+            + installer_name
+        )
+        installer_sha256 = "95889d6de3f2070c07790ad6cf2000d33d9a1bdfc6a381725ab82ab1c314fd53"
+        cab_name = "x64-Windows10.0-KB4486153-x64.cab"
+        temp_prefix = ".winrt-facades-"
+
+        for stale in Path(self.directory).glob(temp_prefix + "*"):
+            shutil.rmtree(stale, ignore_errors=True)
+
+        targets = self.windowsruntime_facade_paths()
+        if self.windowsruntime_facades_installed():
+            return True
+
+        wine_support = self.canva_sign_in_wine_support()
+        if wine_support == "unknown":
+            self.log("Could not run the prefix's Wine, skipping the WinRT facades", "warning")
+            return False
+        if wine_support == "unsupported":
+            self.log("Skipping the WinRT facades: the Canva sign-in fix supports Wine 9.14 and 10.10", "info")
+            return False
+        if not self.has_dotnet48_runtime():
+            self.log(".NET Framework 4.8 is not installed in the prefix, skipping the WinRT facades", "warning")
+            return False
+        if not self.check_command("7z"):
+            self.log("7z not found, skipping the WinRT facades needed for Canva sign-in", "warning")
+            return False
+
+        self.update_progress_text("Installing WinRT facades for .NET 4.8...")
+        self.log("Installing WinRT facades for .NET 4.8 (Canva sign-in)...", "info")
+        installer = self.get_winetricks_cache_dir() / "dotnet48" / installer_name
+        try:
+            if not self._download_dotnet48_installer(installer, installer_url, installer_sha256):
+                self.log("Could not get the .NET Framework 4.8 offline installer", "warning")
+                return False
+
+            # The prefix is on disk; /tmp may be RAM-backed and the cab is about 350 MB.
+            with tempfile.TemporaryDirectory(prefix=temp_prefix, dir=self.directory) as temp_dir:
+                temp_path = Path(temp_dir)
+                # 7z exits with 1 on warnings, so the extracted files decide success.
+                _, stdout, stderr = self.run_command(
+                    ["7z", "e", "-y", f"-o{temp_path}", str(installer), cab_name], check=False
+                )
+                cab_path = temp_path / cab_name
+                if not cab_path.exists():
+                    self.log(f"Could not extract {cab_name}: {(stdout + stderr).strip()}", "warning")
+                    return False
+
+                dll_dir = temp_path / "dll"
+                patterns = [f"msil_{name.lower()}_b77a5c561934e089_*/*" for name in self.WINRT_FACADES]
+                _, stdout, stderr = self.run_command(
+                    ["7z", "e", "-y", f"-o{dll_dir}", str(cab_path)] + patterns, check=False
+                )
+                if self.cancel_event.is_set():
+                    return False
+
+                for name, target in targets.items():
+                    source = dll_dir / f"{name.lower()}.dll"
+                    if not source.exists():
+                        self.log(f"{source.name} not found in {cab_name}: {(stdout + stderr).strip()}", "warning")
+                        return False
+                    with open(source, "rb") as f:
+                        if hashlib.sha256(f.read()).hexdigest() != self.WINRT_FACADES[name]:
+                            self.log(f"Unexpected checksum for {source.name}, skipping the WinRT facades", "warning")
+                            return False
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    staged = target.with_name(target.name + ".tmp")
+                    shutil.copy2(source, staged)
+                    os.replace(staged, target)
+
+            self.log("WinRT facades for .NET 4.8 installed", "success")
+            return True
+        except Exception as e:
+            self.log(f"Failed to install the WinRT facades: {e}", "warning")
+            return False
+
     def is_opencl_enabled(self):
         """Check if OpenCL is enabled"""
         # First check instance variable (set during one-click setup)
@@ -15517,7 +16884,7 @@ Would you like to continue with {distro_name} anyway?"""
         return False
 
     def get_renderer_setting(self):
-        """Get the current renderer setting from registry (vulkan, opengl, or gdi)"""
+        """Get the current renderer setting from registry (vulkan, gl, or gdi)."""
         try:
             wine = self.get_wine_path("wine")
             if not wine.exists():
@@ -15542,8 +16909,8 @@ Would you like to continue with {distro_name} anyway?"""
 
             if success and stdout:
                 stdout_lower = stdout.lower()
-                if "opengl" in stdout_lower:
-                    return "opengl"
+                if "gl" in stdout_lower or "opengl" in stdout_lower:
+                    return "gl"
                 elif "gdi" in stdout_lower:
                     return "gdi"
                 elif "vulkan" in stdout_lower:
@@ -15553,6 +16920,94 @@ Would you like to continue with {distro_name} anyway?"""
             return "vulkan"
         except Exception:
             return "vulkan"  # Default to vulkan on error
+
+    def force_wine_x11_driver_if_needed(self, env=None):
+        """Force Wine to use X11 when the host session runs on Wayland."""
+        session_type = (os.environ.get("XDG_SESSION_TYPE") or "").lower()
+        if session_type != "wayland":
+            return True
+
+        env = os.environ.copy() if env is None else env.copy()
+        env["WINEPREFIX"] = self.directory
+        env.setdefault("DISPLAY", os.environ.get("DISPLAY", ":0"))
+
+        xauthority = os.environ.get("XAUTHORITY")
+        if xauthority:
+            env["XAUTHORITY"] = xauthority
+
+        wine = self.get_wine_path("wine")
+        if not wine.exists():
+            self.log("Wine binary not found while forcing the X11 graphics driver.", "warning")
+            return False
+
+        self.log("Wayland session detected; forcing Wine to use the X11 graphics driver.", "info")
+        success, _, stderr = self.run_command(
+            [
+                str(wine), "reg", "add",
+                "HKEY_CURRENT_USER\\Software\\Wine\\Drivers",
+                "/v", "Graphics",
+                "/t", "REG_SZ",
+                "/d", "x11",
+                "/f",
+            ],
+            check=False,
+            env=env,
+            capture=True,
+        )
+        if success:
+            self.log("✓ Wine graphics driver forced to X11 for this prefix", "success")
+        else:
+            self.log(f"Warning: Could not force Wine graphics driver to X11: {stderr}", "warning")
+        return success
+
+    def get_affinity_v3_user_data_dir(self):
+        """Return the per-user Affinity v3 roaming data directory inside the prefix."""
+        username = os.environ.get("USER") or os.environ.get("LOGNAME") or "user"
+        return (
+            Path(self.directory)
+            / "drive_c"
+            / "users"
+            / username
+            / "AppData"
+            / "Roaming"
+            / "Affinity"
+            / "Affinity"
+            / "3.0"
+        )
+
+    def affinity_v3_user_data_has_startup_corruption_signature(self):
+        """Detect the reproducible Affinity v3 profile corruption signature seen on Ubuntu."""
+        log_file = self.get_affinity_v3_user_data_dir() / "Log.txt"
+        if not log_file.exists():
+            return False
+
+        try:
+            content = log_file.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            return False
+
+        signatures = [
+            "JPEG XL: input does not have a valid signature",
+        ]
+        return any(signature in content for signature in signatures)
+
+    def quarantine_affinity_v3_user_data(self, reason):
+        """Back up the current Affinity v3 roaming profile and recreate an empty one."""
+        user_data_dir = self.get_affinity_v3_user_data_dir()
+        if not user_data_dir.exists():
+            return True
+
+        backup_dir = user_data_dir.parent / f"{user_data_dir.name}.backup-{time.strftime('%Y%m%d-%H%M%S')}"
+        try:
+            self.log(reason, "warning")
+            self.log(f"Backing up Affinity v3 user data to {backup_dir}", "info")
+            shutil.move(str(user_data_dir), str(backup_dir))
+            user_data_dir.mkdir(parents=True, exist_ok=True)
+            self.log("✓ Affinity v3 user data reset completed", "success")
+            return True
+        except Exception as e:
+            self.log(f"Warning: Could not back up Affinity v3 user data: {e}", "warning")
+            return False
 
     def configure_opencl(self, app_name):
         """Configure d3d12 DLLs for application (needed even when using DXVK)"""
@@ -15586,20 +17041,118 @@ Would you like to continue with {distro_name} anyway?"""
             self.log("d3d12 DLLs not found in Wine library, installing...", "info")
             self.install_d3d12_dlls()
 
-        dlls_copied = 0
-        for dll in ["d3d12.dll", "d3d12core.dll"]:
-            for source in [vkd3d_temp / dll, wine_lib_dir / dll]:
-                if source.exists():
-                    shutil.copy2(source, app_dir / dll)
-                    self.log(f"Copied {dll} to {app_dir_name}", "success")
-                    dlls_copied += 1
-                    break
-
+        dlls_copied = self.sync_vkd3d_runtime_into_app_dir(app_dir, app_dir_name)
         # Ensure DLL overrides are set up
         self.setup_d3d12_overrides()
 
         if dlls_copied > 0:
             self.log(f"d3d12 DLLs configured for {app_dir_name}", "success")
+
+    def sync_vkd3d_runtime_into_app_dir(self, app_dir, app_label=None):
+        """Copy the vkd3d-proton D3D12 runtime next to an Affinity EXE if needed."""
+        wine_lib_dir = self.get_wine_dir() / "lib" / "wine" / "vkd3d-proton" / "x86_64-windows"
+        vkd3d_temp = Path(self.directory) / "vkd3d_dlls"
+        copied = 0
+        label = app_label or app_dir.name
+
+        for dll in ["d3d12.dll", "d3d12core.dll"]:
+            target = app_dir / dll
+            source = None
+
+            for candidate in [vkd3d_temp / dll, wine_lib_dir / dll]:
+                if candidate.exists():
+                    source = candidate
+                    break
+
+            if not source:
+                self.log(f"Warning: Could not find a vkd3d-proton copy of {dll} for {label}", "warning")
+                continue
+
+            needs_copy = (
+                not target.exists()
+                or target.stat().st_size != source.stat().st_size
+            )
+            if needs_copy:
+                shutil.copy2(source, target)
+                self.log(f"Copied {dll} to {label}", "success")
+                copied += 1
+
+        return copied
+
+    def build_local_mscms_shim(self):
+        """Build the local mscms compatibility shim if a compiler is available."""
+        build_dir = Path(self.directory) / "wine_shims"
+        source = Path(__file__).resolve().parent.parent / "mscms_shim.c"
+        output = build_dir / "mscms.dll"
+
+        if output.exists() and source.exists() and output.stat().st_mtime >= source.stat().st_mtime:
+            return output
+
+        if not source.exists():
+            self.log(f"Warning: mscms shim source not found: {source}", "warning")
+            return None
+
+        compiler = shutil.which("x86_64-w64-mingw32-gcc")
+        if not compiler:
+            self.log("Warning: x86_64-w64-mingw32-gcc not found; mscms compatibility shim will be skipped", "warning")
+            return None
+
+        try:
+            build_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            self.log(f"Warning: Could not create the mscms shim build directory: {e}", "warning")
+            return None
+
+        success, _, stderr = self.run_command(
+            [
+                compiler,
+                "-shared",
+                "-O2",
+                "-Wl,--export-all-symbols",
+                "-o",
+                str(output),
+                str(source),
+            ],
+            check=False,
+        )
+        if not success or not output.exists():
+            err_text = stderr.strip() if stderr else "unknown compiler error"
+            self.log(f"Warning: Failed to build the mscms compatibility shim: {err_text}", "warning")
+            return None
+
+        self.log("Built the local mscms compatibility shim", "success")
+        return output
+
+    def sync_mscms_shim_into_app_dir(self, app_dir, app_label=None):
+        """Deploy the mscms compatibility shim next to an Affinity EXE if possible."""
+        shim_source = self.build_local_mscms_shim()
+        builtin_source = Path(self.directory) / "drive_c" / "windows" / "system32" / "mscms.dll"
+        label = app_label or app_dir.name
+        copied = 0
+
+        if not shim_source or not shim_source.exists():
+            return 0
+
+        if not builtin_source.exists():
+            self.log(f"Warning: Could not find Wine's builtin mscms.dll for {label}", "warning")
+            return 0
+
+        copies = [
+            (shim_source, app_dir / "mscms.dll"),
+            (builtin_source, app_dir / "mscms_builtin.dll"),
+        ]
+
+        for source, target in copies:
+            needs_copy = (
+                not target.exists()
+                or target.stat().st_size != source.stat().st_size
+            )
+            if needs_copy:
+                shutil.copy2(source, target)
+                self.log(f"Copied {target.name} to {label}", "success")
+                copied += 1
+
+        return copied
 
     def enable_opencl_support(self):
         """Enable OpenCL support for Affinity applications"""
@@ -16818,8 +18371,245 @@ Would you like to continue with {distro_name} anyway?"""
         # Run the settings patcher
         return self.run_affinity_patcher(str(dll_path))
 
+    def _mimeapps_path(self):
+        return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "mimeapps.list"
+
+    def _run_uncancellable(self, command):
+        """Run a short command (xdg-mime, update-desktop-database, wine --version).
+
+        It does not use run_command, which returns early while an earlier operation's
+        cancel flag is still set.
+        """
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, timeout=30, check=False)
+            return result.returncode == 0, result.stdout, result.stderr
+        except (OSError, subprocess.SubprocessError) as e:
+            return False, "", str(e)
+
+    @staticmethod
+    def _mimeapps_key(line):
+        """Return the key of a mimeapps.list entry line, or None"""
+        key, sep, _ = line.partition("=")
+        return key.strip() if sep else None
+
+    def get_default_url_handler(self, scheme):
+        """Return the desktop file set as default for a URL scheme, or None"""
+        mime_type = f"x-scheme-handler/{scheme}"
+        if self.check_command("xdg-mime"):
+            success, stdout, _ = self._run_uncancellable(["xdg-mime", "query", "default", mime_type])
+            if success:
+                return stdout.strip() or None
+        try:
+            section = None
+            for line in self._mimeapps_path().read_text(encoding="utf-8-sig").splitlines():
+                stripped = line.strip()
+                if stripped.startswith("["):
+                    section = stripped
+                elif section == "[Default Applications]" and self._mimeapps_key(stripped) == mime_type:
+                    return stripped.partition("=")[2].split(";")[0].strip() or None
+        except (OSError, UnicodeError):
+            pass
+        return None
+
+    def _write_mimeapps_default(self, mime_type, desktop_name, remove=None):
+        """Put desktop_name first in one [Default Applications] entry, or drop `remove` from it.
+
+        Other desktop files listed in that entry and the rest of the file are kept.
+        """
+        mimeapps = self._mimeapps_path()
+        try:
+            if not mimeapps.exists():
+                if not desktop_name:
+                    return True
+                raw = ""
+            else:
+                raw = mimeapps.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as e:
+            self.log(f"Could not read {mimeapps}: {e}", "warning")
+            return False
+        bom = raw.startswith("﻿")
+        lines = raw.lstrip("﻿").splitlines()
+
+        # Desktop files already listed for mime_type in [Default Applications].
+        section, listed = None, []
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("["):
+                section = stripped
+            elif section == "[Default Applications]" and self._mimeapps_key(stripped) == mime_type:
+                listed += [name.strip() for name in stripped.partition("=")[2].split(";") if name.strip()]
+        dropped = {desktop_name, remove} - {None}
+        values = ([desktop_name] if desktop_name else []) + [
+            name for i, name in enumerate(listed) if name not in dropped and name not in listed[:i]
+        ]
+        entry = f"{mime_type}={';'.join(values)};" if values else None
+
+        output, section, written, in_defaults_seen = [], None, False, False
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("["):
+                if section == "[Default Applications]" and entry and not written:
+                    output.append(entry)
+                    written = True
+                section = stripped
+                in_defaults_seen = in_defaults_seen or section == "[Default Applications]"
+            elif section == "[Default Applications]" and self._mimeapps_key(stripped) == mime_type:
+                if entry and not written:
+                    output.append(entry)
+                    written = True
+                continue
+            output.append(line)
+        if entry and not written:
+            if not in_defaults_seen or section != "[Default Applications]":
+                output.append("[Default Applications]")
+            output.append(entry)
+
+        try:
+            target = mimeapps.resolve()
+            target.parent.mkdir(parents=True, exist_ok=True)
+            staged = target.with_name(target.name + ".tmp")
+            staged.write_text(("﻿" if bom else "") + "\n".join(output) + "\n", encoding="utf-8")
+            if target.exists():
+                shutil.copymode(target, staged)
+            os.replace(staged, target)
+            return True
+        except (OSError, RuntimeError) as e:
+            self.log(f"Could not update {mimeapps}: {e}", "warning")
+            return False
+
+    def _set_default_url_handler(self, scheme, desktop_name):
+        """Set the default handler for a URL scheme"""
+        mime_type = f"x-scheme-handler/{scheme}"
+        if self.check_command("xdg-mime"):
+            success, _, stderr = self._run_uncancellable(["xdg-mime", "default", desktop_name, mime_type])
+            if success:
+                return True
+            self.log(f"xdg-mime failed ({stderr.strip()}), editing mimeapps.list directly", "warning")
+        return self._write_mimeapps_default(mime_type, desktop_name)
+
+    def _affinity_url_handler_exec(self):
+        """Return the Exec= line for the affinity:// handler.
+
+        It reuses the Exec= line of Affinity.desktop when that runs Wine directly, so a
+        cold start through the handler matches the desktop entry. Otherwise, for example
+        with the Ubuntu Snapshot launcher script, it builds the equivalent command.
+        """
+        desktop_file = Path.home() / ".local" / "share" / "applications" / "Affinity.desktop"
+        try:
+            for line in desktop_file.read_text(encoding="utf-8").splitlines():
+                if line.startswith("Exec=") and re.search(r'(Affinity|AffinityHook)\.exe"\s*$', line):
+                    return line.rstrip()
+        except (OSError, UnicodeError):
+            pass
+        exec_line, _ = self._build_affinity_exec_line(prefer_hook=True)
+        return exec_line
+
+    def winmetadata_installed(self):
+        """Return True when the prefix has WinMetadata (.winmd files) in system32"""
+        winmetadata = Path(self.directory) / "drive_c" / "windows" / "system32" / "WinMetadata"
+        try:
+            return any(winmetadata.glob("*.winmd"))
+        except OSError:
+            return False
+
+    def create_affinity_url_handler(self):
+        """Register the affinity:// handler that completes the Canva sign-in.
+
+        The browser hands the sign-in callback to this handler. It launches Affinity with
+        the URL, and a running Affinity receives it from that second instance over a named
+        pipe. It is only registered with Wine 9.14 or 10.10 and once WinMetadata and the
+        WinRT facades are installed: otherwise the running Affinity crashes when the URL
+        arrives. Wine's generated handler is replaced because it runs `wine start`, which
+        crashes on URLs longer than about 300 characters.
+        """
+        if not self.affinity_v3_exe_path().exists():
+            return False
+        desktop_dir = Path.home() / ".local" / "share" / "applications"
+        handler_file = desktop_dir / self.AFFINITY_URL_HANDLER
+
+        wine_support = self.canva_sign_in_wine_support()
+        if wine_support != "supported":
+            if wine_support == "unknown":
+                self.log("Could not run the prefix's Wine, not changing the affinity:// handler", "warning")
+                return False
+            # A handler left from an earlier Wine version would crash the running Affinity.
+            if handler_file.exists():
+                self.remove_affinity_url_handler()
+            self.log("Not registering the affinity:// handler: the Canva sign-in fix supports Wine 9.14 and 10.10", "info")
+            return False
+        if not self.windowsruntime_facades_installed() or not self.winmetadata_installed():
+            self.log("WinRT facades or WinMetadata missing, not registering the affinity:// handler", "warning")
+            return False
+
+        # Ask before writing our desktop file, so it cannot be the query's fallback answer.
+        current = self.get_default_url_handler("affinity")
+        if current not in (None, handler_file.name, "wine-protocol-affinity.desktop"):
+            self.log(
+                f"affinity:// is handled by {current}; leaving it. For the Canva sign-in in this "
+                "prefix, remove that default and use Troubleshooting > Fix Canva Sign-in (v3)",
+                "warning",
+            )
+            return False
+
+        try:
+            desktop_dir.mkdir(parents=True, exist_ok=True)
+            with open(handler_file, "w", encoding="utf-8") as f:
+                f.write("[Desktop Entry]\n")
+                f.write("Type=Application\n")
+                f.write("Name=Affinity sign-in handler\n")
+                f.write(f"{self._affinity_url_handler_exec()} %u\n")
+                f.write("MimeType=x-scheme-handler/affinity;\n")
+                f.write("NoDisplay=true\n")
+                f.write("Terminal=false\n")
+        except OSError as e:
+            self.log(f"Could not write {handler_file}: {e}", "warning")
+            return False
+
+        if self.check_command("update-desktop-database"):
+            self._run_uncancellable(["update-desktop-database", str(desktop_dir)])
+
+        # Set it even when the query already names this handler: the query can fall back
+        # to any installed handler when mimeapps.list has no valid entry.
+        if not self._set_default_url_handler("affinity", handler_file.name):
+            return False
+        wine_protocol_entry = desktop_dir / "wine-protocol-affinity.desktop"
+        try:
+            if wine_protocol_entry.exists():
+                wine_protocol_entry.unlink()
+        except OSError:
+            pass
+        if current != handler_file.name:
+            self.log("Registered the affinity:// handler used by the Canva sign-in", "success")
+        return True
+
+    def remove_affinity_url_handler(self):
+        """Remove the affinity:// handler and its default-handler entry"""
+        desktop_dir = Path.home() / ".local" / "share" / "applications"
+        handler_file = desktop_dir / self.AFFINITY_URL_HANDLER
+        try:
+            # Query before deleting: xdg-mime ignores defaults whose desktop file is gone.
+            is_default = self.get_default_url_handler("affinity") == handler_file.name
+            if handler_file.exists():
+                handler_file.unlink()
+                self.log(f"Removed {handler_file.name}", "info")
+            if is_default:
+                self._write_mimeapps_default("x-scheme-handler/affinity", None, remove=handler_file.name)
+            if self.check_command("update-desktop-database"):
+                self._run_uncancellable(["update-desktop-database", str(desktop_dir)])
+        except Exception as e:
+            self.log(f"Could not remove the affinity:// handler: {e}", "warning")
+
     def create_desktop_entry(self, app_name):
         """Create desktop entry for application"""
+        if app_name == "Add":
+            snapshot_script = self.get_ubuntu_snapshot_launcher_script(require_exists=False)
+            if snapshot_script.exists():
+                if self.install_ubuntu_snapshot_launchers(show_dialog=False):
+                    self.log("Unified Affinity desktop entry now uses the Ubuntu Snapshot launcher", "info")
+                    self.create_affinity_url_handler()
+                    return
+                self.log("Ubuntu Snapshot launcher installation failed, falling back to the built-in desktop entry writer", "warning")
+
         app_names = {
             "Photo": ("Photo", "Photo.exe", "Photo 2", "AffinityPhoto.svg"),
             "Designer": (
@@ -16865,9 +18655,7 @@ Would you like to continue with {distro_name} anyway?"""
             "/"
         )  # Remove trailing slash if present
         icon_path_str = str(icon_path)
-        app_path_str = str(app_path).replace(
-            "\\", "/"
-        )  # Ensure forward slashes, no double slashes
+        app_path_str = str(app_path).replace("\\", "/")  # Ensure forward slashes, no double slashes
 
         # Launch through affinity-on-linux.exe when it is installed, so documents
         # can be opened from the file manager. Wine converts argv[0] to a DOS path
@@ -16884,10 +18672,8 @@ Would you like to continue with {distro_name} anyway?"""
         if has_handler:
             app_path_str = str(handler_path).replace("\\", "/")
 
-        # Get GPU environment variables if configured
-        gpu_env = self.get_gpu_env_vars()
-        # Get DXVK environment variables if AMD GPU is detected
-        dxvk_env = self.get_dxvk_env_vars()
+        desktop_env_parts = self.get_desktop_launch_env_parts()
+        launch_prefix = self.get_gpu_launch_prefix()
 
         with open(desktop_file, "w") as f:
             f.write("[Desktop Entry]\n")
@@ -16901,17 +18687,18 @@ Would you like to continue with {distro_name} anyway?"""
             f.write(f"Path={directory_str}\n")
             # Use Linux path format with proper quoting for spaces
             # Include GPU environment variables if configured
-            exec_line = f"Exec=env WINEPREFIX={directory_str}"
-            if gpu_env:
-                exec_line += f" {gpu_env.strip()}"
-            if dxvk_env:
-                exec_line += f" {dxvk_env.strip()}"
-            exec_line += f' {wine_str} "{app_path_str}"'
+            exec_parts = ["Exec="]
+            if launch_prefix:
+                exec_parts.append(" ".join(shlex.quote(part) for part in launch_prefix))
+            exec_parts.append(f"env WINEPREFIX={directory_str}")
+            exec_parts.extend(desktop_env_parts)
+            exec_parts.append(wine_str)
+            exec_parts.append(f'"{app_path_str}"')
             # %F, not %f: the file manager then hands every selected document to
             # one invocation instead of racing one process per file.
             if has_handler:
-                exec_line += " %F"
-            f.write(f"{exec_line}\n")
+                exec_parts.append("%F")
+            f.write(" ".join(exec_parts) + "\n")
             f.write("Terminal=false\n")
             f.write("Type=Application\n")
             f.write("Categories=Graphics;\n")
@@ -16956,6 +18743,10 @@ Would you like to continue with {distro_name} anyway?"""
                     f"Warning: Could not remove wine-protocol-affinity.desktop: {e}",
                     "warning",
                 )
+
+        if app_name == "Add":
+            # After Affinity.desktop is written, so the handler reuses its Exec= line.
+            self.create_affinity_url_handler()
 
         # Create desktop shortcut
         desktop_shortcut = Path.home() / "Desktop" / desktop_file.name
@@ -17357,6 +19148,112 @@ Would you like to continue with {distro_name} anyway?"""
                 )
         except Exception as e:
             self.log(f"Could not register Affinity document types: {e}", "warning")
+
+    def get_ubuntu_snapshot_launcher_script(self, require_exists=True):
+        """Return the preserved Ubuntu launcher script path."""
+        script_path = Path(__file__).resolve().parent / "AffinityUbuntuLauncher.sh"
+        if require_exists and not script_path.exists():
+            raise FileNotFoundError(f"Ubuntu Snapshot launcher not found: {script_path}")
+        return script_path
+
+    def launch_affinity_v3_ubuntu_snapshot(self):
+        """Launch Affinity using the preserved Ubuntu snapshot script."""
+        self.log("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        self.log("Launching Affinity v3 via Ubuntu Snapshot launcher", "info")
+        self.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+
+        try:
+            script_path = self.get_ubuntu_snapshot_launcher_script()
+        except FileNotFoundError as e:
+            self.log(str(e), "error")
+            self.show_message("Launcher Not Found", str(e), "error")
+            return
+
+        try:
+            subprocess.Popen(
+                ["bash", str(script_path), "launch"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True
+            )
+            self.log("✓ Ubuntu Snapshot launcher started", "success")
+            self.log("Affinity should open in a moment...", "info")
+        except Exception as e:
+            self.log(f"✗ Failed to start Ubuntu Snapshot launcher: {e}", "error")
+            self.show_message(
+                "Launch Failed",
+                f"Failed to start the Ubuntu Snapshot launcher:\n\n{str(e)}",
+                "error"
+            )
+
+    def install_ubuntu_snapshot_launchers(self, show_dialog=True):
+        """Install menu and desktop launchers that use the preserved Ubuntu snapshot script."""
+        self.log("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        self.log("Installing Ubuntu Snapshot launchers", "info")
+        self.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+
+        try:
+            script_path = self.get_ubuntu_snapshot_launcher_script()
+        except FileNotFoundError as e:
+            self.log(str(e), "error")
+            if show_dialog:
+                self.show_message("Launcher Not Found", str(e), "error")
+            return False
+
+        targets = [
+            ("applications menu", Path.home() / ".local" / "share" / "applications" / "Affinity.desktop"),
+        ]
+        desktop_target = Path.home() / "Desktop" / "Affinity.desktop"
+        if desktop_target.parent.exists():
+            targets.append(("desktop", desktop_target))
+
+        installed_targets = []
+        failed_targets = []
+
+        for target_label, target_path in targets:
+            env = os.environ.copy()
+            env["AFFINITY_DESKTOP_FILE"] = str(target_path)
+            success, stdout, stderr = self.run_command(
+                ["bash", str(script_path), "desktop"],
+                check=False,
+                capture=True,
+                env=env
+            )
+
+            if success and target_path.exists():
+                if target_path == desktop_target:
+                    try:
+                        target_path.chmod(target_path.stat().st_mode | 0o111)
+                    except Exception as chmod_error:
+                        self.log(f"Warning: Could not mark desktop launcher as executable: {chmod_error}", "warning")
+                installed_targets.append(str(target_path))
+                self.log(f"Ubuntu Snapshot launcher installed for {target_label}: {target_path}", "success")
+            else:
+                error_text = stderr.strip() or stdout.strip() or "unknown error"
+                failed_targets.append(f"{target_path} ({error_text})")
+                self.log(f"Failed to install Ubuntu Snapshot launcher for {target_label}: {error_text}", "error")
+
+        if not installed_targets:
+            if show_dialog:
+                self.show_message(
+                    "Launcher Installation Failed",
+                    "The Ubuntu Snapshot launchers could not be written.\n\n"
+                    + "\n".join(failed_targets),
+                    "error"
+                )
+            return False
+
+        if show_dialog:
+            message = "Ubuntu Snapshot launchers installed successfully:\n\n" + "\n".join(installed_targets)
+            if failed_targets:
+                message += "\n\nSome targets failed:\n" + "\n".join(failed_targets)
+            self.show_message(
+                "Launchers Installed",
+                message,
+                "warning" if failed_targets else "info"
+            )
+
+        return True
 
     def _download_affinity_installer_thread(self, save_path_obj: Path):
         """Worker: Download Affinity installer and end operation."""
@@ -17892,28 +19789,21 @@ Would you like to continue with {distro_name} anyway?"""
 
         # Determine selected renderer
         renderer_map = {
-            0: ("vulkan", "Vulkan"),
-            1: ("opengl", "OpenGL"),
-            2: ("gdi", "GDI"),
+            0: ("vulkan", "Vulkan", "vulkan"),
+            1: ("gl", "OpenGL", "opengl"),
+            2: ("gdi", "GDI", "gdi")
         }
 
         selected_id = button_group.checkedId()
-        renderer_value, renderer_name = renderer_map.get(
-            selected_id, ("vulkan", "Vulkan")
+        renderer_value, renderer_name, winetricks_value = renderer_map.get(
+            selected_id, ("vulkan", "Vulkan", "vulkan")
         )
 
-        # Ensure wine-tkg is available for winetricks (fallback method)
-        self.log("Setting up wine-tkg for winetricks (if needed)...", "info")
-        self.ensure_wine_tkg()  # Don't fail if this doesn't work, it's just a fallback
-
         env = os.environ.copy()
-        env["WINEPREFIX"] = self.directory
-
-        # Use wine-tkg for winetricks if available (fallback method)
-        env = self.get_winetricks_env_with_tkg(env)
-
+        env = self.get_winetricks_env(env)
         # Set Windows version to 11
         self.log("Setting Windows version to 11...", "info")
+        self.stop_prefix_wine_processes(env, reason="setting Windows version")
         success, _, _ = self.run_command(
             [str(wine_cfg), "-v", "win11"], check=False, env=env
         )
@@ -17953,14 +19843,7 @@ Would you like to continue with {distro_name} anyway?"""
             # Fallback to winetricks if direct registry setting fails
             self.log(f"Registry method failed, trying winetricks...", "info")
             success, stdout, stderr = self.run_command(
-                [
-                    "winetricks",
-                    "--unattended",
-                    "--force",
-                    "--no-isolate",
-                    "--optout",
-                    f"renderer={renderer_value}",
-                ],
+                ["winetricks", "--unattended", "--force", "--no-isolate", "--optout", f"renderer={winetricks_value}"],
                 check=False,
                 env=env,
             )
@@ -17997,7 +19880,7 @@ Would you like to continue with {distro_name} anyway?"""
                 # Check for the renderer value we set
                 if renderer_value == "vulkan" and "vulkan" in renderer_check_lower:
                     renderer_verified = True
-                elif renderer_value == "opengl" and "opengl" in renderer_check_lower:
+                elif renderer_value == "gl" and ("gl" in renderer_check_lower or "opengl" in renderer_check_lower):
                     renderer_verified = True
                 elif renderer_value == "gdi" and "gdi" in renderer_check_lower:
                     renderer_verified = True
@@ -18875,6 +20758,105 @@ Would you like to continue with {distro_name} anyway?"""
                 "error",
             )
 
+    def get_wine_user_dir(self):
+        """Return the current Wine user's home directory inside the prefix."""
+        username = os.environ.get("USER") or os.environ.get("LOGNAME") or Path.home().name
+        return Path(self.directory) / "drive_c" / "users" / username
+
+    def configure_file_dialog_shortcuts(self):
+        """Add quick-access shortcuts for Wine file dialogs."""
+        self.log("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        self.log("Configure Wine File Dialog Shortcuts", "info")
+        self.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+
+        prefix_dir = Path(self.directory)
+        user_dir = self.get_wine_user_dir()
+        dosdevices_dir = prefix_dir / "dosdevices"
+        favorites_dir = user_dir / "Favorites"
+        links_dir = user_dir / "Links"
+        home_dir = Path.home()
+
+        if not prefix_dir.exists():
+            self.log("Wine prefix not found. Please set up Wine first.", "error")
+            self.show_message(
+                "Wine Prefix Not Found",
+                "The Wine prefix does not exist yet.\n\nPlease run 'Setup Wine Environment' first.",
+                "error"
+            )
+            return
+
+        created_items = []
+        skipped_items = []
+
+        def ensure_shortcut(link_path, target_path):
+            target_path = Path(target_path)
+            if not target_path.exists():
+                return False, f"target missing: {target_path}"
+
+            try:
+                link_path.parent.mkdir(parents=True, exist_ok=True)
+                if link_path.is_symlink():
+                    current_target = Path(os.path.realpath(link_path))
+                    if current_target == target_path.resolve():
+                        return False, None
+                    link_path.unlink()
+                elif link_path.exists():
+                    return False, f"kept existing entry: {link_path.name}"
+
+                link_path.symlink_to(target_path)
+                return True, None
+            except Exception as e:
+                return False, str(e)
+
+        shortcut_targets = {
+            "Home": home_dir,
+            "Desktop": home_dir / "Desktop",
+            "Documents": home_dir / "Documents",
+            "Downloads": home_dir / "Downloads",
+            "Pictures": home_dir / "Pictures",
+        }
+
+        for folder in (favorites_dir, links_dir):
+            folder.mkdir(parents=True, exist_ok=True)
+            for label, target in shortcut_targets.items():
+                created, info = ensure_shortcut(folder / label, target)
+                if created:
+                    created_items.append(str(folder / label))
+                    self.log(f"Created file dialog shortcut: {folder / label} -> {target}", "success")
+                elif info:
+                    skipped_items.append(f"{folder / label}: {info}")
+
+        home_drive = dosdevices_dir / "h:"
+        created, info = ensure_shortcut(home_drive, home_dir)
+        if created:
+            created_items.append(str(home_drive))
+            self.log(f"Created Home drive mapping: {home_drive} -> {home_dir}", "success")
+        elif info:
+            skipped_items.append(f"{home_drive}: {info}")
+
+        if created_items:
+            self.log("Wine file dialog shortcuts updated", "success")
+            message = (
+                "Wine file dialog shortcuts were updated successfully.\n\n"
+                "You should now see easier access to your Linux home folder:\n"
+                "• H: drive mapped to your home directory\n"
+                "• Home/Documents/Downloads/Pictures shortcuts under Favorites and Links\n\n"
+                "Restart Affinity if its file dialog is already open."
+            )
+            if skipped_items:
+                message += "\n\nSome existing entries were kept unchanged:\n" + "\n".join(skipped_items[:8])
+            self.show_message("File Dialog Shortcuts Updated", message, "info")
+            return
+
+        self.log("No file dialog shortcuts were changed", "warning")
+        message = (
+            "No file dialog shortcuts were changed.\n\n"
+            "The most likely reason is that the shortcuts already exist, or conflicting non-link entries were left untouched."
+        )
+        if skipped_items:
+            message += "\n\nDetails:\n" + "\n".join(skipped_items[:8])
+        self.show_message("No Changes Applied", message, "warning")
+
     def uninstall_affinity_linux(self):
         """Uninstall Affinity Linux by deleting the install directory (self.directory) — this may be the default ~/.AffinityLinux or a custom location"""
         self.log(
@@ -18907,20 +20889,14 @@ Would you like to continue with {distro_name} anyway?"""
             self.log("Uninstall cancelled by user", "warning")
             return
 
-        # Stop Wine processes in THE PREFIX BEING UNINSTALLED. run_command
-        # defaults its environment to os.environ.copy(), so with no WINEPREFIX
-        # set this killed the wineserver of whatever prefix this process had
-        # inherited -- or ~/.wine -- and killing a wineserver takes every
-        # process it serves with it. Same fault as the startup pkill, in the one
-        # operation where the user is least expecting another prefix to be
-        # touched.
+        # Stop Wine processes first. `wineserver -k` alone leaves msiexec and
+        # setup.exe behind, and those hold files open while we delete them.
         self.log("Stopping Wine processes...", "info")
         try:
-            env = os.environ.copy()
-            env["WINEPREFIX"] = self.directory
-            self.run_command(["wineserver", "-k"], check=False, env=env)
-            time.sleep(2)
-            self.log("Wine processes stopped", "success")
+            if self.stop_prefix_wine_processes(reason="uninstalling", wait_seconds=8):
+                self.log("Wine processes stopped", "success")
+            else:
+                self.log("Warning: some Wine processes may still be running", "warning")
         except Exception as e:
             self.log(f"Warning: Could not stop all Wine processes: {e}", "warning")
 
@@ -18945,6 +20921,8 @@ Would you like to continue with {distro_name} anyway?"""
                     self.log(
                         f"Warning: Could not remove {desktop_file.name}: {e}", "warning"
                     )
+
+        self.remove_affinity_url_handler()
 
         # Also remove Wine's default entries if they exist
         wine_desktop_dir = desktop_dir / "wine" / "Programs"
@@ -19005,7 +20983,11 @@ Would you like to continue with {distro_name} anyway?"""
                     "Standard removal incomplete, falling back to rm -rf...", "warning"
                 )
                 result = subprocess.run(
-                    ["rm", "-rf", str(affinity_dir)], capture_output=True, text=True
+                    ["rm", "-rf", str(affinity_dir)],
+                    capture_output=True,
+                    text=True,
+                    errors="replace",
+                    timeout=600,
                 )
                 if result.returncode != 0:
                     raise Exception(f"rm -rf failed: {result.stderr.strip()}")
@@ -19099,8 +21081,14 @@ Would you like to continue with {distro_name} anyway?"""
             )
             return
 
+        if self.affinity_v3_user_data_has_startup_corruption_signature():
+            self.quarantine_affinity_v3_user_data(
+                "Detected a previous Affinity v3 startup log with the JPEG XL corruption signature."
+            )
+
         self.log("Setting up environment variables...", "info")
 
+        synced_mscms_runtime = self.sync_mscms_shim_into_app_dir(affinity_exe.parent, "Affinity")
         # Prepare environment variables
         env = os.environ.copy()
 
@@ -19116,10 +21104,25 @@ Would you like to continue with {distro_name} anyway?"""
         env["WINE"] = str(wine_bin)
         env["WINEPREFIX"] = self.directory
         env["WINEDEBUG"] = "-all,fixme-all"
-        env["WINEDLLOVERRIDES"] = "opencl="
+        dll_overrides = ["d3d12=n,b", "d3d12core=n,b"]
+        if synced_mscms_runtime or (affinity_exe.parent / "mscms.dll").exists():
+            dll_overrides.append("mscms=n,b")
+            if synced_mscms_runtime:
+                self.log("Enabled the local mscms compatibility shim for Affinity", "info")
+        env["WINEDLLOVERRIDES"] = ";".join(dll_overrides)
+        env.setdefault("DISPLAY", os.environ.get("DISPLAY", ":0"))
+        xauthority = os.environ.get("XAUTHORITY")
+        if xauthority:
+            env["XAUTHORITY"] = xauthority
 
+        wineserver_bin = self.get_wine_path("wineserver")
+        if wineserver_bin.exists():
+            env["WINESERVER"] = str(wineserver_bin)
+
+        self.force_wine_x11_driver_if_needed(env)
         # Add GPU selection environment variables if configured
-        gpu_env = self.get_gpu_env_vars()
+        selected_gpu = self.get_selected_gpu()
+        gpu_env = self.get_gpu_env_vars(selected_gpu)
         if gpu_env:
             # Parse GPU env vars and add to environment
             for env_var in gpu_env.strip().split():
@@ -19127,25 +21130,29 @@ Would you like to continue with {distro_name} anyway?"""
                     key, value = env_var.split("=", 1)
                     env[key] = value
 
+        session_type = (os.environ.get("XDG_SESSION_TYPE") or "").lower()
+
         # Check renderer setting - only set DXVK/VKD3D if Vulkan is selected
         renderer = self.get_renderer_setting()
 
         if renderer == "vulkan":
-            # DXVK settings (only for Vulkan renderer)
-            env["DXVK_ASYNC"] = "0"
-            env["DXVK_CONFIG"] = (
-                "d3d9.deferSurfaceCreation = True; d3d9.shaderModel = 1"
-            )
-            env["DXVK_FRAME_RATE"] = "60"
-            env["DXVK_LOG_LEVEL"] = "none"
+            synced_runtime = self.sync_vkd3d_runtime_into_app_dir(affinity_exe.parent, "Affinity")
+            if synced_runtime:
+                self.log("Updated the local vkd3d-proton runtime for Affinity", "info")
 
-            # VKD3D settings (only for Vulkan renderer)
-            env["VKD3D_DEBUG"] = "none"
-            env["VKD3D_DISABLE_EXTENSIONS"] = "VK_KHR_present_id"
-            env["VKD3D_FEATURE_LEVEL"] = "12_1"
-            env["VKD3D_FRAME_RATE"] = "60"
-            env["VKD3D_SHADER_DEBUG"] = "none"
-            env["VKD3D_SHADER_MODEL"] = "6_5"
+            env.update(self.get_vulkan_runtime_env_vars(selected_gpu))
+            if session_type == "wayland":
+                self.log(
+                    "Wayland session detected; disabling VK_KHR_present_id and VK_KHR_present_wait for KWin/XWayland stability.",
+                    "info",
+                )
+
+            vulkan_device_env = self.get_vulkan_device_select_env(selected_gpu)
+            if vulkan_device_env:
+                env.update(vulkan_device_env)
+                selector = vulkan_device_env.get("MESA_VK_DEVICE_SELECT")
+                if selector:
+                    self.log(f"Forcing Vulkan device selection to {selector}", "info")
         else:
             # For OpenGL or GDI, disable DXVK/VKD3D to prevent Vulkan initialization errors
             # Also disable DLL overrides that might force Vulkan
@@ -19214,22 +21221,23 @@ Would you like to continue with {distro_name} anyway?"""
         self.log("✓ Environment variables configured", "success")
         self.log(f"Wine: {wine_bin}", "info")
         self.log(f"WINEPREFIX: {self.directory}", "info")
-        self.log(f"Affinity: {launch_target}", "info")
+        self.log(f"Affinity: {affinity_exe}", "info")
 
-        # Launch Affinity using wine start
+        # Launch Affinity directly; wine start was less reliable for Affinity v3 here.
         self.log("\nLaunching Affinity v3...", "info")
 
-        # Use wine start to launch the application
-        wine_start_cmd = [
+        wine_launch_cmd = [
             str(wine_bin),
-            "start",
-            launch_target,
+            str(affinity_exe)
         ]
+        launch_prefix = self.get_gpu_launch_prefix()
+        if launch_prefix:
+            wine_launch_cmd = launch_prefix + wine_launch_cmd
 
         try:
             # Launch in background (non-blocking)
             process = subprocess.Popen(
-                wine_start_cmd,
+                wine_launch_cmd,
                 env=env,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -19487,6 +21495,7 @@ Would you like to continue with {distro_name} anyway?"""
             self.log(
                 f"✓ Affinity.desktop updated to launch {exe_name}", "success"
             )
+            self.create_affinity_url_handler()
 
         except Exception as e:
             self.log(f"✗ Failed to patch Affinity.desktop: {e}", "error")

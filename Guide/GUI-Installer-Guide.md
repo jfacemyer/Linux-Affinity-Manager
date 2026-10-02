@@ -110,6 +110,19 @@ Installs Windows components needed by Affinity (like .NET Framework, fonts, Visu
 
 **Time required:** 10-20 minutes
 
+#### **Fix Canva Sign-in (v3)**
+Installs what the Canva sign-in needs in an existing Affinity v3 prefix.
+
+**What it does:**
+- Copies the .NET WinRT facades from the .NET 4.8 offline installer into the prefix
+- Registers `affinity-url-handler.desktop` as the `affinity://` handler
+
+**When to use:** If the browser sign-in never returns to Affinity, or Affinity crashes when it does.
+
+**Wine version:** 9.14 or 10.10 (tested with 10.10). With Wine 11.12 it shows a message and changes nothing.
+
+**Requirements:** `7z`, WinMetadata in the prefix, and about 350 MB of temporary space. Downloads about 70 MB if the winetricks cache does not have the .NET 4.8 installer.
+
 #### **Reinstall WinMetadata**
 Re-downloads and installs Windows metadata files (may get corrupted during Affinity installation).
 
@@ -117,6 +130,7 @@ Re-downloads and installs Windows metadata files (may get corrupted during Affin
 - Removes old metadata files
 - Downloads fresh Windows metadata from archive.org
 - Extracts them to the Wine environment
+- For Affinity v3, also runs **Fix Canva Sign-in (v3)**
 
 **When to use:** If you get errors about missing Windows components or metadata corruption.
 

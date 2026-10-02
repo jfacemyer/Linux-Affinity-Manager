@@ -28,6 +28,19 @@ sudo apt install wine wine64 wine32 libwine libwine:i386 fonts-wine \
   python3-pyqt6
 ```
 
+### Ubuntu 26.04
+
+Ubuntu 26.04 no longer ships `p7zip-full` (the `7zip` package provides the `7z` command) or `dotnet-sdk-8.0`, and apt refuses the whole command if a package is missing. Use:
+
+```bash
+sudo dpkg --add-architecture i386
+sudo apt update
+sudo apt install wine wine64 wine32 libwine libwine:i386 fonts-wine \
+  winetricks wget curl 7zip tar jq zstd \
+  dotnet-sdk-10.0 \
+  python3-pyqt6 python3-pyqt6.qtsvg
+```
+
 ## Section B: Ubuntu 23.10 and Older
 
 These versions use WineHQ staging because the official repositories no longer carry a compatible Wine for them.

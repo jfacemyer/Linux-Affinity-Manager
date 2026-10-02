@@ -1,5 +1,15 @@
 # AffinityOnLinux
 
+All Future Work is to be Halted! 
+2 years ago i started my own project local Called Infinity Photo and 
+progress as of now is Pretty amazing and almost on par with photoshop and Affinity it's self
+while more time i needed before release to the public for linux
+progress can be watched on my discord 
+
+<img width="2560" height="1365" alt="image" src="https://github.com/user-attachments/assets/5845aaae-6cf2-427c-b44c-af3079a8f39e" />
+
+
+
 > **⚠️ IMPORTANT: Before Opening Issues**
 > 
 > **DO NOT open GitHub issues until you have:**
