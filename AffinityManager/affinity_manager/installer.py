@@ -25,8 +25,9 @@ ENV_SCRIPT = "AFFINITY_INSTALLER_SCRIPT"
 # that work is upstream, a checkout sitting on main has an installer that will
 # ignore the prefix it is handed -- so which branch is in use is not a detail,
 # and is reported rather than assumed.
-PREFERRED_REMOTE = "https://forgejo.facemyer.net/facemyer/AffinityOnLinux.git"
-PREFERRED_BRANCH = "experimental/affinity-3.3"
+PREFERRED_REMOTE = (os.environ.get("AFFINITY_MANAGER_REPO", "").strip().rstrip("/")
+                    or "https://github.com/jfacemyer/Linux-Affinity-Manager") + ".git"
+PREFERRED_BRANCH = os.environ.get("AFFINITY_MANAGER_BRANCH", "").strip() or "main"
 ENV_INSTALL_DIR = "AFFINITY_INSTALL_DIR"
 ENV_INSTALLER_FILE = "AFFINITY_INSTALLER_FILE"
 

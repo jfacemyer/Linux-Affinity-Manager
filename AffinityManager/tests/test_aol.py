@@ -153,7 +153,7 @@ def test_a_vendored_installer_is_not_warned_about_for_its_branch():
 
     info = {
         "found": True, "script": "/x/AffinityScripts/AffinityLinuxInstaller.py",
-        "branch": "main", "commit": "abc1234", "dirty": False,
+        "branch": "some-feature", "commit": "abc1234", "dirty": False,
         "supports_install_dir": True, "on_preferred_branch": False,
         "vendored": True,
     }
