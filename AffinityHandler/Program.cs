@@ -874,16 +874,13 @@ namespace AffinityOnLinux
                 UseShellExecute = false,
                 CreateNoWindow = true,
             };
-            // Belt and braces: the prefix registry already carries opencl="".
-            // With OpenCL live on a real GPU the startup deadlock is ~100%
-            // instead of ~33%.
-            // Append rather than assign. Replacing the value discards whatever
-            // the launcher or the user set -- a d2d1 or dxgi override put there
-            // deliberately vanishes for the process we start, and the symptom is
-            // a rendering difference nobody can account for.
-            string overrides = psi.EnvironmentVariables["WINEDLLOVERRIDES"];
-            psi.EnvironmentVariables["WINEDLLOVERRIDES"] =
-                string.IsNullOrEmpty(overrides) ? "opencl=d" : overrides + ";opencl=d";
+            // OpenCL is left to the prefix registry, which the installer sets
+            // per Wine build: opencl="" (off) on 11.11 to 11.18, where it
+            // deadlocks Affinity at startup on a real GPU, and nothing from
+            // 11.19, where the patch set fixes it. This used to append
+            // opencl=d here as well, which kept OpenCL off on every build.
+            // WINEDLLOVERRIDES from the launcher or the user passes through
+            // untouched.
             try { return Process.Start(psi); }
             catch (Exception ex) { Log("start failed: " + ex.Message); return null; }
         }

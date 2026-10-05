@@ -301,7 +301,7 @@ def source_raw_url(path):
 # The handler this installer is meant to install, by content. The piped install
 # fetches it over the network from a branch that can be older than this file,
 # and "it starts with MZ and is over 4KB" does not tell those apart.
-HANDLER_SHA256 = "188e4f214a990c3250dbb4d46cf5b7933bec1c1b23819bb354618c7dc987a6bc"
+HANDLER_SHA256 = "5bd31facbe433a884afab9dd6861d5094726055f3c1706a4d001a800e30ed97a"
 
 # The Wine 11.16 build this installer is meant to install, by content, for the
 # same reason. The 11.16 release was published on 2026-09-11 and never rebuilt;
