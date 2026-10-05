@@ -108,7 +108,7 @@ grep -n 'POC SOURCE' AffinityScripts/AffinityLinuxInstaller.py AffinityManager/r
 |---|---|---|
 | Wine 11.16 tarball | `github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.16-r3/ElementalWarrior-wine-11.16.tar.xz`, pinned by `WINE_11_16_SHA256` | an upstream 11.16 release, once [ryzendew/Affinity-Wine-Builder#9](https://github.com/ryzendew/Affinity-Wine-Builder/pull/9) is merged |
 | Wine 11.18 tarball | `github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.18-r1/ElementalWarrior-wine-11.18.tar.xz`, pinned by `WINE_11_18_SHA256` | an upstream 11.18 release, likewise |
-| AffinityPluginLoader + WineFix | `github.com/jfacemyer/AffinityPluginLoader`, release `wine-fixes-1` (`APL_RELEASE_REPO`, `APL_RELEASE_TAG`), each zip pinned in `APL_ASSET_SHA256` | `noahc3/AffinityPluginLoader`'s next release, once it carries upstream `dev` and the fork's two fixes |
+| AffinityPluginLoader + WineFix | `github.com/jfacemyer/AffinityPluginLoader`, release `wine-fixes-2` (`APL_RELEASE_REPO`, `APL_RELEASE_TAG`), each zip pinned in `APL_ASSET_SHA256` | `noahc3/AffinityPluginLoader`'s next release, once it carries upstream `dev` and the fork's fixes |
 | `affinity-on-linux.exe`, MIME definitions | the source branch: `SOURCE_REPO` / `SOURCE_BRANCH` (`github.com/jfacemyer/Linux-Affinity-Manager`, `main`), or whatever the manager was started from | upstream's repository, if this work is merged there |
 | The manager, via `AffinityManager/run.py` (`REPO`, `BRANCH`) | `github.com/jfacemyer/Linux-Affinity-Manager`, branch `main` | likewise |
 

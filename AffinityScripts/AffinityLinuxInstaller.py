@@ -317,16 +317,16 @@ WINE_11_18_SHA256 = "c325bf804407abcf8070d02066b5be00680b0339e796a6583b4a1d2dae9
 
 # The plugin loader. Upstream's latest release (v0.3.0, April) predates Canva
 # sign-in, the command-line open fix and the runtime Direct2D patches, all of
-# which sit unreleased on its dev branch. This build is that dev branch plus two
+# which sit unreleased on its dev branch. This build is that dev branch plus
 # fixes -- libplugins.dll kept loaded (random crashes), launch arguments quoted
-# (paths with spaces) -- released on a fork until upstream publishes one. Each
-# asset is pinned, like the Wine build.
+# (paths with spaces), the color picker under Wine -- released on a fork until
+# upstream publishes one. Each asset is pinned, like the Wine build.
 # POC SOURCE -- repoint at an upstream release that carries these.
 APL_RELEASE_REPO = "jfacemyer/AffinityPluginLoader"
-APL_RELEASE_TAG = "wine-fixes-1"
+APL_RELEASE_TAG = "wine-fixes-2"
 APL_ASSET_SHA256 = {
-    "affinitypluginloader-v0.3.0.zip": "d1408f2014f5e3eeebf3f6878cd82e9872e92c479a7884c7316867570637fb5d",
-    "winefix-v0.3.0.zip": "63e5de0e966a590ae7433a6145a3f71a04ab69b0f385c2c24c521ef0e573e54b",
+    "affinitypluginloader-v0.3.0.zip": "df2860dcf7241b927877088d3005d56b5cf1fb5ea16f4a080caf899b0c2b5794",
+    "winefix-v0.3.0.zip": "b7442a4752556469b3c60167d9efeaa6f9af538b2b46d2a0ba25880d60b46e62",
 }
 
 
