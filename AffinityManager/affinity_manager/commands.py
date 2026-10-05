@@ -14,6 +14,7 @@ line, built from the same data so the thing you copy is the thing that runs.
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -21,10 +22,28 @@ from pathlib import Path
 
 from . import probe
 
-# Affinity deadlocks at startup when OpenCL initialises on a real GPU, on every
-# Wine from 11.11 onward. Disabling opencl avoids it and costs nothing that
-# vkd3d-proton does not already provide.
+# Affinity deadlocks at startup when OpenCL initialises on a real GPU, on Wine
+# 11.11 to 11.18. The Affinity patch set fixes it from 11.19 (its OpenCL event
+# callback patch), so launches on those builds leave opencl alone and Affinity's
+# own preference decides. A build whose version cannot be read -- system wine --
+# keeps it off.
 AFFINITY_ENV = {"WINEDLLOVERRIDES": "opencl=d"}
+OPENCL_DEADLOCK = ((11, 11), (11, 19))
+
+
+def wine_build_version(build: str):
+    """(major, minor) from a build name such as "ElementalWarrior-wine-11.19", or None."""
+    m = re.search(r"wine-(\d+)\.(\d+)", str(build))
+    return (int(m.group(1)), int(m.group(2))) if m else None
+
+
+def affinity_env(build: str) -> dict:
+    """Environment Affinity is launched with on this Wine build."""
+    version = wine_build_version(build)
+    low, high = OPENCL_DEADLOCK
+    if version is None or low <= version < high:
+        return dict(AFFINITY_ENV)
+    return {}
 
 
 class Command:
@@ -114,7 +133,7 @@ def for_prefix(prefix) -> list[Command]:
                     label=label,
                     detail=detail,
                     argv=[wine, exe],
-                    env={**base_env, **AFFINITY_ENV},
+                    env={**base_env, **affinity_env(wine_label)},
                 )
             )
 
