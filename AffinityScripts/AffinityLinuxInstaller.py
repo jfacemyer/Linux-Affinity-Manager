@@ -12465,8 +12465,11 @@ class AffinityInstallerGUI(QMainWindow):
     #           <- libraster <- libpersona
     #
     # Wine builds old enough to predate the regression are left alone, so
-    # anyone who wants OpenCL can still have it by choosing one.
+    # anyone who wants OpenCL can still have it by choosing one. So are the
+    # builds from 11.19, whose Affinity patch set fixes the event callbacks
+    # the rasteriser waits on.
     OPENCL_DEADLOCK_FROM = (11, 11)
+    OPENCL_FIXED_FROM = (11, 19)
 
     def wine_deadlocks_on_opencl(self, wine_version=None):
         version = wine_version or self.get_current_wine_version() or ""
@@ -12478,7 +12481,7 @@ class AffinityInstallerGUI(QMainWindow):
             parts.append(int(digits))
         if len(parts) < 2:
             return False
-        return (parts[0], parts[1]) >= self.OPENCL_DEADLOCK_FROM
+        return self.OPENCL_DEADLOCK_FROM <= (parts[0], parts[1]) < self.OPENCL_FIXED_FROM
 
     def _wine_download_matches(self, wine_file, config):
         """Is this the Wine build the installer was made for?
