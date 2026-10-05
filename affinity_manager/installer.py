@@ -144,8 +144,8 @@ def launch_affinity(prefix, *, wine_build: str | None = None) -> subprocess.Pope
     """Start Affinity in a prefix.
 
     Goes through AffinityHook.exe when it is there so plugins load, and falls
-    back to Affinity.exe when it is not. opencl is disabled: on a real GPU it
-    deadlocks Affinity at startup on every Wine from 11.11 onward."""
+    back to Affinity.exe when it is not. opencl is disabled on the builds where,
+    on a real GPU, it deadlocks Affinity at startup (Wine 11.11 to 11.18)."""
     prefix = Path(prefix).expanduser()
     app = prefix / "drive_c" / "Program Files" / "Affinity" / "Affinity"
     exe = app / "AffinityHook.exe"
@@ -168,7 +168,9 @@ def launch_affinity(prefix, *, wine_build: str | None = None) -> subprocess.Pope
 
     env = dict(os.environ)
     env["WINEPREFIX"] = str(prefix)
-    env["WINEDLLOVERRIDES"] = "opencl=d"
+    from .commands import affinity_env
+
+    env.update(affinity_env(build))
     return subprocess.Popen(
         [str(wine), str(exe)],
         env=env,
