@@ -15698,6 +15698,7 @@ Would you like to continue with {distro_name} anyway?"""
             if app_name == "Add" and self.affinity_v3_exe_path().exists():
                 self.install_windowsruntime_facades()
                 self.create_affinity_url_handler()
+                self.precompile_affinity()
 
             # Set up wintypes.dll and Wine overrides for Affinity apps (v2 and v3) - only for Wine < 11.12
             if app_name in ["Photo", "Designer", "Publisher", "Add"]:
@@ -15743,6 +15744,7 @@ Would you like to continue with {distro_name} anyway?"""
 
                 if app_path.exists():
                     self.log(f"Found application at: {app_path}", "success")
+                    self.precompile_affinity(app_path)
                     # Automatically create desktop entry
                     # Call directly - create_desktop_entry uses signals so it's thread-safe
                     try:
@@ -16831,6 +16833,72 @@ Would you like to continue with {distro_name} anyway?"""
         if not match:
             return "unknown"
         return "supported" if match.group(1) in ("9", "10") else "unsupported"
+
+    @staticmethod
+    def prefix_windows_path(directory, path):
+        """Return the Windows path of a file in a prefix: C:\\ for drive_c, Z:\\ otherwise."""
+        drive_c = Path(directory) / "drive_c"
+        path = Path(path)
+        try:
+            return "C:\\" + str(path.relative_to(drive_c)).replace("/", "\\")
+        except ValueError:
+            return "Z:" + str(path).replace("/", "\\")
+
+    def precompile_affinity(self, exe_path=None):
+        """Compile Affinity's .NET assemblies to native images with ngen, as Windows does.
+
+        Windows' .NET Framework precompiles an installed application's assemblies
+        in the background. Under Wine nothing does, so Affinity JIT-compiles its own
+        code at every launch and the first time each part of it is used. The first
+        studio switch in a session took 1.3-1.4 s, and 0.8-1.0 s with native images.
+        The images are tied to the assemblies they were made from: after an Affinity
+        update .NET ignores them and JIT-compiles again until this runs again.
+
+        The 64-bit ngen.exe has hung under Wine 11's new WoW64 during the .NET
+        winetricks verbs, so this has a deadline, and failing is not an error:
+        Affinity runs the same without native images, only slower to warm up.
+        """
+        exe = Path(exe_path) if exe_path else self.affinity_v3_exe_path()
+        if not exe.exists():
+            return False
+        if not self.has_dotnet48_runtime():
+            self.log(".NET Framework 4.8 is not installed in the prefix, skipping native images", "warning")
+            return False
+        framework = Path(self.directory) / "drive_c" / "windows" / "Microsoft.NET" / "Framework64" / "v4.0.30319"
+        if not (framework / "ngen.exe").exists():
+            self.log("ngen.exe not found in the prefix, skipping native images", "warning")
+            return False
+        wine = self.get_wine_path("wine")
+        if not wine.exists():
+            return False
+
+        env = os.environ.copy()
+        env["WINEPREFIX"] = str(self.directory)
+        env["WINEDEBUG"] = "-all"
+        self.update_progress_text("Compiling Affinity to native code...")
+        self.log("Compiling Affinity's .NET assemblies to native images (ngen), a minute or two...", "info")
+        success, stdout, stderr = self.run_command(
+            [
+                str(wine),
+                self.prefix_windows_path(self.directory, framework / "ngen.exe"),
+                "install",
+                self.prefix_windows_path(self.directory, exe),
+            ],
+            check=False,
+            env=env,
+            timeout=900,
+        )
+        if success:
+            self.log("Affinity compiled to native images: it warms up faster", "success")
+            return True
+        if (stderr or "").startswith("Timed out"):
+            self.log("ngen did not finish; Affinity will run without native images", "warning")
+            for line in kill_stalled_wine_processes(self.directory) or []:
+                self.log(line, "info")
+        else:
+            last = ((stdout or "") + (stderr or "")).strip().splitlines()[-1:] or [""]
+            self.log(f"ngen failed ({last[0]}); Affinity will run without native images", "warning")
+        return False
 
     def install_windowsruntime_facades(self):
         """Install the .NET Framework WinRT facades that `winetricks dotnet48` leaves out.

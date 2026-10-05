@@ -406,3 +406,72 @@ def test_has_dotnet48_runtime_ignores_other_keys(harness, tmp_path):
         '"Install"=dword:00000001\n'
     )
     assert harness.has_dotnet48_runtime() is False
+
+
+# --------------------------------------------------------------------------- #
+# native images (ngen)
+
+def _ngen_harness(ali, harness, tmp_path, run_result):
+    """precompile_affinity on the stand-in, with Wine, .NET and run_command stubbed."""
+    for name in ("precompile_affinity", "prefix_windows_path", "affinity_v3_exe_path"):
+        setattr(type(harness), name, inspect.getattr_static(ali.AffinityInstallerGUI, name))
+    harness.calls = []
+    harness.has_dotnet48_runtime = lambda: True
+    harness.update_progress_text = lambda text: None
+    wine = tmp_path / "wine-dist" / "bin" / "wine"
+    wine.parent.mkdir(parents=True)
+    wine.write_text("")
+    harness.get_wine_path = lambda binary="wine": wine
+
+    def run_command(command, check=True, shell=False, capture=True, env=None, timeout=None):
+        harness.calls.append((command, env, timeout))
+        return run_result
+
+    harness.run_command = run_command
+    framework = tmp_path / "drive_c" / "windows" / "Microsoft.NET" / "Framework64" / "v4.0.30319"
+    framework.mkdir(parents=True)
+    (framework / "ngen.exe").write_text("")
+    exe = tmp_path / "drive_c" / "Program Files" / "Affinity" / "Affinity" / "Affinity.exe"
+    exe.parent.mkdir(parents=True)
+    exe.write_text("")
+    return harness
+
+
+def test_prefix_windows_path(ali, tmp_path):
+    conv = ali.AffinityInstallerGUI.prefix_windows_path
+    assert conv(tmp_path, tmp_path / "drive_c" / "Program Files" / "Affinity" / "A.exe") == \
+        "C:\\Program Files\\Affinity\\A.exe"
+    assert conv(tmp_path, "/mnt/work/x.afphoto") == "Z:\\mnt\\work\\x.afphoto"
+
+
+def test_precompile_affinity_runs_ngen_install_with_a_deadline(ali, harness, tmp_path):
+    h = _ngen_harness(ali, harness, tmp_path, (True, "", ""))
+    assert h.precompile_affinity() is True
+    (command, env, timeout), = h.calls
+    assert command[1:] == [
+        "C:\\windows\\Microsoft.NET\\Framework64\\v4.0.30319\\ngen.exe",
+        "install",
+        "C:\\Program Files\\Affinity\\Affinity\\Affinity.exe",
+    ]
+    assert env["WINEPREFIX"] == str(tmp_path)
+    assert timeout and timeout <= 900
+
+
+def test_precompile_affinity_failure_is_only_a_warning(ali, harness, tmp_path):
+    h = _ngen_harness(ali, harness, tmp_path, (False, "", "ngen: something broke"))
+    assert h.precompile_affinity() is False
+    assert not any(level == "error" for level, _ in h.log_lines)
+    assert any("without native images" in message for _, message in h.log_lines)
+
+
+def test_precompile_affinity_skips_without_dotnet(ali, harness, tmp_path):
+    h = _ngen_harness(ali, harness, tmp_path, (True, "", ""))
+    h.has_dotnet48_runtime = lambda: False
+    assert h.precompile_affinity() is False
+    assert h.calls == []
+
+
+def test_precompile_affinity_skips_when_affinity_is_missing(ali, harness, tmp_path):
+    h = _ngen_harness(ali, harness, tmp_path, (True, "", ""))
+    assert h.precompile_affinity(tmp_path / "drive_c" / "nope.exe") is False
+    assert h.calls == []
