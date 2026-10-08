@@ -116,3 +116,16 @@ def test_the_default_belongs_to_its_prefix_for_removal(host):
     work = make_prefix(root, "Work")
     defaultentry.apply(defaultentry.plan("Work", work))
     assert defaultentry.main_entry() in desktopentry.entries_for("Work")
+
+
+def test_launch_uses_the_prefixs_wine_not_system_wine(tmp_path, monkeypatch):
+    """active_wine says "<build> (link)" for a prefix that is not running; that
+    label used as a directory sent Affinity to system Wine."""
+    from affinity_manager import installer, probe
+    prefix = make_prefix(tmp_path, "Work")
+    started = {}
+    monkeypatch.setattr(installer.subprocess, "Popen",
+                        lambda argv, **kw: started.setdefault("argv", argv))
+    monkeypatch.setattr(probe, "active_wine", lambda p: "ElementalWarrior-wine-11.19 (link)")
+    installer.launch_affinity(prefix)
+    assert started["argv"][0] == str(prefix / "ElementalWarrior-wine-11.19" / "bin" / "wine")

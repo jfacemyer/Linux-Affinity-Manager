@@ -162,9 +162,16 @@ def launch_affinity(prefix, *, wine_build: str | None = None) -> subprocess.Pope
     if not build:
         raise FileNotFoundError(f"No Wine build found in {prefix}")
 
+    # active_wine labels a guess from the symlink "<build> (link)": a label for
+    # people, not a directory. Used as one, the path did not exist and Affinity
+    # was started under system Wine -- none of the patches, and a black UI.
+    build = build.removesuffix(" (link)")
     wine = prefix / build / "bin" / "wine"
     if not wine.is_file():
-        wine = Path(shutil.which("wine") or "wine")
+        wine = prefix / "ElementalWarriorWine" / "bin" / "wine"
+    if not wine.is_file():
+        # Never system Wine: it is not the build this prefix was set up with.
+        raise FileNotFoundError(f"No Wine build {build} in {prefix}")
 
     env = dict(os.environ)
     env["WINEPREFIX"] = str(prefix)
