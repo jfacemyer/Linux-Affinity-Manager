@@ -263,6 +263,17 @@ ENV_INSTALL_DIR = "AFFINITY_INSTALL_DIR"
 ENV_INSTALLER_FILE = "AFFINITY_INSTALLER_FILE"
 
 
+# Every other Wine build is several hundred MB, and switching versions
+# downloads the one asked for when it is not cached. So a setup caches only the
+# build it installs; AFFINITY_CACHE_ALL_WINE=1 also caches all the others in
+# <prefix>/Wine-Switch, for switching later without a connection.
+ENV_CACHE_ALL_WINE = "AFFINITY_CACHE_ALL_WINE"
+
+
+def cache_all_wine_versions():
+    return os.environ.get(ENV_CACHE_ALL_WINE, "").strip() == "1"
+
+
 def _sha256_of(path):
     digest = hashlib.sha256()
     with open(path, "rb") as f:
@@ -12232,10 +12243,17 @@ class AffinityInstallerGUI(QMainWindow):
             # hangs during startup on these Wine versions and never finishes.
             self.disable_opencl_if_needed(wine_version)
 
-            # Cache all other Wine versions in background (for future switching)
-            self.update_progress_text("Caching other Wine versions...")
-            self.update_progress(0.72)
-            self._download_all_wine_versions_to_cache(wine_version)
+            if cache_all_wine_versions():
+                self.update_progress_text("Caching other Wine versions...")
+                self.update_progress(0.72)
+                self._download_all_wine_versions_to_cache(wine_version)
+            else:
+                self.log(
+                    "Not caching the other Wine versions; switching downloads the one "
+                    f"chosen. Set {ENV_CACHE_ALL_WINE}=1 to cache them all for offline "
+                    "switching.",
+                    "info",
+                )
 
             if self.check_cancelled():
                 return False

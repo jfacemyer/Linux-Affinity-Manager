@@ -198,6 +198,20 @@ def test_stall_timeout_default_and_override(harness, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# caching the other Wine versions
+# --------------------------------------------------------------------------- #
+
+
+def test_other_wine_versions_are_cached_only_on_request(ali, monkeypatch):
+    monkeypatch.delenv("AFFINITY_CACHE_ALL_WINE", raising=False)
+    assert not ali.cache_all_wine_versions()
+    monkeypatch.setenv("AFFINITY_CACHE_ALL_WINE", "0")
+    assert not ali.cache_all_wine_versions()
+    monkeypatch.setenv("AFFINITY_CACHE_ALL_WINE", "1")
+    assert ali.cache_all_wine_versions()
+
+
+# --------------------------------------------------------------------------- #
 # release host override
 # --------------------------------------------------------------------------- #
 
