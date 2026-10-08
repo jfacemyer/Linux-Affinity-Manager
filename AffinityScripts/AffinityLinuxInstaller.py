@@ -276,6 +276,50 @@ def cache_all_wine_versions():
     return os.environ.get(ENV_CACHE_ALL_WINE, "").strip() == "1"
 
 
+# Affinity installers kept after a successful install, named by the version
+# they installed, so a later install -- in any prefix -- can use one instead of
+# downloading 650 MB again, or install an older Affinity on purpose.
+def kept_installers_dir():
+    base = os.environ.get("XDG_CACHE_HOME", "").strip() or os.path.join(Path.home(), ".cache")
+    return Path(base) / "AffinityOnLinux" / "installers"
+
+
+def pe_file_version(path):
+    """The FileVersion string in a PE's version resource, or None."""
+    try:
+        data = Path(path).read_bytes()
+    except OSError:
+        return None
+    key = "FileVersion".encode("utf-16-le") + b"\0\0"
+    i = data.rfind(key)
+    if i < 0:
+        return None
+    i += len(key)
+    i += (-i) % 4                     # values are 32-bit aligned
+    end = data.find(b"\0\0", i)
+    while end > 0 and (end - i) % 2:
+        end = data.find(b"\0\0", end + 1)
+    text = data[i:end].decode("utf-16-le", errors="replace").strip() if end > i else ""
+    match = re.match(r"\d+(?:\.\d+){1,3}", text)
+    return match.group(0) if match else None
+
+
+def kept_installers():
+    """[(version, path, downloaded)] newest version first; downloaded is the
+    file's date, which is kept from the download."""
+    out = []
+    d = kept_installers_dir()
+    try:
+        for f in d.glob("Affinity-x64-*.exe"):
+            version = f.stem[len("Affinity-x64-"):]
+            if re.fullmatch(r"\d+(?:\.\d+){1,3}", version):
+                out.append((version, f, f.stat().st_mtime))
+    except OSError:
+        return []
+    out.sort(key=lambda x: tuple(int(n) for n in x[0].split(".")), reverse=True)
+    return out
+
+
 # Serialises ensure_patcher_files across the installers in one process.
 _PATCHER_FILES_LOCK = threading.Lock()
 
@@ -10297,6 +10341,21 @@ class AffinityInstallerGUI(QMainWindow):
         options_layout.addWidget(custom_frame)
         button_group.addButton(custom_radio, 1)
 
+        # Installers kept by earlier installs, newest version first.
+        kept = kept_installers() if app_code == "Add" else []
+        for n, (version, path, downloaded) in enumerate(kept):
+            kept_frame = QFrame()
+            kept_frame.setObjectName("optionFrame")
+            kept_layout = QVBoxLayout(kept_frame)
+            kept_layout.setContentsMargins(12, 10, 12, 10)
+            kept_radio = QRadioButton(
+                f"Use the Affinity {version} installer, downloaded "
+                f"{time.strftime('%Y-%m-%d', time.localtime(downloaded))}")
+            kept_radio.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Minimum)
+            kept_layout.addWidget(kept_radio)
+            options_layout.addWidget(kept_frame)
+            button_group.addButton(kept_radio, 2 + n)
+
         main_layout.addWidget(scroll_area, 1)
 
         # Buttons
@@ -10360,6 +10419,10 @@ class AffinityInstallerGUI(QMainWindow):
                 ).start()
                 return
 
+            elif checked_id >= 2:  # an installer kept by an earlier install
+                version, installer_path, _ = kept[checked_id - 2]
+                self.log(f"Using the kept Affinity {version} installer: {installer_path}", "info")
+
             else:  # Provide own file
                 # Open file dialog to select .exe
                 self.log(
@@ -10397,6 +10460,27 @@ class AffinityInstallerGUI(QMainWindow):
                 args=(app_code, installer_path_str),
                 daemon=True,
             ).start()
+
+    def _keep_installer(self, installer, installed_exe):
+        """Name the installer by the version it installed, here and in the
+        shared folder kept_installers_dir(), keeping its download date."""
+        version = pe_file_version(installed_exe)
+        if not version or not Path(installer).exists():
+            return
+        name = f"Affinity-x64-{version}.exe"
+        try:
+            kept = kept_installers_dir() / name
+            if not kept.exists():
+                kept.parent.mkdir(parents=True, exist_ok=True)
+                tmp = kept.with_name(name + ".part")
+                shutil.copy2(installer, tmp)          # copy2 keeps the date
+                tmp.replace(kept)
+                self.log(f"Installer kept for later installs: {kept}", "info")
+            installer = Path(installer)
+            if installer.parent == Path(self.directory) / "Installer" and installer.name != name:
+                installer.replace(installer.with_name(name))
+        except OSError as e:
+            self.log(f"Could not keep the installer: {e}", "warning")
 
     def _download_then_install(
         self, app_code, display_name, download_url, installer_path_str
@@ -16526,6 +16610,7 @@ Would you like to continue with {distro_name} anyway?"""
                 if not affinity_v3_exe.exists():
                     self.show_affinity_not_installed(msi_failure, declined=msi_failure == self.MSI_DECLINED)
                     return
+                self._keep_installer(installer_path_obj, affinity_v3_exe)
 
             # Restore WinMetadata (only needed for Wine 9.14 and 10.10, not 11.12+)
             wine_version = self.get_current_wine_version()

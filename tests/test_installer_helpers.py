@@ -572,3 +572,17 @@ def test_the_hook_patch_leaves_another_prefixs_entry_alone(ali, tmp_path, monkey
         setattr(StandIn, name, inspect.getattr_static(ali.AffinityInstallerGUI, name))
     StandIn()._patch_affinity_desktop_for_hook()
     assert entry.read_text() == body
+
+
+def test_kept_installers_newest_first_with_their_dates(ali, tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    d = ali.kept_installers_dir()
+    d.mkdir(parents=True)
+    for v, t in (("3.2.3.4646", 1000000000), ("3.3.0.4850", 1100000000), ("3.10.0.1", 1200000000)):
+        f = d / f"Affinity-x64-{v}.exe"
+        f.write_bytes(b"x")
+        os.utime(f, (t, t))
+    (d / "Affinity-x64.exe").write_bytes(b"unversioned, not offered")
+    kept = ali.kept_installers()
+    assert [v for v, _, _ in kept] == ["3.10.0.1", "3.3.0.4850", "3.2.3.4646"]
+    assert kept[1][2] == 1100000000
