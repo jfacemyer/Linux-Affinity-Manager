@@ -3658,6 +3658,13 @@ class AffinityInstallerGUI(QMainWindow):
                     "wine",
                 ),
                 (
+                    "Update Wine Version",
+                    self.update_wine_version,
+                    "Install a Wine version with the fixes a new install applies for it: "
+                    "OpenCL setting, Windows Metadata, document handler, fonts (keeps your apps and settings)",
+                    "wine",
+                ),
+                (
                     "Wine Configuration",
                     self.open_winecfg,
                     "Open Wine settings to configure Windows version and libraries",
@@ -14421,7 +14428,39 @@ class AffinityInstallerGUI(QMainWindow):
             self.log(f"Error installing Wine: {e}", "error")
             return False
 
-    def switch_wine_version(self):
+    def update_wine_version(self, *_):
+        """Switch Wine Version, then the fixes a new install applies for the
+        version chosen -- see _apply_wine_version_fixes."""
+        return self.switch_wine_version(with_fixes=True)
+
+    def _apply_wine_version_fixes(self, wine_version):
+        """What a new install does for a Wine version after installing it, so
+        a switched prefix ends up the same: WinMetadata where that Wine reads
+        it, OpenCL on or off for it, the WinRT facades and the file-manager
+        handler where Affinity is installed, and the font registrations.
+        Each step is independent; one failing does not stop the rest."""
+        self.log("Applying the fixes for this Wine version...", "info")
+        steps = []
+        if wine_version in ("9.14", "10.10"):
+            steps.append(("Windows Metadata", self.setup_winmetadata))
+        elif self.wine_resolves_winrt_namespaces():
+            steps.append(("Windows Metadata", self.install_combined_winmetadata))
+        steps.append(("OpenCL setting", lambda: self.disable_opencl_if_needed(wine_version)))
+        if self.affinity_v3_exe_path().exists():
+            steps.append(("WinRT facades", self.install_windowsruntime_facades))
+            steps.append(("File-manager handler", self.install_file_manager_handler))
+        steps.append(("Font registrations", self.repair_fonts))
+        for label, step in steps:
+            if self.check_cancelled():
+                return
+            self.update_progress_text(f"Applying fixes: {label}...")
+            try:
+                step()
+            except Exception as e:
+                self.log(f"{label}: {e}", "warning")
+        self.log("Fixes for this Wine version applied", "success")
+
+    def switch_wine_version(self, with_fixes=False):
         """Switch to a different Wine version - removes current and installs new one"""
         self.log(
             "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -14498,11 +14537,11 @@ class AffinityInstallerGUI(QMainWindow):
         # Run the switch in a thread
         threading.Thread(
             target=self._switch_wine_version_thread,
-            args=(wine_version_choice,),
+            args=(wine_version_choice, with_fixes is True),
             daemon=True,
         ).start()
 
-    def _switch_wine_version_thread(self, wine_version):
+    def _switch_wine_version_thread(self, wine_version, with_fixes=False):
         """Thread function to switch Wine version"""
         self.start_operation("Switching Wine Version")
 
@@ -14577,6 +14616,8 @@ class AffinityInstallerGUI(QMainWindow):
 
             if not success:
                 self.log(f"Failed to install Wine version: {wine_version}", "error")
+            elif with_fixes:
+                self._apply_wine_version_fixes(wine_version)
 
             if success:
                 self.log(

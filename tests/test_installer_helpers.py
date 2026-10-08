@@ -586,3 +586,26 @@ def test_kept_installers_newest_first_with_their_dates(ali, tmp_path, monkeypatc
     kept = ali.kept_installers()
     assert [v for v, _, _ in kept] == ["3.10.0.1", "3.3.0.4850", "3.2.3.4646"]
     assert kept[1][2] == 1100000000
+
+
+def test_update_wine_version_applies_the_new_install_fixes(ali, tmp_path):
+    ran = []
+
+    class StandIn:
+        directory = str(tmp_path)
+        log = staticmethod(lambda *a, **k: None)
+        update_progress_text = staticmethod(lambda *a: None)
+        check_cancelled = staticmethod(lambda: False)
+        wine_resolves_winrt_namespaces = staticmethod(lambda: True)
+        affinity_v3_exe_path = staticmethod(lambda: tmp_path)          # exists
+        setup_winmetadata = staticmethod(lambda: ran.append("winmetadata-old"))
+        install_combined_winmetadata = staticmethod(lambda: ran.append("winmetadata"))
+        disable_opencl_if_needed = staticmethod(lambda v: ran.append(f"opencl {v}"))
+        install_windowsruntime_facades = staticmethod(lambda: 1 / 0)  # fails
+        install_file_manager_handler = staticmethod(lambda: ran.append("handler"))
+        repair_fonts = staticmethod(lambda: ran.append("fonts"))
+    StandIn._apply_wine_version_fixes = inspect.getattr_static(
+        ali.AffinityInstallerGUI, "_apply_wine_version_fixes")
+    StandIn()._apply_wine_version_fixes("11.19")
+    # a failing step (the facades here) does not stop the rest
+    assert ran == ["winmetadata", "opencl 11.19", "handler", "fonts"]
