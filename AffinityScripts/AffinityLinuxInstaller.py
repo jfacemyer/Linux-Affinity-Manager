@@ -14904,11 +14904,16 @@ Would you like to continue with {distro_name} anyway?"""
                 # Check if core fonts directory exists
                 fonts_dir = Path(self.directory) / "drive_c" / "windows" / "Fonts"
                 if fonts_dir.exists():
-                    # Check for some common core fonts
-                    core_fonts = ["arial.ttf", "times.ttf", "courier.ttf", "tahoma.ttf"]
+                    # Check for some common core fonts. Not tahoma.ttf: Tahoma is
+                    # its own verb, and counting it here hid a missing corefonts.
+                    core_fonts = ["arial.ttf", "times.ttf", "courier.ttf"]
                     for font in core_fonts:
                         if (fonts_dir / font).exists():
                             return True
+            elif component == "tahoma":
+                fonts_dir = Path(self.directory) / "drive_c" / "windows" / "Fonts"
+                if (fonts_dir / "tahoma.ttf").exists():
+                    return True
             elif component == "vcrun2022":
                 # Check for Visual C++ 2022 redistributables
                 vcrun_paths = [
@@ -14965,10 +14970,23 @@ Would you like to continue with {distro_name} anyway?"""
                 for crypt32_path in crypt32_paths:
                     if crypt32_path.exists():
                         return True
+            # A component without a check of its own above -- Tahoma had none,
+            # so it always read "Not installed" -- goes by the verbs winetricks
+            # recorded in the prefix.
+            else:
+                return component in self._winetricks_logged_verbs()
         except Exception:
             pass
 
         return False
+
+    def _winetricks_logged_verbs(self):
+        """The verbs winetricks recorded as installed in this prefix."""
+        try:
+            text = (Path(self.directory) / "winetricks.log").read_text(errors="replace")
+        except OSError:
+            return set()
+        return {line.strip() for line in text.splitlines() if line.strip()}
 
     def check_webview2_installed(self):
         """Check if WebView2 Runtime is already installed (fast check - file paths only)"""

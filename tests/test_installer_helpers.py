@@ -198,6 +198,37 @@ def test_stall_timeout_default_and_override(harness, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# component status
+# --------------------------------------------------------------------------- #
+
+
+def _status_harness(ali, tmp_path):
+    class StandIn:
+        directory = str(tmp_path)
+    for name in ("_check_winetricks_component", "_winetricks_logged_verbs"):
+        setattr(StandIn, name, inspect.getattr_static(ali.AffinityInstallerGUI, name))
+    return StandIn()
+
+
+def test_tahoma_reads_installed_when_its_font_is_there(ali, tmp_path):
+    h = _status_harness(ali, tmp_path)
+    fonts = tmp_path / "drive_c" / "windows" / "Fonts"
+    fonts.mkdir(parents=True)
+    assert not h._check_winetricks_component("tahoma", None, {})
+    (fonts / "tahoma.ttf").write_bytes(b"")
+    assert h._check_winetricks_component("tahoma", None, {})
+    # and Tahoma alone is not the core fonts
+    assert not h._check_winetricks_component("corefonts", None, {})
+
+
+def test_a_component_without_a_check_goes_by_winetricks_log(ali, tmp_path):
+    h = _status_harness(ali, tmp_path)
+    assert not h._check_winetricks_component("somefont", None, {})
+    (tmp_path / "winetricks.log").write_text("remove_mono\nsomefont\n")
+    assert h._check_winetricks_component("somefont", None, {})
+
+
+# --------------------------------------------------------------------------- #
 # caching the other Wine versions
 # --------------------------------------------------------------------------- #
 
