@@ -198,6 +198,39 @@ def test_stall_timeout_default_and_override(harness, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# release host override
+# --------------------------------------------------------------------------- #
+
+
+def test_release_downloads_default_to_github(ali, monkeypatch):
+    monkeypatch.delenv("AFFINITY_RELEASES_FROM", raising=False)
+    config = ali.AffinityInstallerGUI._get_wine_version_config(None, "11.19")
+    assert config["wine_url"].startswith("https://github.com/jfacemyer/Affinity-Wine-Builder/")
+    assert config["wine_sha256"] == ali.WINE_11_19_SHA256
+    assert ali.apl_release_api_url() == (
+        f"https://api.github.com/repos/{ali.APL_RELEASE_REPO}/releases/tags/{ali.APL_RELEASE_TAG}"
+    )
+
+
+def test_release_downloads_follow_the_override(ali, monkeypatch):
+    monkeypatch.setenv("AFFINITY_RELEASES_FROM", "https://git.example.org/someone/")
+    config = ali.AffinityInstallerGUI._get_wine_version_config(None, "11.19")
+    assert config["wine_url"] == (
+        "https://git.example.org/someone/Affinity-Wine-Builder/releases/download/11.19-r4/"
+        "ElementalWarrior-wine-11.19.tar.xz"
+    )
+    # The pin is the same: only the identical build installs from either host.
+    assert config["wine_sha256"] == ali.WINE_11_19_SHA256
+    # Other projects' downloads are not the fork's and stay where they are.
+    other = ali.AffinityInstallerGUI._get_wine_version_config(None, "11.12")
+    assert other["wine_url"].startswith("https://github.com/ryzendew/")
+    assert ali.apl_release_api_url() == (
+        "https://git.example.org/api/v1/repos/someone/AffinityPluginLoader/releases/tags/"
+        + ali.APL_RELEASE_TAG
+    )
+
+
+# --------------------------------------------------------------------------- #
 # run_command_streaming
 # --------------------------------------------------------------------------- #
 

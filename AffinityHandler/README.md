@@ -108,6 +108,7 @@ grep -n 'POC SOURCE' AffinityScripts/AffinityLinuxInstaller.py AffinityManager/r
 |---|---|---|
 | Wine 11.16 tarball | `github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.16-r3/ElementalWarrior-wine-11.16.tar.xz`, pinned by `WINE_11_16_SHA256` | an upstream 11.16 release, once [ryzendew/Affinity-Wine-Builder#9](https://github.com/ryzendew/Affinity-Wine-Builder/pull/9) is merged |
 | Wine 11.18 tarball | `github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.18-r1/ElementalWarrior-wine-11.18.tar.xz`, pinned by `WINE_11_18_SHA256` | an upstream 11.18 release, likewise |
+| Wine 11.19 tarball | `github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.19-r4/ElementalWarrior-wine-11.19.tar.xz`, pinned by `WINE_11_19_SHA256` | an upstream 11.19 release, likewise |
 | AffinityPluginLoader + WineFix | `github.com/jfacemyer/AffinityPluginLoader`, release `wine-fixes-3` (`APL_RELEASE_REPO`, `APL_RELEASE_TAG`), each zip pinned in `APL_ASSET_SHA256` | `noahc3/AffinityPluginLoader`'s next release, once it carries upstream `dev` and the fork's fixes |
 | `affinity-on-linux.exe`, MIME definitions | the source branch: `SOURCE_REPO` / `SOURCE_BRANCH` (`github.com/jfacemyer/Linux-Affinity-Manager`, `main`), or whatever the manager was started from | upstream's repository, if this work is merged there |
 | The manager, via `AffinityManager/run.py` (`REPO`, `BRANCH`) | `github.com/jfacemyer/Linux-Affinity-Manager`, branch `main` | likewise |
@@ -120,6 +121,11 @@ tried from a staging branch before it reaches `main`:
 ```sh
 curl -sSL https://github.com/jfacemyer/Linux-Affinity-Manager/raw/staging/AffinityManager/run.py | AFFINITY_MANAGER_BRANCH=staging python3
 ```
+
+The fork's releases (the Wine tarballs and the plugin loader) can be fetched
+from a Forgejo or Gitea copy of those repositories for the same kind of test,
+before they are published on GitHub: `AFFINITY_RELEASES_FROM=https://<host>/<owner>`.
+The pins do not change, so only byte-identical builds install from either host.
 
 A test in the manager fails if a README's one-liner and the code disagree, and
 another if the tree names anything but public sources.

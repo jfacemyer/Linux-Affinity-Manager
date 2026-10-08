@@ -280,6 +280,38 @@ SOURCE_REPO = "https://github.com/jfacemyer/Linux-Affinity-Manager"
 SOURCE_BRANCH = "main"
 
 
+# The fork's release downloads -- the Wine builds and the plugin loader above --
+# come from GitHub. AFFINITY_RELEASES_FROM=https://<host>/<owner> fetches the
+# same files from a Forgejo or Gitea copy of those repositories instead, so a
+# release can be tested end to end before it is published on GitHub. The pins
+# do not change: only byte-identical builds install from either host.
+ENV_RELEASES_FROM = "AFFINITY_RELEASES_FROM"
+RELEASES_HOME = "https://github.com/jfacemyer"
+
+
+def releases_from():
+    return os.environ.get(ENV_RELEASES_FROM, "").strip().rstrip("/")
+
+
+def release_download_url(url):
+    """A fork release download, from the host AFFINITY_RELEASES_FROM names if set."""
+    alt = releases_from()
+    if alt and url.startswith(RELEASES_HOME + "/"):
+        return alt + url[len(RELEASES_HOME):]
+    return url
+
+
+def apl_release_api_url():
+    """The plugin loader release's metadata: GitHub's API, or the Forgejo/Gitea
+    one on the host AFFINITY_RELEASES_FROM names."""
+    alt = releases_from()
+    name = APL_RELEASE_REPO.split("/", 1)[1]
+    if alt:
+        host, owner = alt.rsplit("/", 1)
+        return f"{host}/api/v1/repos/{owner}/{name}/releases/tags/{APL_RELEASE_TAG}"
+    return f"https://api.github.com/repos/{APL_RELEASE_REPO}/releases/tags/{APL_RELEASE_TAG}"
+
+
 def source_repo():
     return os.environ.get("AFFINITY_MANAGER_REPO", "").strip().rstrip("/") or SOURCE_REPO
 
@@ -314,6 +346,10 @@ WINE_11_16_SHA256 = "e0027cb5b42931ca0f1fecdef9a6a59d1b69d2acd75de7cc1e07c6af3c1
 # The same patch set on Wine 11.18, pinned for the same reason. Released on the
 # fork that carries the patches' upstream pull request.
 WINE_11_18_SHA256 = "c325bf804407abcf8070d02066b5be00680b0339e796a6583b4a1d2dae934853"
+
+# Wine 11.19 with the full Affinity patch set (no white flashes, lower brush
+# lag, OpenCL), published on the same fork.
+WINE_11_19_SHA256 = "e716ac858662f9dfa4f9a24b783c6d6521ddab31c1587be5b94b8b96ca156298"
 
 # The plugin loader. Upstream's latest release (v0.3.0, April) predates Canva
 # sign-in, the command-line open fix and the runtime Direct2D patches, all of
@@ -4893,7 +4929,7 @@ class AffinityInstallerGUI(QMainWindow):
         # Create button group to ensure only one radio button is selected at a time
         button_group = QButtonGroup(dialog)
 
-        # Wine 11.18 option - the newest build with the Affinity patches
+        # Wine 11.18 option - the newest released build with the Affinity patches
         wine_1118_frame = QFrame()
         wine_1118_frame.setObjectName("optionFrame")
         wine_1118_layout = QVBoxLayout(wine_1118_frame)
@@ -4915,6 +4951,28 @@ class AffinityInstallerGUI(QMainWindow):
         wine_1118_layout.addWidget(wine_1118_desc)
         button_group.addButton(wine_1118_radio)
         options_layout.addWidget(wine_1118_frame)
+
+        # Wine 11.19 option - the next build of the Affinity patches
+        wine_1119_frame = QFrame()
+        wine_1119_frame.setObjectName("optionFrame")
+        wine_1119_layout = QVBoxLayout(wine_1119_frame)
+        wine_1119_layout.setContentsMargins(12, 10, 12, 10)
+        wine_1119_layout.setSpacing(6)
+        wine_1119_radio = QRadioButton("Wine 11.19 (Affinity patches)")
+        wine_1119_radio.setSizePolicy(
+            QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Minimum
+        )
+        wine_1119_layout.addWidget(wine_1119_radio)
+        wine_1119_desc = QLabel(
+            "ElementalWarrior Wine 11.19 with the newest Affinity patches: no white "
+            "flashes, much lower brush lag, OpenCL, and everything in 11.18."
+        )
+        wine_1119_desc.setObjectName("optionDescription")
+        wine_1119_desc.setWordWrap(True)
+        wine_1119_layout.addWidget(wine_1119_desc)
+        button_group.addButton(wine_1119_radio)
+        options_layout.addWidget(wine_1119_frame)
+
 
         # Wine 11.16 option - the same patches on the previous base
         wine_1116_frame = QFrame()
@@ -5069,6 +5127,8 @@ class AffinityInstallerGUI(QMainWindow):
         if result == QDialog.DialogCode.Accepted:
             if wine_1118_radio.isChecked():
                 self.question_dialog_response = "Wine 11.18 (Affinity patches)"
+            elif wine_1119_radio.isChecked():
+                self.question_dialog_response = "Wine 11.19 (Affinity patches)"
             elif wine_1116_radio.isChecked():
                 self.question_dialog_response = "Wine 11.16 (Affinity patches, previous)"
             elif wine_1112_radio.isChecked():
@@ -5348,7 +5408,7 @@ class AffinityInstallerGUI(QMainWindow):
                                 return "9.14"
                             elif version.startswith("10."):
                                 return "10.10"
-                            elif version in ("11.16", "11.18"):
+                            elif version in ("11.16", "11.18", "11.19"):
                                 return version
                             elif version.startswith("11."):
                                 return "11.12"
@@ -9796,6 +9856,7 @@ class AffinityInstallerGUI(QMainWindow):
             "Choose Wine Version",
             "Which Wine version would you like to install?\n\n"
             "• Wine 11.18 - the newest build with the Affinity patches: a double-clicked document opens, Affinity exits when it is closed, dialogs stay on top and panels dock back.\n"
+            "• Wine 11.19 - the next build of the Affinity patches, in testing: no white flashes, much lower brush lag, OpenCL.\n"
             "• Wine 11.16 - the same patches on Wine 11.16. Use it if 11.18 gives you trouble.\n"
             "• Wine 11.12 (Recommended) - ElementalWarrior Wine 11.12 with AMD GPU and OpenCL patches. Latest version with best compatibility and performance.\n"
             "• Wine 11.12 v4 (Zen 4/5) - ElementalWarrior Wine 11.12 v4 with AVX-512 and AMD Zen 4/5 optimizations. Best performance for Ryzen 7000/9000 series CPUs.\n"
@@ -9804,6 +9865,7 @@ class AffinityInstallerGUI(QMainWindow):
             "Note: You can switch versions later by running 'Setup Wine Environment' again.",
             [
                 "Wine 11.18 (Affinity patches)",
+                "Wine 11.19 (Affinity patches)",
                 "Wine 11.16 (Affinity patches, previous)",
                 "Wine 11.12 (Recommended)",
                 "Wine 11.12 v4 (Zen 4/5)",
@@ -9812,7 +9874,9 @@ class AffinityInstallerGUI(QMainWindow):
             ],
         )
 
-        if wine_version == "Wine 11.18 (Affinity patches)":
+        if wine_version == "Wine 11.19 (Affinity patches)":
+            wine_version_choice = "11.19"
+        elif wine_version == "Wine 11.18 (Affinity patches)":
             wine_version_choice = "11.18"
         elif wine_version == "Wine 11.16 (Affinity patches, previous)":
             wine_version_choice = "11.16"
@@ -13713,6 +13777,7 @@ class AffinityInstallerGUI(QMainWindow):
             "Choose Wine Version",
             "Which Wine version would you like to install?\n\n"
             "• Wine 11.18 - the newest build with the Affinity patches: a double-clicked document opens, Affinity exits when it is closed, dialogs stay on top and panels dock back.\n"
+            "• Wine 11.19 - the next build of the Affinity patches, in testing: no white flashes, much lower brush lag, OpenCL.\n"
             "• Wine 11.16 - the same patches on Wine 11.16. Use it if 11.18 gives you trouble.\n"
             "• Wine 11.12 (Recommended) - ElementalWarrior Wine 11.12 with AMD GPU and OpenCL patches. Latest version with best compatibility and performance.\n"
             "• Wine 11.12 v4 (Zen 4/5) - ElementalWarrior Wine 11.12 v4 with AVX-512 and AMD Zen 4/5 optimizations. Best performance for Ryzen 7000/9000 series CPUs.\n"
@@ -13721,6 +13786,7 @@ class AffinityInstallerGUI(QMainWindow):
             "Note: You can switch versions later by running this setup again.",
             [
                 "Wine 11.18 (Affinity patches)",
+                "Wine 11.19 (Affinity patches)",
                 "Wine 11.16 (Affinity patches, previous)",
                 "Wine 11.12 (Recommended)",
                 "Wine 11.12 v4 (Zen 4/5)",
@@ -13729,7 +13795,9 @@ class AffinityInstallerGUI(QMainWindow):
             ],
         )
 
-        if wine_version == "Wine 11.18 (Affinity patches)":
+        if wine_version == "Wine 11.19 (Affinity patches)":
+            wine_version_choice = "11.19"
+        elif wine_version == "Wine 11.18 (Affinity patches)":
             wine_version_choice = "11.18"
         elif wine_version == "Wine 11.16 (Affinity patches, previous)":
             wine_version_choice = "11.16"
@@ -13750,6 +13818,12 @@ class AffinityInstallerGUI(QMainWindow):
         ).start()
 
     def _get_wine_version_config(self, wine_version):
+        config = AffinityInstallerGUI._pinned_wine_version_config(self, wine_version)
+        if config and "wine_url" in config:
+            config = dict(config, wine_url=release_download_url(config["wine_url"]))
+        return config
+
+    def _pinned_wine_version_config(self, wine_version):
         """Get Wine version configuration (URL, filename, etc.)
 
         Args:
@@ -13787,6 +13861,17 @@ class AffinityInstallerGUI(QMainWindow):
                 "wine_dir_pattern": "ElementalWarrior-wine-11.16*",
                 "archive_format": "xz",
                 "wine_display_name": "Wine 11.16 (Affinity patches, previous)",
+            }
+        elif wine_version == "11.19":
+            return {
+                # POC SOURCE -- the fork's release of the 11.19 patch set.
+                "wine_url": "https://github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.19-r4/ElementalWarrior-wine-11.19.tar.xz",
+                "wine_file_name": "ElementalWarrior-wine-11.19.tar.xz",
+                "wine_sha256": WINE_11_19_SHA256,
+                "wine_dir_name": "ElementalWarriorWine",
+                "wine_dir_pattern": "ElementalWarrior-wine-11.19*",
+                "archive_format": "xz",
+                "wine_display_name": "Wine 11.19 (Affinity patches)",
             }
         elif wine_version == "11.18":
             return {
@@ -13923,7 +14008,7 @@ class AffinityInstallerGUI(QMainWindow):
         cache_dir = Path(self.directory) / "Wine-Switch"
         cache_dir.mkdir(parents=True, exist_ok=True)
 
-        all_versions = ["9.14", "10.10", "11.12", "11.12-v4", "11.16", "11.18"]
+        all_versions = ["9.14", "10.10", "11.12", "11.12-v4", "11.16", "11.18", "11.19"]
 
         self.log(
             "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -14262,6 +14347,7 @@ class AffinityInstallerGUI(QMainWindow):
             "Choose Wine Version",
             "Which Wine version would you like to install?\n\n"
             "• Wine 11.18 - the newest build with the Affinity patches: a double-clicked document opens, Affinity exits when it is closed, dialogs stay on top and panels dock back.\n"
+            "• Wine 11.19 - the next build of the Affinity patches, in testing: no white flashes, much lower brush lag, OpenCL.\n"
             "• Wine 11.16 - the same patches on Wine 11.16. Use it if 11.18 gives you trouble.\n"
             "• Wine 11.12 (Recommended) - ElementalWarrior Wine 11.12 with AMD GPU and OpenCL patches. Latest version with best compatibility and performance.\n"
             "• Wine 11.12 v4 (Zen 4/5) - ElementalWarrior Wine 11.12 v4 with AVX-512 and AMD Zen 4/5 optimizations. Best performance for Ryzen 7000/9000 series CPUs.\n"
@@ -14270,6 +14356,7 @@ class AffinityInstallerGUI(QMainWindow):
             "Note: This will replace your current Wine installation.",
             [
                 "Wine 11.18 (Affinity patches)",
+                "Wine 11.19 (Affinity patches)",
                 "Wine 11.16 (Affinity patches, previous)",
                 "Wine 11.12 (Recommended)",
                 "Wine 11.12 v4 (Zen 4/5)",
@@ -14278,7 +14365,9 @@ class AffinityInstallerGUI(QMainWindow):
             ],
         )
 
-        if wine_version == "Wine 11.18 (Affinity patches)":
+        if wine_version == "Wine 11.19 (Affinity patches)":
+            wine_version_choice = "11.19"
+        elif wine_version == "Wine 11.18 (Affinity patches)":
             wine_version_choice = "11.18"
         elif wine_version == "Wine 11.16 (Affinity patches, previous)":
             wine_version_choice = "11.16"
@@ -21660,9 +21749,9 @@ Would you like to continue with {distro_name} anyway?"""
                 / "Affinity"
             )
 
-            # ── 1. Fetch the pinned release's metadata from GitHub ────────────────────
+            # ── 1. Fetch the pinned release's metadata ────────────────────────────────
             self.log(f"Fetching plugin loader release {APL_RELEASE_TAG}...", "info")
-            api_url = f"https://api.github.com/repos/{APL_RELEASE_REPO}/releases/tags/{APL_RELEASE_TAG}"
+            api_url = apl_release_api_url()
             request = urllib.request.Request(api_url)
             request.add_header("User-Agent", "AffinityLinuxInstaller")
 
