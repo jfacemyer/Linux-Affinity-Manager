@@ -945,7 +945,7 @@ class CarrySettingsDialog(SizedDialog):
             self.letters_note.setText(
                 "This prefix has not been set up by Wine yet, so drive letters "
                 "cannot be added: Wine only creates C: when it creates the "
-                "drive list itself. Run Setup first, then copy again.")
+                "drive list itself. Run Configure first, then copy again.")
         else:
             self.letters_note.setText(
                 "Recent files and paths inside documents are Windows paths, so "
@@ -1668,7 +1668,7 @@ class NewPrefixDialog(SizedDialog):
         form.addRow("Settings", self.carry)
         self.carry_note = QLabel(
             "Preferences, workspaces, shortcuts, recent files and drive letters. "
-            "They are copied when Setup has finished, before Affinity first "
+            "They are copied when Configure has finished, before Affinity first "
             "starts here; you see what will be copied before it is.")
         self.carry_note.setWordWrap(True)
         self.carry_note.setObjectName("descriptionLabel")
@@ -1682,7 +1682,7 @@ class NewPrefixDialog(SizedDialog):
 
         self.note = QLabel(
             "This is Affinity's own installer (Affinity-x64-<version>.exe), "
-            "not Wine — the Wine build is chosen during Setup. Affinity's "
+            "not Wine — the Wine build is chosen in Configure. Affinity's "
             "download site only ever offers the current release, so to "
             "install an older Affinity, point this at an installer you kept."
         )
@@ -1740,10 +1740,10 @@ class NewPrefixDialog(SizedDialog):
             when = f", published {r.published}" if r.published else ""
             self.will_install.setText(
                 f"<b>{html.escape(str(r))}</b> — the current release{when}, "
-                "downloaded during Setup.")
+                "downloaded in Configure.")
         elif self.release_problem:
             self.will_install.setText(
-                "The current release, downloaded during Setup. Which version "
+                "The current release, downloaded in Configure. Which version "
                 f"that is could not be checked: {html.escape(self.release_problem)}.")
         else:
             self.will_install.setText("Affinity: checking the current release…")
@@ -2172,10 +2172,10 @@ class FindDialog(SizedDialog):
         if incomplete:
             note = (f" {incomplete} of them has no Affinity installed yet — an "
                     "interrupted install looks like that, and managing it lets "
-                    "Setup finish the job." if incomplete == 1 else
+                    "Configure finish the job." if incomplete == 1 else
                     f" {incomplete} of them have no Affinity installed yet — an "
                     "interrupted install looks like that, and managing one lets "
-                    "Setup finish the job.")
+                    "Configure finish the job.")
         self.status.setText(
             f"{len(self.found)} prefix(es) found, {new} not yet managed.{note} "
             "Names are editable — double-click one. Ticked entries are added to "
@@ -3386,7 +3386,7 @@ class ManagerWindow(QMainWindow):
             "Commands", self.show_commands,
             "Every way this prefix can be run -- copy, run, or add to the menu")
         self.installer_button = self._action(
-            "Setup", self.open_installer,
+            "Configure", self.open_installer,
             "Install, update and configure this prefix -- AffinityOnLinux, "
             "inside this window")
         self.default_button = self._action(
@@ -3400,7 +3400,7 @@ class ManagerWindow(QMainWindow):
         self.copy_settings_button = self._action(
             "Copy settings…", self.copy_settings_selected,
             "Bring preferences, workspaces, recent files and drive letters in "
-            "from another prefix. Use after Setup, before first launch")
+            "from another prefix. Use after Configure, before first launch")
         self.snapshots_button = self._action(
             "Snapshots…", self.show_snapshots,
             "Dated copies of this prefix's preferences, shortcuts and recent "
@@ -3577,8 +3577,8 @@ class ManagerWindow(QMainWindow):
         lock_layout.addWidget(self.lock_banner, 1)
         # The way back to a Setup that is working: on the list, every button
         # that could reopen it is disabled while anything runs.
-        self.lock_show_button = QPushButton("Show Setup")
-        self.lock_show_button.setToolTip("Go back to the Setup page doing this.")
+        self.lock_show_button = QPushButton("Show Configure")
+        self.lock_show_button.setToolTip("Go back to the Configure page doing this.")
         self.lock_show_button.clicked.connect(self._show_lock_owner)
         lock_layout.addWidget(self.lock_show_button, 0)
         self.lock_release_button = QPushButton("Release")
@@ -3619,17 +3619,17 @@ class ManagerWindow(QMainWindow):
         and whether anything is already running."""
         # Building one takes a second or two -- it constructs the whole
         # installer window -- and it happens on this thread, so say so.
-        self.status.setText(f"Opening Setup for {entry['name']}…")
+        self.status.setText(f"Opening Configure for {entry['name']}…")
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         QApplication.processEvents()
         try:
             page = self._setup_page(entry)
         except (aol.NotAvailable, hosted.WrongTarget) as exc:
-            QMessageBox.critical(self, "Cannot open Setup", str(exc))
+            QMessageBox.critical(self, "Cannot open Configure", str(exc))
             return
         except Exception as exc:                  # a constructor is a lot of code
             QMessageBox.critical(
-                self, "Cannot open Setup",
+                self, "Cannot open Configure",
                 f"The installer could not be built for {entry['name']}.\n\n{exc}")
             return
         finally:
@@ -4167,10 +4167,10 @@ class ManagerWindow(QMainWindow):
         if carry is not None:
             self.status.setText(
                 f"The settings from {Path(carry).name} will be offered when "
-                "Setup has finished.")
+                "Configure has finished.")
         else:
             self.status.setText(
-                f"When Setup has finished, select {entry['name']} and use "
+                f"When Configure has finished, select {entry['name']} and use "
                 "'Copy settings…' before launching Affinity in it.")
 
     def setup_settled(self, name):
@@ -4416,7 +4416,7 @@ class ManagerWindow(QMainWindow):
         try:
             plan = defaultentry.plan(entry["name"], entry["path"])
         except FileNotFoundError as exc:
-            QMessageBox.information(self, "Not installed yet", f"{exc}\n\nRun Setup there first.")
+            QMessageBox.information(self, "Not installed yet", f"{exc}\n\nRun Configure there first.")
             return
         reply = QMessageBox.question(
             self, f"Make {entry['name']} the Default?", plan.summary,

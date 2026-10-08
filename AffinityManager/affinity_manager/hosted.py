@@ -321,7 +321,7 @@ class SetupPage(QWidget):
         self.back_button.setToolTip("Back to the prefix list")
         self.back_button.clicked.connect(manager.show_list)
         header_layout.addWidget(self.back_button, 0)
-        title = QLabel("Setup — %s" % self.name)
+        title = QLabel("Configure — %s" % self.name)
         title.setObjectName("sectionTitle")
         header_layout.addWidget(title, 0)
         where = QLabel(str(self.path))
@@ -526,7 +526,7 @@ class SetupPage(QWidget):
         note = "A background task ended with %s: %s" % (
             args.exc_type.__name__, args.exc_value)
         if uncertain:
-            note += (" (more than one Setup page was open; this may belong to "
+            note += (" (more than one Configure page was open; this may belong to "
                      "another prefix)")
         prefixlog.write(self.name, note)
         with contextlib.suppress(Exception):
