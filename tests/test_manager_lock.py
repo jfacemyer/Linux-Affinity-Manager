@@ -397,3 +397,19 @@ def test_a_prefix_created_without_a_choice_is_not_asked_about(settled):
     (Path(reg.by_name("Managed")["path"]) / "dosdevices" / "c:").symlink_to("../drive_c")
     w.setup_settled("Managed")
     assert offered == []
+
+
+def test_a_setup_ended_by_the_watchdog_still_offers_the_settings_copy(window, monkeypatch):
+    """The installer's flag drops before the page settles, so the watchdog is
+    what usually ends a Setup -- and the copy chosen at creation was never offered."""
+    w, _, _ = window
+    import AffinityLinuxManager as app
+    settled = []
+    w.setup_settled = settled.append
+    w._setup_pages = {"Managed": types.SimpleNamespace(name="Managed", set_actions_enabled=lambda *_: None)}
+    running = {"yes": True}
+    w._busy_start("Managed — Setup", 100, prefix="Managed", operation="Setup", alive=lambda: running["yes"])
+    running["yes"] = False
+    monkeypatch.setattr(w.lock, "sweep", lambda: w.lock.held)
+    w._lock_tick()
+    assert settled == ["Managed"]

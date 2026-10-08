@@ -3897,6 +3897,13 @@ class ManagerWindow(QMainWindow):
             else:
                 prefixlog.write(swept.prefix, note)
                 self.status.setText("%s — %s" % (swept.prefix, note))
+            # A Setup page's work usually ends here rather than through the
+            # page's own settle -- the installer's flag drops first -- so the
+            # settings copy chosen at creation is offered from here as well.
+            if swept.prefix in getattr(self, "_setup_pages", {}):
+                settled = getattr(self, "setup_settled", None)
+                if settled is not None:
+                    settled(swept.prefix)
         self._sync_lock_ui()
 
     def _release_lock(self):
