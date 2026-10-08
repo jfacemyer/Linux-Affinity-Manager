@@ -276,6 +276,10 @@ def cache_all_wine_versions():
     return os.environ.get(ENV_CACHE_ALL_WINE, "").strip() == "1"
 
 
+# Serialises ensure_patcher_files across the installers in one process.
+_PATCHER_FILES_LOCK = threading.Lock()
+
+
 def _sha256_of(path):
     digest = hashlib.sha256()
     with open(path, "rb") as f:
@@ -18065,7 +18069,16 @@ Would you like to continue with {distro_name} anyway?"""
         return False
 
     def ensure_patcher_files(self, silent=False):
-        """Ensure AffinityPatcher and ReturnColors files are available in .AffinityLinux/Patch/"""
+        """Ensure AffinityPatcher and ReturnColors files are available in .AffinityLinux/Patch/
+
+        One at a time: the startup background task and One-Click Setup both
+        call this, and two concurrent git clones into one directory made the
+        second fail ("could not lock config file") and fall back to the ZIP.
+        The second caller now waits and finds the files already there."""
+        with _PATCHER_FILES_LOCK:
+            return self._ensure_patcher_files(silent)
+
+    def _ensure_patcher_files(self, silent=False):
         try:
             # Destination: .AffinityLinux/Patch/AffinityPatcherSettings/
             dest_patch_dir = Path(self.directory) / "Patch" / "AffinityPatcherSettings"
