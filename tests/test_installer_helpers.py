@@ -262,7 +262,7 @@ def test_release_downloads_follow_the_override(ali, monkeypatch):
     monkeypatch.setenv("AFFINITY_RELEASES_FROM", "https://git.example.org/someone/")
     config = ali.AffinityInstallerGUI._get_wine_version_config(None, "11.19")
     assert config["wine_url"] == (
-        "https://git.example.org/someone/Affinity-Wine-Builder/releases/download/11.19-r4/"
+        "https://git.example.org/someone/Affinity-Wine-Builder/releases/download/11.19-r5/"
         "ElementalWarrior-wine-11.19.tar.xz"
     )
     # The pin is the same: only the identical build installs from either host.

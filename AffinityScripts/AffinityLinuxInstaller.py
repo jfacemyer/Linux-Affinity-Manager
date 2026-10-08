@@ -366,7 +366,7 @@ WINE_11_18_SHA256 = "c325bf804407abcf8070d02066b5be00680b0339e796a6583b4a1d2dae9
 
 # Wine 11.19 with the full Affinity patch set (no white flashes, lower brush
 # lag, OpenCL), published on the same fork.
-WINE_11_19_SHA256 = "e716ac858662f9dfa4f9a24b783c6d6521ddab31c1587be5b94b8b96ca156298"
+WINE_11_19_SHA256 = "b9729df1853b1c2b3158fbba996afb16f6dbc960f5b0e75a2f20fcbbbb7f2a4f"
 
 # The plugin loader. Upstream's latest release (v0.3.0, April) predates Canva
 # sign-in, the command-line open fix and the runtime Direct2D patches, all of
@@ -13897,7 +13897,7 @@ class AffinityInstallerGUI(QMainWindow):
         elif wine_version == "11.19":
             return {
                 # POC SOURCE -- the fork's release of the 11.19 patch set.
-                "wine_url": "https://github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.19-r4/ElementalWarrior-wine-11.19.tar.xz",
+                "wine_url": "https://github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.19-r5/ElementalWarrior-wine-11.19.tar.xz",
                 "wine_file_name": "ElementalWarrior-wine-11.19.tar.xz",
                 "wine_sha256": WINE_11_19_SHA256,
                 "wine_dir_name": "ElementalWarriorWine",
