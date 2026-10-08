@@ -63,6 +63,7 @@ from affinity_manager import (
     backups,
     coldstart,
     commands as commands_mod,
+    defaultentry,
     desktopentry,
     discover,
     hosted,
@@ -785,7 +786,7 @@ class CarrySettingsDialog(SizedDialog):
 
     FIT_MIN_WIDTH = 700
 
-    def __init__(self, parent, dest_prefix, destination, sources):
+    def __init__(self, parent, dest_prefix, destination, sources, preselect=None):
         super().__init__(parent)
         self.setWindowTitle("Copy settings from another prefix")
         self.setModal(True)
@@ -820,6 +821,10 @@ class CarrySettingsDialog(SizedDialog):
                     time.strftime("%Y-%m-%d", time.localtime(found.modified))),
                 found)
         self.picker.addItem("Somewhere else…", None)
+        for i, found in enumerate(self.sources):
+            if preselect is not None and found.prefix == Path(preselect):
+                self.picker.setCurrentIndex(i)
+                break
         self.picker.currentIndexChanged.connect(self._picked)
         form = QFormLayout()
         form.addRow("Copy from", self.picker)
@@ -1647,6 +1652,30 @@ class NewPrefixDialog(SizedDialog):
         self.will_install.setWordWrap(True)
         self.will_install.setTextFormat(Qt.TextFormat.RichText)
         form.addRow("Will install", self.will_install)
+
+        # Asked here, done later: settings can only go in once Setup has had
+        # Wine create the prefix (drive letters need its dosdevices), and
+        # before Affinity first runs there. So this is remembered, and the copy
+        # dialog opens with it chosen when this prefix's Setup finishes.
+        self.carry = QComboBox()
+        self.carry.addItem("Start with Affinity's stock settings", None)
+        for found in prefsseed.sources([e["path"] for e in reg.entries]):
+            self.carry.addItem(
+                "Copy from %s — %s, last changed %s" % (
+                    found.prefix.name, found.version,
+                    time.strftime("%Y-%m-%d", time.localtime(found.modified))),
+                found.prefix)
+        form.addRow("Settings", self.carry)
+        self.carry_note = QLabel(
+            "Preferences, workspaces, shortcuts, recent files and drive letters. "
+            "They are copied when Setup has finished, before Affinity first "
+            "starts here; you see what will be copied before it is.")
+        self.carry_note.setWordWrap(True)
+        self.carry_note.setObjectName("descriptionLabel")
+        form.addRow("", self.carry_note)
+        if self.carry.count() == 1:
+            self.carry.setEnabled(False)
+            self.carry_note.setText("No other managed prefix has settings to copy yet.")
         self.current_release = None
         self.release_problem = ""
         self.installer_file.textChanged.connect(lambda *_: self._show_version())
@@ -1681,6 +1710,10 @@ class NewPrefixDialog(SizedDialog):
         thread.done.connect(self._release_known)
         keep_until_finished(thread)
         thread.start()
+
+    def carry_from(self):
+        """The prefix whose settings to offer once Setup has finished, or None."""
+        return self.carry.currentData()
 
     def _release_known(self, result, error):
         self.current_release = result
@@ -2924,7 +2957,7 @@ class SettingsDialog(SizedDialog):
 
 
 class ManagerWindow(QMainWindow):
-    COLUMNS = ["Name", "Locked", "Affinity", "Wine", "Size", "State", "Path"]
+    COLUMNS = ["Name", "Flags", "Affinity", "Wine", "Size", "State", "Path"]
 
     def __init__(self):
         super().__init__()
@@ -2935,6 +2968,9 @@ class ManagerWindow(QMainWindow):
         # bounded in _drop_spare_setup_pages, because keeping every prefix's is
         # not the same thing as keeping the useful ones.
         self._setup_pages = {}
+        # name -> prefix to copy settings from, chosen when the prefix was
+        # created and offered when its Setup finishes. Not kept across runs.
+        self._carry_after_setup = {}
         # One operation at a time, across every prefix. See oplock: two
         # prefixes provisioning at once collide in the distro package manager
         # whatever this application believes, so this is a correctness matter
@@ -3055,7 +3091,7 @@ class ManagerWindow(QMainWindow):
         if entry:
             self.offer_settings_copy(entry)
 
-    def offer_settings_copy(self, entry):
+    def offer_settings_copy(self, entry, preselect=None):
         """Bring settings, workspaces, recents and drive letters into a prefix.
 
         Refused while Affinity runs in the DESTINATION -- it would overwrite
@@ -3075,7 +3111,7 @@ class ManagerWindow(QMainWindow):
         others = [e["path"] for e in self.reg.entries if e["name"] != entry["name"]]
         found = prefsseed.sources(others, exclude=path)
 
-        dialog = CarrySettingsDialog(self, path, destination, found)
+        dialog = CarrySettingsDialog(self, path, destination, found, preselect=preselect)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         source = dialog.chosen_source()
@@ -3353,6 +3389,14 @@ class ManagerWindow(QMainWindow):
             "Setup", self.open_installer,
             "Install, update and configure this prefix -- AffinityOnLinux, "
             "inside this window")
+        self.default_button = self._action(
+            "Make Default", self.make_default_selected,
+            "The menu's Affinity entry, double-clicked documents and the Canva "
+            "sign-in all go to this prefix")
+        self.menu_button = self._action(
+            "Add to menu", self.toggle_menu_selected,
+            "A menu entry named after this prefix, beside the Default one. It "
+            "does not take the document types")
         self.copy_settings_button = self._action(
             "Copy settings…", self.copy_settings_selected,
             "Bring preferences, workspaces, recent files and drive letters in "
@@ -3401,7 +3445,8 @@ class ManagerWindow(QMainWindow):
         left_layout.addWidget(self._button_card(
             "Selected prefix",
             [self.launch_button, self.installer_button,
-             self.copy_settings_button, self.commands_button]))
+             self.copy_settings_button, self.commands_button,
+             self.default_button, self.menu_button]))
         # The three kinds of copy together, each with a line saying what it is
         # for. They all "copy a prefix", and choosing the wrong one is found out
         # at the worst moment. Above the maintenance card rather than below it:
@@ -3530,6 +3575,12 @@ class ManagerWindow(QMainWindow):
         self.lock_banner.setObjectName("cautionText")
         self.lock_banner.setWordWrap(True)
         lock_layout.addWidget(self.lock_banner, 1)
+        # The way back to a Setup that is working: on the list, every button
+        # that could reopen it is disabled while anything runs.
+        self.lock_show_button = QPushButton("Show Setup")
+        self.lock_show_button.setToolTip("Go back to the Setup page doing this.")
+        self.lock_show_button.clicked.connect(self._show_lock_owner)
+        lock_layout.addWidget(self.lock_show_button, 0)
         self.lock_release_button = QPushButton("Release")
         self.lock_release_button.setToolTip(
             "Stop waiting for this operation. It does not stop the work.")
@@ -3644,6 +3695,7 @@ class ManagerWindow(QMainWindow):
 
     BUSY_BUTTONS = ("new_button", "find_button", "adopt_button", "launch_button",
                     "commands_button", "installer_button", "clone_button",
+                    "default_button", "menu_button",
                     "snapshots_button", "copy_settings_button",
                     "backup_button", "backups_button",
                     "clean_button", "fonts_button", "protect_button", "forget_button",
@@ -3820,7 +3872,16 @@ class ManagerWindow(QMainWindow):
             self.lock_row.hide()
             return
         self.lock_banner.setText(caution)
+        show = getattr(self, "lock_show_button", None)
+        if show is not None:
+            show.setVisible(held.prefix in self._setup_pages and here != held.prefix)
         self.lock_row.show()
+
+    def _show_lock_owner(self):
+        held = self.lock.held
+        entry = self.reg.by_name(held.prefix) if held is not None else None
+        if entry is not None:
+            self.show_setup(entry)
 
     def _lock_tick(self):
         """The watchdog, and the clock behind the elapsed time."""
@@ -3912,11 +3973,16 @@ class ManagerWindow(QMainWindow):
             )
             self._selection_changed()
             return
+        default = defaultentry.current()
         for entry in self.reg.entries:
+            flags = ", ".join(f for f, on in (
+                ("Default", entry["name"] == default),
+                ("in menu", defaultentry.has_menu_entry(entry["name"])),
+                ("locked", registry.is_protected(entry))) if on)
             item = QTreeWidgetItem(
                 [
                     entry["name"],
-                    "locked" if registry.is_protected(entry) else "",
+                    flags,
                     "…",
                     "…",
                     "…",
@@ -4023,6 +4089,8 @@ class ManagerWindow(QMainWindow):
             self.clone_button,
             self.clean_button,
             self.fonts_button,
+            self.default_button,
+            self.menu_button,
         ):
             b.setEnabled(entry is not None)
         several = len(self.selected_entries())
@@ -4036,6 +4104,8 @@ class ManagerWindow(QMainWindow):
             return
         locked = registry.is_protected(entry)
         self.protect_button.setText("Unprotect" if locked else "Protect")
+        self.menu_button.setText("Remove from menu"
+                                 if defaultentry.has_menu_entry(entry["name"]) else "Add to menu")
         # Left enabled while locked so the refusal can explain itself, rather
         # than a greyed button leaving the user guessing why.
         self.delete_button.setEnabled(True)
@@ -4076,6 +4146,9 @@ class ManagerWindow(QMainWindow):
         if dialog.exec() != QDialog.DialogCode.Accepted or not dialog.result_entry:
             return
         entry = dialog.result_entry
+        carry = dialog.carry_from()
+        if carry is not None:
+            self._carry_after_setup[entry["name"]] = carry
         self.refresh()
         # Settings are NOT copied here any more. This used to offer the copy
         # before Setup, into a prefix Wine had never run in -- fine for the
@@ -4084,9 +4157,48 @@ class ManagerWindow(QMainWindow):
         # prefix with no C: drive. The copy is its own action now, after Setup
         # and before Affinity is first launched.
         self.show_setup(entry)
-        self.status.setText(
-            f"When Setup has finished, select {entry['name']} and use "
-            "'Copy settings…' before launching Affinity in it.")
+        if carry is not None:
+            self.status.setText(
+                f"The settings from {Path(carry).name} will be offered when "
+                "Setup has finished.")
+        else:
+            self.status.setText(
+                f"When Setup has finished, select {entry['name']} and use "
+                "'Copy settings…' before launching Affinity in it.")
+
+    def setup_settled(self, name):
+        self._default_if_none(name)
+        self._offer_carry(name)
+
+    def _default_if_none(self, name):
+        """With no Affinity menu entry at all, a prefix that has finished Setup
+        becomes the Default without asking -- there is nothing to take it from.
+        An entry somebody else wrote is left for Make Default, which asks."""
+        entry = self.reg.by_name(name)
+        if entry is None or defaultentry.main_entry().exists():
+            return
+        try:
+            plan = defaultentry.plan(name, entry["path"])
+        except FileNotFoundError:
+            return                       # Affinity not installed yet
+        self._apply_default(plan, quiet=True)
+
+    def _offer_carry(self, name):
+        """A Setup page has finished its work. Offer the settings copy chosen
+        when the prefix was created -- once Wine has made the prefix, since
+        drive letters cannot go in before that (prefsseed.is_initialised).
+        A Setup that stopped earlier keeps the offer for its next step."""
+        source = self._carry_after_setup.get(name)
+        if source is None:
+            return
+        entry = self.reg.by_name(name)
+        if entry is None:
+            self._carry_after_setup.pop(name, None)
+            return
+        if not prefsseed.is_initialised(entry["path"]):
+            return
+        del self._carry_after_setup[name]
+        QTimer.singleShot(0, lambda: self.offer_settings_copy(entry, preselect=source))
 
     def adopt(self):
         chosen = QFileDialog.getExistingDirectory(
@@ -4289,6 +4401,51 @@ class ManagerWindow(QMainWindow):
         dialog = FindDialog(self, self.reg)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.refresh()
+
+    def make_default_selected(self):
+        entry = self.selected_entry()
+        if not entry:
+            return
+        try:
+            plan = defaultentry.plan(entry["name"], entry["path"])
+        except FileNotFoundError as exc:
+            QMessageBox.information(self, "Not installed yet", f"{exc}\n\nRun Setup there first.")
+            return
+        reply = QMessageBox.question(
+            self, f"Make {entry['name']} the Default?", plan.summary,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes)
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self._apply_default(plan)
+
+    def _apply_default(self, plan, quiet=False):
+        try:
+            notes = defaultentry.apply(plan)
+        except OSError as exc:
+            QMessageBox.critical(self, "Could not change the Default", str(exc))
+            return
+        self.refresh()
+        self.status.setText(f"{plan.to_name} is the Default.")
+        if notes and not quiet:
+            QMessageBox.information(self, "Default changed", "\n\n".join(notes))
+
+    def toggle_menu_selected(self):
+        entry = self.selected_entry()
+        if not entry:
+            return
+        name = entry["name"]
+        try:
+            if defaultentry.has_menu_entry(name):
+                defaultentry.remove_menu_entry(name)
+                self.status.setText(f"Removed '{defaultentry.menu_name(name)}' from the menu.")
+            else:
+                defaultentry.add_menu_entry(name, entry["path"])
+                self.status.setText(f"Added '{defaultentry.menu_name(name)}' to the menu.")
+        except (OSError, PermissionError) as exc:
+            QMessageBox.warning(self, "Menu entry", str(exc))
+            return
+        self.refresh()
 
     def toggle_protection(self):
         entry = self.selected_entry()

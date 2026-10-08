@@ -38,6 +38,32 @@ def new_dialog(tmp_path, monkeypatch):
     d.reject()
 
 
+def test_new_prefix_starts_with_stock_settings_unless_asked(new_dialog):
+    assert new_dialog.carry_from() is None
+    assert not new_dialog.carry.isEnabled()
+
+
+def test_new_prefix_offers_the_settings_of_other_prefixes(tmp_path, monkeypatch):
+    monkeypatch.setattr(registry, "manager_dir", lambda: tmp_path / "meta")
+    monkeypatch.setattr(registry, "base_dir", lambda: tmp_path / "base")
+    monkeypatch.setattr(release, "current",
+                        lambda *a, **k: release.Release("3.3.0.4850", "2026-09-15"))
+    old = tmp_path / "Old"
+    settings = old / "drive_c/users/someone/AppData/Roaming/Affinity/Affinity/3.0/Settings"
+    settings.mkdir(parents=True)
+    (settings / "preferences.dat").write_bytes(b"x")
+    reg = registry.Registry(tmp_path / "prefixes.json")
+    reg.add("Old", str(old))
+    d = app.NewPrefixDialog(None, reg)
+    try:
+        assert d.carry.isEnabled() and d.carry.count() == 2
+        assert d.carry_from() is None
+        d.carry.setCurrentIndex(1)
+        assert d.carry_from() == old
+    finally:
+        d.reject()
+
+
 def settle(d, until):
     import time
     t = time.time()

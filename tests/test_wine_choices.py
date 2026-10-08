@@ -95,10 +95,10 @@ def test_every_offered_label_is_mapped_to_a_version():
         assert options <= mapped, f"{name}(): no mapping for {sorted(options - mapped)}"
 
 
-def test_the_patched_builds_come_first_and_11_18_is_the_default():
+def test_the_patched_builds_come_first_and_11_19_is_the_default():
     source = ast.get_source_segment(Path(inst.__file__).read_text(),
                                     _method("_show_wine_version_dialog_safe"))
     first_radio = source.index("QRadioButton(")
-    assert source[first_radio:].startswith('QRadioButton("Wine 11.18 (Affinity patches)")')
+    assert source[first_radio:].startswith('QRadioButton("Wine 11.19 (Affinity patches)")')
     checked = [line for line in source.splitlines() if ".setChecked(True)" in line]
-    assert checked == [line for line in checked if "wine_1118_radio" in line] and checked
+    assert checked == [line for line in checked if "wine_1119_radio" in line] and checked
