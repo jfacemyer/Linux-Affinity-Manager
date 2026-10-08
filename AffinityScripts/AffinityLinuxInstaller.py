@@ -29,8 +29,10 @@ import shlex
 # Order matters: .NET first (the runtimes and Affinity itself check against it),
 # then fonts and runtimes, then the rest. Keep in sync with
 # _check_winetricks_component().
+# No .NET 3.5: Affinity 3 runs on 4.8. Installing 3.5 first took ~3.5 min and
+# nearly doubled the 4.8 install after it (4:05 -> 7:30), and its 32-bit setup
+# was the first to crash under Wine 11's new WoW64.
 WINETRICKS_COMPONENTS = [
-    ("dotnet35sp1", ".NET Framework 3.5 SP1"),
     ("dotnet48", ".NET Framework 4.8"),
     ("corefonts", "Windows Core Fonts"),
     ("vcrun2022", "Visual C++ Redistributables 2022"),
@@ -13731,6 +13733,21 @@ class AffinityInstallerGUI(QMainWindow):
                 progress_callback=update_component_progress,
                 stall_timeout=1200,
             )
+            # The .NET installers' 32-bit setups crash intermittently under
+            # Wine 11's new WoW64 (an unhandled page fault high in the 32-bit
+            # address space); clean runs of the same verb succeed. Once more,
+            # from a stopped prefix, before giving up on one Affinity needs.
+            if (not component_ok and component.startswith("dotnet")
+                    and not self.cancel_event.is_set()
+                    and not self._last_command_stalled):
+                self.log(f"'{component}' failed; stopping the prefix's Wine and trying once more", "warning")
+                self.stop_prefix_wine_processes(env, reason=f"retrying '{component}'")
+                component_ok = self.run_command_streaming(
+                    self.build_winetricks_command(component),
+                    env=env,
+                    progress_callback=update_component_progress,
+                    stall_timeout=1200,
+                )
             if not component_ok and not self.cancel_event.is_set():
                 if self._last_command_stalled:
                     self._stalled_components.add(component)

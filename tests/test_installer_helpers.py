@@ -171,7 +171,8 @@ def test_verbose_flag_is_optional(harness):
 
 def test_component_list_is_single_source(ali):
     verbs = [verb for verb, _ in ali.WINETRICKS_COMPONENTS]
-    assert verbs[:2] == ["dotnet35sp1", "dotnet48"], "dotnet must come first"
+    assert verbs[0] == "dotnet48", "dotnet must come first"
+    assert "dotnet35sp1" not in verbs, "Affinity 3 needs 4.8, and 3.5 doubled its install time"
     assert len(verbs) == len(set(verbs)), "duplicate verbs would install twice"
     assert "renderer=vulkan" in verbs
     for verb, description in ali.WINETRICKS_COMPONENTS:
