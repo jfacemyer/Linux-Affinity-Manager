@@ -553,3 +553,21 @@ def test_precompile_affinity_skips_when_affinity_is_missing(ali, harness, tmp_pa
     h = _ngen_harness(ali, harness, tmp_path, (True, "", ""))
     assert h.precompile_affinity(tmp_path / "drive_c" / "nope.exe") is False
     assert h.calls == []
+
+
+def test_the_hook_patch_leaves_another_prefixs_entry_alone(ali, tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    apps = tmp_path / ".local" / "share" / "applications"
+    apps.mkdir(parents=True)
+    entry = apps / "Affinity.desktop"
+    body = "[Desktop Entry]\nExec=env WINEPREFIX=/other/prefix wine x.exe %F\n"
+    entry.write_text(body)
+
+    class StandIn:
+        directory = str(tmp_path / "this-prefix")
+        log = staticmethod(lambda *a, **k: None)
+        manages_host_entries = staticmethod(lambda: True)
+    for name in ("_patch_affinity_desktop_for_hook", "_entry_serves_this_prefix"):
+        setattr(StandIn, name, inspect.getattr_static(ali.AffinityInstallerGUI, name))
+    StandIn()._patch_affinity_desktop_for_hook()
+    assert entry.read_text() == body

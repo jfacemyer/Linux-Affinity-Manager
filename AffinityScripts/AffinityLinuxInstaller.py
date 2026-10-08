@@ -8858,6 +8858,11 @@ class AffinityInstallerGUI(QMainWindow):
 
                 updated_count = 0
                 for desktop_file in affinity_desktop_files:
+                    if desktop_file.exists() and not (
+                        self.manages_host_entries()
+                        and self._entry_serves_this_prefix(desktop_file)
+                    ):
+                        continue
                     if not desktop_file.exists():
                         continue
 
@@ -9110,6 +9115,11 @@ class AffinityInstallerGUI(QMainWindow):
 
                 updated_count = 0
                 for desktop_file in affinity_desktop_files:
+                    if desktop_file.exists() and not (
+                        self.manages_host_entries()
+                        and self._entry_serves_this_prefix(desktop_file)
+                    ):
+                        continue
                     if not desktop_file.exists():
                         continue
 
@@ -9209,6 +9219,8 @@ class AffinityInstallerGUI(QMainWindow):
 
     def update_existing_desktop_entries(self):
         """Update existing desktop entries with current GPU configuration"""
+        if not self.manages_host_entries():
+            return
         desktop_dir = Path.home() / ".local" / "share" / "applications"
         if not desktop_dir.exists():
             return
@@ -19316,6 +19328,8 @@ Would you like to continue with {distro_name} anyway?"""
         desktop databases have been rebuilt. KDE additionally caches this in
         ksycoca, so without kbuildsycoca the old association keeps being used and
         it looks like nothing changed."""
+        if not self.manages_host_entries():
+            return
         mime_names = [
             "x-wine-extension-af.xml",
             "x-wine-extension-afphoto.xml",
@@ -21724,6 +21738,13 @@ Would you like to continue with {distro_name} anyway?"""
         desktop_file = (
             Path.home() / ".local" / "share" / "applications" / "Affinity.desktop"
         )
+        if not self.manages_host_entries():
+            return
+        # The fixed-name entry may launch another prefix; rewriting its Exec=
+        # moved the menu entry and document double-click to this one.
+        if desktop_file.exists() and not self._entry_serves_this_prefix(desktop_file):
+            self.log(f"Leaving {desktop_file.name}: it launches another prefix", "info")
+            return
 
         if not desktop_file.exists():
             self.log(
