@@ -336,3 +336,64 @@ def test_recording_failure_is_written_to_the_log_not_swallowed(window):
     w, reg, prefixlog = window
     w._busy_start("Copying", 100, prefix="Nonexistent", operation="Clone")
     assert "Could not record the operation" in prefixlog.tail("Nonexistent")
+
+
+# -- back to a working Setup, and the settings chosen at creation --------------
+
+def test_the_banner_offers_the_way_back_to_a_working_setup(window):
+    """On the list every button that could reopen Setup is disabled while it
+    works, so the banner has to carry the way back."""
+    w, _, _ = window
+    shown = []
+    w.lock_show_button = types.SimpleNamespace(setVisible=shown.append)
+    w._setup_pages = {"Managed": types.SimpleNamespace(name="Managed", set_actions_enabled=lambda *_: None)}
+    w._busy_start("Managed — Setup", 100, prefix="Managed", operation="Setup")
+    w._sync_lock_ui(force=True)
+    assert shown[-1] is True
+
+
+def test_no_way_back_is_offered_for_work_that_is_not_a_setup(window):
+    w, _, _ = window
+    shown = []
+    w.lock_show_button = types.SimpleNamespace(setVisible=shown.append)
+    w._busy_start("Cleaning Managed", 3, prefix="Managed", operation="Clean")
+    w._sync_lock_ui(force=True)
+    assert shown[-1] is False
+
+
+@pytest.fixture
+def settled(window, monkeypatch):
+    import AffinityLinuxManager as app
+    w, reg, _ = window
+    monkeypatch.setattr(app.QTimer, "singleShot", staticmethod(lambda _ms, fn: fn()))
+    offered = []
+    w.offer_settings_copy = lambda entry, preselect=None: offered.append((entry["name"], preselect))
+    w._carry_after_setup = {"Managed": Path("/somewhere/Old")}
+    w._default_if_none = lambda name: None
+    for name in ("setup_settled", "_offer_carry"):
+        setattr(w, name, types.MethodType(getattr(app.ManagerWindow, name), w))
+    return w, reg, offered
+
+
+def test_the_chosen_settings_wait_until_wine_has_made_the_prefix(settled):
+    w, _, offered = settled
+    w.setup_settled("Managed")
+    assert offered == []
+    assert "Managed" in w._carry_after_setup
+
+
+def test_the_chosen_settings_are_offered_once_setup_has_made_the_prefix(settled):
+    w, reg, offered = settled
+    (Path(reg.by_name("Managed")["path"]) / "dosdevices" / "c:").symlink_to("../drive_c")
+    w.setup_settled("Managed")
+    w.setup_settled("Managed")
+    assert offered == [("Managed", Path("/somewhere/Old"))]
+    assert w._carry_after_setup == {}
+
+
+def test_a_prefix_created_without_a_choice_is_not_asked_about(settled):
+    w, reg, offered = settled
+    w._carry_after_setup = {}
+    (Path(reg.by_name("Managed")["path"]) / "dosdevices" / "c:").symlink_to("../drive_c")
+    w.setup_settled("Managed")
+    assert offered == []

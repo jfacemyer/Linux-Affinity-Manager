@@ -165,8 +165,13 @@ def entries_for(prefix_name: str) -> list[Path]:
     directory = applications_dir()
     if not directory.is_dir():
         return out
-    for path in directory.glob("affinity-manager-*.desktop"):
-        if owner_of(path) == prefix_name:
+    # The Default's fixed-name entries too (defaultentry), when this prefix's
+    # marker is in them: removing the prefix the menu's Affinity entry runs
+    # would otherwise leave it starting a prefix that is gone.
+    candidates = list(directory.glob("affinity-manager-*.desktop"))
+    candidates += [directory / "Affinity.desktop", directory / "affinity-url-handler.desktop"]
+    for path in candidates:
+        if path.is_file() and owner_of(path) == prefix_name:
             out.append(path)
     return sorted(out)
 

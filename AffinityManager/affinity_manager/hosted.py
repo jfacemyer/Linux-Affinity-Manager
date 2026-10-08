@@ -175,6 +175,13 @@ def hosted_class():
             # wrong for a page: it would set the floor for the whole manager.
             self.setMinimumSize(0, 0)
 
+        def manages_host_entries(self):
+            """The manager keeps the Default entry and the per-prefix ones
+            (defaultentry); an install here must not rewrite the fixed-name
+            Affinity.desktop, desktop icon or affinity:// handler, which
+            belong to whichever prefix is the Default."""
+            return False
+
         # -- deferred tasks that belong to entering, not to building ---------
 
         def _check_and_update_dxvk_vkd3d(self):
@@ -450,6 +457,9 @@ class SetupPage(QWidget):
         if self.manager.lock.held is None:
             return                      # the watchdog got there first
         self.manager._busy_done("%s — finished" % self.name, owner=self.name)
+        settled = getattr(self.manager, "setup_settled", None)
+        if settled is not None:
+            settled(self.name)
 
     @never_escapes
     def _progress_text(self, text):
