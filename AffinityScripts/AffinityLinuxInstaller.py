@@ -319,14 +319,15 @@ WINE_11_18_SHA256 = "c325bf804407abcf8070d02066b5be00680b0339e796a6583b4a1d2dae9
 # sign-in, the command-line open fix and the runtime Direct2D patches, all of
 # which sit unreleased on its dev branch. This build is that dev branch plus
 # fixes -- libplugins.dll kept loaded (random crashes), launch arguments quoted
-# (paths with spaces), the color picker under Wine -- released on a fork until
+# (paths with spaces), the color picker under Wine, the empty Leading dropdown in
+# the text context toolbar (Affinity 3.3) -- released on a fork until
 # upstream publishes one. Each asset is pinned, like the Wine build.
 # POC SOURCE -- repoint at an upstream release that carries these.
 APL_RELEASE_REPO = "jfacemyer/AffinityPluginLoader"
-APL_RELEASE_TAG = "wine-fixes-2"
+APL_RELEASE_TAG = "wine-fixes-3"
 APL_ASSET_SHA256 = {
-    "affinitypluginloader-v0.3.0.zip": "df2860dcf7241b927877088d3005d56b5cf1fb5ea16f4a080caf899b0c2b5794",
-    "winefix-v0.3.0.zip": "b7442a4752556469b3c60167d9efeaa6f9af538b2b46d2a0ba25880d60b46e62",
+    "affinitypluginloader-v0.3.0.zip": "11acc82afdd47463c20e914c6c57fbf41bd1bf7810f8b58b44b4346462d6fb9c",
+    "winefix-v0.3.0.zip": "f426187ea3872f066f5caa84348a0c949c898e453ce169d3605c8757ef8efe65",
 }
 
 
