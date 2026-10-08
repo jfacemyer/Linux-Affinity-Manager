@@ -10352,6 +10352,10 @@ class AffinityInstallerGUI(QMainWindow):
                 f"Use the Affinity {version} installer, downloaded "
                 f"{time.strftime('%Y-%m-%d', time.localtime(downloaded))}")
             kept_radio.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Minimum)
+            if n == 0:
+                # The newest kept installer is the default: no 650 MB download,
+                # and the version is known. Download is one click away.
+                kept_radio.setChecked(True)
             kept_layout.addWidget(kept_radio)
             options_layout.addWidget(kept_frame)
             button_group.addButton(kept_radio, 2 + n)
