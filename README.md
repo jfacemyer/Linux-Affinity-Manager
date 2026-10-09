@@ -1,12 +1,11 @@
 # AffinityOnLinux
 
-All Future Work is to be Halted! 
+Work in the future will be stopped! Appimage is updated and loads of new fixes are merged.
 2 years ago i started my own project local Called Infinity Photo and 
-progress as of now is Pretty amazing and almost on par with photoshop and Affinity it's self
-while more time i needed before release to the public for linux
-progress can be watched on my discord 
+progress As of now all tools are finished with fastpath on both cpu and gpu
+Next step testing everything single tool and adding every setting so it feels right
+<img width="2560" height="1364" alt="image" src="https://github.com/user-attachments/assets/f70d4d0a-d2d6-4929-a166-7d832d66ba1f" />
 
-<img width="2560" height="1365" alt="image" src="https://github.com/user-attachments/assets/5845aaae-6cf2-427c-b44c-af3079a8f39e" />
 
 
 
