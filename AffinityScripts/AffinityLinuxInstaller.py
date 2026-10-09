@@ -13915,10 +13915,13 @@ class AffinityInstallerGUI(QMainWindow):
             # Wine 11's new WoW64 (an unhandled page fault high in the 32-bit
             # address space); clean runs of the same verb succeed. Once more,
             # from a stopped prefix, before giving up on one Affinity needs.
+            # A stall gets the retry too: the .NET 4.0 self-extractor has been
+            # seen to hang mid-unpack (and the stall watchdog to kill it) on one
+            # machine while the same verb ran through on another.
             if (not component_ok and component.startswith("dotnet")
-                    and not self.cancel_event.is_set()
-                    and not self._last_command_stalled):
-                self.log(f"'{component}' failed; stopping the prefix's Wine and trying once more", "warning")
+                    and not self.cancel_event.is_set()):
+                how = "stalled" if self._last_command_stalled else "failed"
+                self.log(f"'{component}' {how}; stopping the prefix's Wine and trying once more", "warning")
                 self.stop_prefix_wine_processes(env, reason=f"retrying '{component}'")
                 component_ok = self.run_command_streaming(
                     self.build_winetricks_command(component),
