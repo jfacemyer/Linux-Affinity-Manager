@@ -299,6 +299,20 @@ class Registry:
         self.save()
         return entry
 
+    def set_carry(self, name: str, source) -> dict:
+        """Remember (or, with None, forget) the prefix whose settings to copy
+        into this one once it is ready. On the entry, so it survives the
+        manager being closed between creating a prefix and finishing Configure."""
+        entry = self.by_name(name)
+        if not entry:
+            raise KeyError(name)
+        if source:
+            entry["carry_from"] = str(source)
+        else:
+            entry.pop("carry_from", None)
+        self.save()
+        return entry
+
     # ── operation state ──────────────────────────────────────────────────────
     #
     # Written BEFORE the work starts and cleared after, so that a manager which

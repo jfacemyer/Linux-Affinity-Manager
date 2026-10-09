@@ -767,6 +767,18 @@ class FirstRunDialog(SizedDialog):
         return self.name_edit.text().strip()
 
 
+def _settings_source_dirs(reg):
+    """Where settings can be copied from: every managed prefix, and the
+    default ~/.AffinityLinux when the manager does not list it -- the prefix an
+    AppImage or a plain AffinityOnLinux install leaves, which is exactly what
+    somebody moving to the manager wants their settings from."""
+    dirs = [e["path"] for e in reg.entries]
+    default = Path.home() / ".AffinityLinux"
+    if default.is_dir() and reg.by_path(default) is None:
+        dirs.append(str(default))
+    return dirs
+
+
 class CarrySettingsDialog(SizedDialog):
     """Bring preferences, recent files and drive letters across from another prefix.
 
@@ -1659,7 +1671,7 @@ class NewPrefixDialog(SizedDialog):
         # dialog opens with it chosen when this prefix's Setup finishes.
         self.carry = QComboBox()
         self.carry.addItem("Start with Affinity's stock settings", None)
-        for found in prefsseed.sources([e["path"] for e in reg.entries]):
+        for found in prefsseed.sources(_settings_source_dirs(reg)):
             self.carry.addItem(
                 "Copy from %s — %s, last changed %s" % (
                     found.prefix.name, found.version,
@@ -2968,9 +2980,6 @@ class ManagerWindow(QMainWindow):
         # bounded in _drop_spare_setup_pages, because keeping every prefix's is
         # not the same thing as keeping the useful ones.
         self._setup_pages = {}
-        # name -> prefix to copy settings from, chosen when the prefix was
-        # created and offered when its Setup finishes. Not kept across runs.
-        self._carry_after_setup = {}
         # One operation at a time, across every prefix. See oplock: two
         # prefixes provisioning at once collide in the distro package manager
         # whatever this application believes, so this is a correctness matter
@@ -3092,6 +3101,11 @@ class ManagerWindow(QMainWindow):
             self.offer_settings_copy(entry)
 
     def offer_settings_copy(self, entry, preselect=None):
+        """Returns True when settings were copied, False when not (refused,
+        cancelled, failed)."""
+        return bool(self._offer_settings_copy(entry, preselect))
+
+    def _offer_settings_copy(self, entry, preselect=None):
         """Bring settings, workspaces, recents and drive letters into a prefix.
 
         Refused while Affinity runs in the DESTINATION -- it would overwrite
@@ -3108,8 +3122,7 @@ class ManagerWindow(QMainWindow):
             return
 
         destination = prefsseed.destination_for(path)
-        others = [e["path"] for e in self.reg.entries if e["name"] != entry["name"]]
-        found = prefsseed.sources(others, exclude=path)
+        found = prefsseed.sources(_settings_source_dirs(self.reg), exclude=path)
 
         dialog = CarrySettingsDialog(self, path, destination, found, preselect=preselect)
         if dialog.exec() != QDialog.DialogCode.Accepted:
@@ -3138,7 +3151,7 @@ class ManagerWindow(QMainWindow):
                      if aside else "")
             QMessageBox.critical(self, "Could not copy the settings",
                                  f"{exc}{where}")
-            return
+            return False
 
         drive_notes = []
         if letters:
@@ -3164,6 +3177,7 @@ class ManagerWindow(QMainWindow):
         if drive_notes:
             lines.append("Drive letters:\n  " + "\n  ".join(drive_notes))
         QMessageBox.information(self, "Settings copied", "\n\n".join(lines))
+        return True
 
     # ── recovery ─────────────────────────────────────────────────────────────
 
@@ -3885,6 +3899,10 @@ class ManagerWindow(QMainWindow):
 
     def _lock_tick(self):
         """The watchdog, and the clock behind the elapsed time."""
+        try:
+            self._maybe_offer_carry()
+        except Exception as exc:          # a slot: nothing may escape it
+            print(f"settings copy check failed: {exc}", file=sys.stderr)
         swept = self.lock.sweep()
         if swept is not None:
             # Nothing released it, and whatever vouched for it says it has
@@ -4155,7 +4173,8 @@ class ManagerWindow(QMainWindow):
         entry = dialog.result_entry
         carry = dialog.carry_from()
         if carry is not None:
-            self._carry_after_setup[entry["name"]] = carry
+            self.reg.set_carry(entry["name"], carry)
+            prefixlog.write(entry["name"], f"Settings copy chosen at creation: from {carry}")
         self.refresh()
         # Settings are NOT copied here any more. This used to offer the copy
         # before Setup, into a prefix Wine had never run in -- fine for the
@@ -4175,7 +4194,6 @@ class ManagerWindow(QMainWindow):
 
     def setup_settled(self, name):
         self._default_if_none(name)
-        self._offer_carry(name)
 
     def _default_if_none(self, name):
         """With no Affinity menu entry at all, a prefix that has finished Setup
@@ -4190,22 +4208,44 @@ class ManagerWindow(QMainWindow):
             return                       # Affinity not installed yet
         self._apply_default(plan, quiet=True)
 
-    def _offer_carry(self, name):
-        """A Setup page has finished its work. Offer the settings copy chosen
-        when the prefix was created -- once Wine has made the prefix, since
-        drive letters cannot go in before that (prefsseed.is_initialised).
-        A Setup that stopped earlier keeps the offer for its next step."""
-        source = self._carry_after_setup.get(name)
-        if source is None:
+    def _maybe_offer_carry(self):
+        """Offer a settings copy chosen when a prefix was created, as soon as
+        the prefix is in the state the copy needs: nothing running in the
+        manager, Wine has made the prefix, Affinity is installed and not
+        running. Checked on the lock timer, so it does not depend on how
+        Configure ended (its own settle, the watchdog, a restart of the
+        manager); every reason for waiting goes to the prefix's log once."""
+        if self.lock.held is not None or getattr(self, "_carry_open", False):
             return
-        entry = self.reg.by_name(name)
-        if entry is None:
-            self._carry_after_setup.pop(name, None)
+        for entry in self.reg.entries:
+            source = entry.get("carry_from")
+            if not source:
+                continue
+            path = Path(entry["path"]).expanduser()
+            if not prefsseed.is_initialised(path):
+                reason = "waiting for Wine to set the prefix up"
+            elif not (path / probe.AFFINITY_SUBDIR / "Affinity.exe").is_file():
+                reason = "waiting for Affinity to be installed"
+            elif probe.running_pids(path):
+                reason = "waiting for Affinity to be closed there"
+            else:
+                reason = None
+            if reason:
+                noted = getattr(self, "_carry_noted", {})
+                if noted.get(entry["name"]) != reason:
+                    noted[entry["name"]] = reason
+                    self._carry_noted = noted
+                    prefixlog.write(entry["name"], f"Settings copy from {source}: {reason}")
+                continue
+            self._carry_open = True
+            try:
+                prefixlog.write(entry["name"], f"Settings copy from {source}: offering it")
+                copied = self.offer_settings_copy(entry, preselect=Path(source))
+                prefixlog.write(entry["name"], "Settings copy: " + ("done" if copied else "not done (declined or failed); 'Copy settings…' is still there"))
+                self.reg.set_carry(entry["name"], None)
+            finally:
+                self._carry_open = False
             return
-        if not prefsseed.is_initialised(entry["path"]):
-            return
-        del self._carry_after_setup[name]
-        QTimer.singleShot(0, lambda: self.offer_settings_copy(entry, preselect=source))
 
     def adopt(self):
         chosen = QFileDialog.getExistingDirectory(
