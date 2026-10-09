@@ -330,6 +330,56 @@ DEP_LABELS = {
 }
 
 
+# OpenCL needs a driver on the host -- Wine's opencl.dll is only a bridge to
+# the system's OpenCL loader, which finds drivers through /etc/OpenCL/vendors.
+# Without one Affinity logs "[OpenCL] Not available" and renders without it.
+# The package that provides the driver, per GPU vendor and distro family.
+GPU_VENDORS = {"0x8086": "intel", "0x1002": "amd", "0x10de": "nvidia"}
+OPENCL_PACKAGES = {
+    "arch":   {"intel": "intel-compute-runtime", "amd": "rocm-opencl-runtime (or opencl-mesa)",
+               "nvidia": "opencl-nvidia"},
+    "debian": {"intel": "intel-opencl-icd", "amd": "mesa-opencl-icd (or ROCm's OpenCL)",
+               "nvidia": "the nvidia-opencl-icd package matching your NVIDIA driver"},
+    "fedora": {"intel": "intel-compute-runtime", "amd": "mesa-libOpenCL (or rocm-opencl)",
+               "nvidia": "xorg-x11-drv-nvidia-cuda (RPM Fusion)"},
+    "suse":   {"intel": "intel-opencl", "amd": "Mesa-libOpenCL",
+               "nvidia": "nvidia-compute-G06"},
+}
+
+
+def gpu_vendors(drm="/sys/class/drm"):
+    """GPU vendors present ("intel", "amd", "nvidia"), from the DRM devices."""
+    found = []
+    try:
+        for card in sorted(os.listdir(drm)):
+            if not re.fullmatch(r"card\d+", card):
+                continue
+            try:
+                vendor = open(os.path.join(drm, card, "device", "vendor")).read().strip().lower()
+            except OSError:
+                continue
+            name = GPU_VENDORS.get(vendor)
+            if name and name not in found:
+                found.append(name)
+    except OSError:
+        pass
+    return found
+
+
+def opencl_drivers(vendors_dir="/etc/OpenCL/vendors"):
+    """OpenCL drivers the loader can find: .icd files whose library exists
+    (an absolute path that is there, or a bare name left to the linker)."""
+    drivers = []
+    try:
+        for icd in sorted(Path(vendors_dir).glob("*.icd")):
+            lib = icd.read_text(errors="replace").strip()
+            if lib and (not lib.startswith("/") or Path(lib).exists()):
+                drivers.append(icd.stem)
+    except OSError:
+        pass
+    return drivers
+
+
 # Serialises ensure_patcher_files across the installers in one process.
 _PATCHER_FILES_LOCK = threading.Lock()
 
@@ -1362,6 +1412,12 @@ class AffinityInstallerGUI(QMainWindow):
             else:
                 self.log(f"  {label}: ✗ Not installed", "error")
                 deps_installed = False
+
+        if opencl_drivers():
+            self.log(f"  OpenCL driver: ✓ {', '.join(opencl_drivers())}", "success")
+        elif gpu_vendors():
+            self.log("  OpenCL driver: ✗ none (Affinity runs without OpenCL) — "
+                     + (self.opencl_advice() or ""), "warning")
 
         if self.check_command("unzstd") or self.check_command("zstd"):
             self.log(f"  zstd: ✓ Installed", "success")
@@ -10847,7 +10903,45 @@ class AffinityInstallerGUI(QMainWindow):
         self.update_progress(1.0)
         self.update_progress_text("All dependencies installed")
         self.log("\n✓ All required dependencies are installed!", "success")
+        self.check_opencl_driver()
         return True
+
+    def opencl_family(self):
+        """Distro family for OPENCL_PACKAGES, or None."""
+        d = self.distro or ""
+        if d in ("arch", "artix", "cachyos", "endeavouros", "xerolinux", "manjaro", "garuda"):
+            return "arch"
+        if d in ("fedora", "nobara") or "fedora" in d:
+            return "fedora"
+        if "opensuse" in d or "suse" in d:
+            return "suse"
+        if self.is_ubuntu_family_distro() or d in ("debian", "pop", "pikaos"):
+            return "debian"
+        return None
+
+    def opencl_advice(self):
+        """None when an OpenCL driver is installed (or no GPU is recognised);
+        otherwise a sentence naming the package for this GPU and distro."""
+        if opencl_drivers():
+            return None
+        vendors = gpu_vendors()
+        if not vendors:
+            return None
+        packages = OPENCL_PACKAGES.get(self.opencl_family() or "", {})
+        named = [f"{v.upper() if v == 'amd' else v.capitalize()}: {packages[v]}"
+                 for v in vendors if v in packages]
+        what = ("; ".join(named) if named else
+                "your distribution's OpenCL driver for " + ", ".join(vendors))
+        return ("No OpenCL driver is installed, so Affinity will run without OpenCL "
+                f"(slower filters and effects). To enable it, install — {what}. "
+                "Then `clinfo -l` should list your GPU.")
+
+    def check_opencl_driver(self):
+        """Advise, never block: Affinity runs without OpenCL."""
+        advice = self.opencl_advice()
+        if advice:
+            self.log(advice, "warning")
+        return advice
 
     def show_unsupported_warning(self):
         """Display unsupported distribution warning"""
@@ -11089,6 +11183,7 @@ class AffinityInstallerGUI(QMainWindow):
             + (":\n\n    " + command if command else
                " -- the packages above, from your distribution's package manager.")
             + "\n\nThen run the installer again."
+            + (f"\n\nAlso, optionally: {self.opencl_advice()}" if self.opencl_advice() else "")
         )
         self.log(text, "error")
         self.show_message("An administrator needs to install some packages", text, "error")

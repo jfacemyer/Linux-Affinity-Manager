@@ -623,7 +623,8 @@ def _sudo_harness(ali, can_sudo, distro="arch"):
         is_ubuntu_family_distro = staticmethod(lambda: False)
     StandIn.distro = distro
     for name in ("get_sudo_password", "account_can_sudo", "admin_install_command",
-                 "explain_admin_needed", "_distro_install_commands"):
+                 "explain_admin_needed", "_distro_install_commands",
+                 "opencl_advice", "opencl_family"):
         setattr(StandIn, name, inspect.getattr_static(ali.AffinityInstallerGUI, name))
     return StandIn(), shown, logged
 
@@ -675,3 +676,31 @@ def test_the_hard_limit_stops_a_child_that_keeps_busy(harness, monkeypatch):
     ok = h.run_command_streaming(["sleep", "30"], stall_timeout=1,
                                  activity_probe=lambda: next(ticks), hard_limit=2)
     assert not ok and h._last_command_stalled
+
+
+# --------------------------------------------------------------------------- #
+# OpenCL driver advice
+# --------------------------------------------------------------------------- #
+
+
+def test_gpu_vendors_and_opencl_drivers_are_read_from_the_system_files(ali, tmp_path):
+    drm = tmp_path / "drm"
+    for card, vendor in (("card0", "0x8086"), ("card1", "0x1002"), ("card0-DP-1", "0x10de")):
+        (drm / card / "device").mkdir(parents=True)
+        (drm / card / "device" / "vendor").write_text(vendor + "\n")
+    assert ali.gpu_vendors(str(drm)) == ["intel", "amd"]      # connectors are not cards
+    vendors = tmp_path / "vendors"
+    vendors.mkdir()
+    (vendors / "intel.icd").write_text("/nonexistent/libigdrcl.so\n")
+    assert ali.opencl_drivers(str(vendors)) == []             # its library is missing
+    (vendors / "mesa.icd").write_text("libRusticlOpenCL.so.1\n")
+    assert ali.opencl_drivers(str(vendors)) == ["mesa"]
+
+
+def test_the_advice_names_the_package_for_this_gpu_and_distro(ali, monkeypatch):
+    h, _, _ = _sudo_harness(ali, can_sudo=True, distro="manjaro")
+    monkeypatch.setattr(ali, "opencl_drivers", lambda *a: [])
+    monkeypatch.setattr(ali, "gpu_vendors", lambda *a: ["intel"])
+    assert "intel-compute-runtime" in h.opencl_advice()
+    monkeypatch.setattr(ali, "opencl_drivers", lambda *a: ["intel"])
+    assert h.opencl_advice() is None
