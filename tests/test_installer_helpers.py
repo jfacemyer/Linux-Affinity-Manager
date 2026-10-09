@@ -642,3 +642,36 @@ def test_an_administrator_gets_the_exact_command(ali):
     assert "winetricks, jq" in text
     assert "sudo pacman -S --needed --noconfirm wine winetricks" in text
     assert "home folder" in text
+
+
+# --------------------------------------------------------------------------- #
+# the stall watchdog with an activity probe
+# --------------------------------------------------------------------------- #
+
+
+def _probe_harness(harness, monkeypatch):
+    harness.ACTIVITY_PROBE_INTERVAL = 0.3
+    harness._log_prefix_snapshot = lambda: None
+    return harness
+
+
+def test_a_silent_child_that_is_working_is_not_stopped(harness, monkeypatch):
+    h = _probe_harness(harness, monkeypatch)
+    ticks = iter(range(1000))
+    ok = h.run_command_streaming(["sh", "-c", "sleep 3; echo done"], stall_timeout=1,
+                                 activity_probe=lambda: next(ticks))
+    assert ok and not h._last_command_stalled
+
+
+def test_a_silent_idle_child_is_still_stopped(harness, monkeypatch):
+    h = _probe_harness(harness, monkeypatch)
+    ok = h.run_command_streaming(["sleep", "30"], stall_timeout=1, activity_probe=lambda: 0)
+    assert not ok and h._last_command_stalled
+
+
+def test_the_hard_limit_stops_a_child_that_keeps_busy(harness, monkeypatch):
+    h = _probe_harness(harness, monkeypatch)
+    ticks = iter(range(1000))
+    ok = h.run_command_streaming(["sleep", "30"], stall_timeout=1,
+                                 activity_probe=lambda: next(ticks), hard_limit=2)
+    assert not ok and h._last_command_stalled

@@ -6395,6 +6395,58 @@ class AffinityInstallerGUI(QMainWindow):
         command.append(component)
         return command
 
+    # What counts as work for _prefix_activity: CPU seconds used per minute by
+    # the prefix's Wine processes (its idle services use a fraction of one),
+    # and the newest file under the folders .NET and Windows Installer write.
+    ACTIVITY_CPU_SECONDS = 2.0
+    ACTIVITY_PROBE_INTERVAL = 60
+    ACTIVITY_DIRS = ("drive_c/windows/Microsoft.NET", "drive_c/windows/assembly",
+                     "drive_c/windows/Installer", "drive_c/windows/temp",
+                     "drive_c/windows/syswow64", "drive_c/windows/system32")
+
+    def _prefix_activity(self):
+        """A snapshot that changes while the prefix's Wine is doing work:
+        (CPU in ACTIVITY_CPU_SECONDS steps, newest file date, Installer/ngen
+        running). Read from /proc and file dates only -- nothing is attached."""
+        hz = os.sysconf("SC_CLK_TCK")
+        cpu = 0.0
+        busy = False
+        for pid in self._prefix_wine_pids():
+            try:
+                fields = open(f"/proc/{pid}/stat").read().rsplit(")", 1)[1].split()
+                cpu += (int(fields[11]) + int(fields[12])) / hz
+                cmd = open(f"/proc/{pid}/cmdline", "rb").read().lower()
+                busy = busy or any(n in cmd for n in (b"msiexec", b"ngen.exe", b"mscorsvw"))
+            except (OSError, IndexError, ValueError):
+                continue
+        newest = 0.0
+        for rel in self.ACTIVITY_DIRS:
+            top = Path(self.directory) / rel
+            try:
+                newest = max(newest, top.stat().st_mtime,
+                             *(e.stat().st_mtime for e in os.scandir(top)))
+            except (OSError, ValueError):
+                continue
+        return (int(cpu // self.ACTIVITY_CPU_SECONDS), int(newest), busy)
+
+    def _log_prefix_snapshot(self):
+        """What was still running when a step was stopped, and what each
+        program's threads were waiting on -- so a stopped step says why."""
+        lines = []
+        for pid in self._prefix_wine_pids():
+            try:
+                cmd = open(f"/proc/{pid}/cmdline", "rb").read().replace(b"\0", b" ").decode(errors="replace").strip()
+                waits = {}
+                for tid in os.listdir(f"/proc/{pid}/task"):
+                    state = open(f"/proc/{pid}/task/{tid}/stat").read().rsplit(")", 1)[1].split()[0]
+                    chan = open(f"/proc/{pid}/task/{tid}/wchan").read().strip() or "-"
+                    waits[f"{state}:{chan}"] = waits.get(f"{state}:{chan}", 0) + 1
+                lines.append(f"    {cmd[:90]}  [{', '.join(f'{k} x{v}' for k, v in sorted(waits.items()))}]")
+            except OSError:
+                continue
+        if lines:
+            self.log("  Still running when it was stopped:\n" + "\n".join(lines[:15]), "info")
+
     def _prefix_wine_pids(self):
         """PIDs of processes whose environment points at our WINEPREFIX.
 
@@ -6929,7 +6981,8 @@ class AffinityInstallerGUI(QMainWindow):
         return default
 
     def run_command_streaming(
-        self, command, env=None, progress_callback=None, stall_timeout=None
+        self, command, env=None, progress_callback=None, stall_timeout=None,
+        activity_probe=None, hard_limit=None,
     ):
         """Execute command and stream output to log in real-time, cancellable.
 
@@ -6942,6 +6995,13 @@ class AffinityInstallerGUI(QMainWindow):
 
         Also stores the full streamed text in self._last_stream_output_text
         for post-run heuristics.
+
+        With `activity_probe` (a callable returning a comparable snapshot of
+        the work, see _prefix_activity), silence alone is not a stall: the
+        snapshot is taken every 60 s, and a change counts as activity. The
+        .NET installers print nothing for minutes while they work. Then
+        `hard_limit` seconds is the backstop for anything that keeps busy
+        without ever finishing.
         """
         self._last_stream_output_text = ""
         self._last_command_stalled = False
@@ -6995,7 +7055,12 @@ class AffinityInstallerGUI(QMainWindow):
 
             buffer = []
             last_output = time.monotonic()
+            started = last_output
             warned_stall = False
+            probe_every = getattr(self, "ACTIVITY_PROBE_INTERVAL", 60)
+            next_probe = started + probe_every
+            last_activity = activity_probe() if activity_probe else None
+            quiet_noted = False
 
             while True:
                 if self.cancel_event.is_set():
@@ -7006,7 +7071,30 @@ class AffinityInstallerGUI(QMainWindow):
                 try:
                     line = lines.get(timeout=0.5)
                 except queue.Empty:
-                    idle = time.monotonic() - last_output
+                    now = time.monotonic()
+                    if activity_probe and now >= next_probe:
+                        next_probe = now + probe_every
+                        try:
+                            activity = activity_probe()
+                        except Exception:
+                            activity = last_activity
+                        if activity != last_activity:
+                            last_activity = activity
+                            last_output = now
+                            warned_stall = False
+                            if not quiet_noted and now - started >= 2 * probe_every:
+                                quiet_noted = True
+                                self.log(f"  '{display_cmd}' is quiet but still working "
+                                         "(using CPU or writing files)...", "info")
+                    if hard_limit and now - started >= hard_limit:
+                        self._last_command_stalled = True
+                        self.log(f"  ✗ '{display_cmd}' has run for {int(now - started)}s, "
+                                 f"past the {hard_limit}s limit — stopping it.", "error")
+                        self._log_prefix_snapshot()
+                        self._terminate_process(process)
+                        self._last_stream_output_text = "".join(buffer)
+                        return False
+                    idle = now - last_output
                     if idle >= stall_timeout:
                         self._last_command_stalled = True
                         self.log(
@@ -7019,6 +7107,8 @@ class AffinityInstallerGUI(QMainWindow):
                             "check the last log lines above for the step it died on.)",
                             "info",
                         )
+                        if activity_probe:
+                            self._log_prefix_snapshot()
                         self._terminate_process(process)
                         self._last_stream_output_text = "".join(buffer)
                         return False
@@ -13909,7 +13999,9 @@ class AffinityInstallerGUI(QMainWindow):
                 self.build_winetricks_command(component),
                 env=env,
                 progress_callback=update_component_progress,
-                stall_timeout=1200,
+                stall_timeout=600,
+                activity_probe=self._prefix_activity,
+                hard_limit=2700,
             )
             # The .NET installers' 32-bit setups crash intermittently under
             # Wine 11's new WoW64 (an unhandled page fault high in the 32-bit
@@ -13927,8 +14019,17 @@ class AffinityInstallerGUI(QMainWindow):
                     self.build_winetricks_command(component),
                     env=env,
                     progress_callback=update_component_progress,
-                    stall_timeout=1200,
+                    stall_timeout=600,
+                    activity_probe=self._prefix_activity,
+                    hard_limit=2700,
                 )
+            # Go by what is in the prefix, not by winetricks' exit: .NET can be
+            # complete while its installer is still being waited on.
+            if (not component_ok and component == "dotnet48"
+                    and not self.cancel_event.is_set() and self.has_dotnet48_runtime()):
+                self.log("'dotnet48' reported a problem, but .NET Framework 4.8 is installed", "success")
+                component_ok = True
+                self._last_command_stalled = False
             if not component_ok and not self.cancel_event.is_set():
                 if self._last_command_stalled:
                     self._stalled_components.add(component)
@@ -14912,7 +15013,9 @@ Would you like to continue with {distro_name} anyway?"""
                     command,
                     env=env,
                     progress_callback=progress_callback,
-                    stall_timeout=1200,
+                    stall_timeout=600,
+                    activity_probe=self._prefix_activity,
+                    hard_limit=2700,
                 )
 
                 stalled = self._last_command_stalled
@@ -14946,7 +15049,9 @@ Would you like to continue with {distro_name} anyway?"""
                             command,
                             env=env,
                             progress_callback=progress_callback,
-                            stall_timeout=1200,
+                            stall_timeout=600,
+                    activity_probe=self._prefix_activity,
+                    hard_limit=2700,
                         )
                         if not success and self._last_command_stalled:
                             self._stalled_components.add(component)
