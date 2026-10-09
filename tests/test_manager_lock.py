@@ -362,41 +362,71 @@ def test_no_way_back_is_offered_for_work_that_is_not_a_setup(window):
 
 
 @pytest.fixture
-def settled(window, monkeypatch):
+def carry(window, monkeypatch):
+    """A prefix created with "Copy from" chosen: the choice is on the entry."""
     import AffinityLinuxManager as app
+    from affinity_manager import probe
     w, reg, _ = window
-    monkeypatch.setattr(app.QTimer, "singleShot", staticmethod(lambda _ms, fn: fn()))
     offered = []
-    w.offer_settings_copy = lambda entry, preselect=None: offered.append((entry["name"], preselect))
-    w._carry_after_setup = {"Managed": Path("/somewhere/Old")}
-    w._default_if_none = lambda name: None
-    for name in ("setup_settled", "_offer_carry"):
-        setattr(w, name, types.MethodType(getattr(app.ManagerWindow, name), w))
-    return w, reg, offered
+    running = []
+    monkeypatch.setattr(probe, "running_pids", lambda p: list(running))
+    w.offer_settings_copy = lambda entry, preselect=None: offered.append((entry["name"], preselect)) or True
+    w._maybe_offer_carry = types.MethodType(app.ManagerWindow._maybe_offer_carry, w)
+    reg.set_carry("Managed", "/somewhere/Old")
+    return w, reg, offered, running
 
 
-def test_the_chosen_settings_wait_until_wine_has_made_the_prefix(settled):
-    w, _, offered = settled
-    w.setup_settled("Managed")
-    assert offered == []
-    assert "Managed" in w._carry_after_setup
+def _make_ready(reg, *, wine=True, affinity=True):
+    path = Path(reg.by_name("Managed")["path"])
+    if wine:
+        (path / "dosdevices" / "c:").symlink_to("../drive_c")
+    if affinity:
+        exe = path / "drive_c/Program Files/Affinity/Affinity/Affinity.exe"
+        exe.parent.mkdir(parents=True, exist_ok=True)
+        exe.write_text("")
 
 
-def test_the_chosen_settings_are_offered_once_setup_has_made_the_prefix(settled):
-    w, reg, offered = settled
-    (Path(reg.by_name("Managed")["path"]) / "dosdevices" / "c:").symlink_to("../drive_c")
-    w.setup_settled("Managed")
-    w.setup_settled("Managed")
+def test_the_copy_waits_for_wine_and_for_affinity(carry):
+    w, reg, offered, _ = carry
+    w._maybe_offer_carry()
+    _make_ready(reg, affinity=False)
+    w._maybe_offer_carry()
+    assert offered == [] and reg.by_name("Managed")["carry_from"] == "/somewhere/Old"
+
+
+def test_the_copy_is_offered_once_when_the_prefix_is_ready(carry):
+    w, reg, offered, _ = carry
+    _make_ready(reg)
+    w._maybe_offer_carry()
+    w._maybe_offer_carry()
     assert offered == [("Managed", Path("/somewhere/Old"))]
-    assert w._carry_after_setup == {}
+    assert "carry_from" not in reg.by_name("Managed")
 
 
-def test_a_prefix_created_without_a_choice_is_not_asked_about(settled):
-    w, reg, offered = settled
-    w._carry_after_setup = {}
-    (Path(reg.by_name("Managed")["path"]) / "dosdevices" / "c:").symlink_to("../drive_c")
-    w.setup_settled("Managed")
+def test_the_copy_waits_while_affinity_runs_there(carry):
+    w, reg, offered, running = carry
+    _make_ready(reg)
+    running.append(1234)
+    w._maybe_offer_carry()
     assert offered == []
+    running.clear()
+    w._maybe_offer_carry()
+    assert offered == [("Managed", Path("/somewhere/Old"))]
+
+
+def test_the_copy_waits_while_an_operation_holds_the_lock(carry):
+    w, reg, offered, _ = carry
+    _make_ready(reg)
+    w._busy_start("Configuring", 100, prefix="Managed", operation="Configure")
+    w._maybe_offer_carry()
+    assert offered == []
+
+
+def test_the_choice_survives_a_restart_of_the_manager(carry, tmp_path):
+    from affinity_manager import registry
+    w, reg, offered, _ = carry
+    reloaded = registry.Registry(reg.path)
+    assert reloaded.by_name("Managed")["carry_from"] == "/somewhere/Old"
 
 
 def test_a_setup_ended_by_the_watchdog_still_offers_the_settings_copy(window, monkeypatch):

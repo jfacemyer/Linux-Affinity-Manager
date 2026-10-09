@@ -28,6 +28,7 @@ QAPP = QApplication.instance() or QApplication([])
 
 @pytest.fixture
 def new_dialog(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setattr(registry, "manager_dir", lambda: tmp_path / "meta")
     monkeypatch.setattr(registry, "base_dir", lambda: tmp_path / "base")
     monkeypatch.setattr(release, "current",
@@ -44,6 +45,7 @@ def test_new_prefix_starts_with_stock_settings_unless_asked(new_dialog):
 
 
 def test_new_prefix_offers_the_settings_of_other_prefixes(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setattr(registry, "manager_dir", lambda: tmp_path / "meta")
     monkeypatch.setattr(registry, "base_dir", lambda: tmp_path / "base")
     monkeypatch.setattr(release, "current",
@@ -60,6 +62,27 @@ def test_new_prefix_offers_the_settings_of_other_prefixes(tmp_path, monkeypatch)
         assert d.carry_from() is None
         d.carry.setCurrentIndex(1)
         assert d.carry_from() == old
+    finally:
+        d.reject()
+
+
+def test_new_prefix_offers_an_unmanaged_default_install(tmp_path, monkeypatch):
+    """An AppImage or plain AffinityOnLinux install leaves ~/.AffinityLinux,
+    which the manager does not list -- and is what people move from."""
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(registry, "manager_dir", lambda: tmp_path / "meta")
+    monkeypatch.setattr(registry, "base_dir", lambda: tmp_path / "base")
+    monkeypatch.setattr(release, "current",
+                        lambda *a, **k: release.Release("3.3.0.4850", "2026-09-15"))
+    settings = home / ".AffinityLinux/drive_c/users/someone/AppData/Roaming/Affinity/Affinity/3.0/Settings"
+    settings.mkdir(parents=True)
+    (settings / "RecentFiles.xml").write_text("<x/>")
+    d = app.NewPrefixDialog(None, registry.Registry(tmp_path / "prefixes.json"))
+    try:
+        assert d.carry.count() == 2
+        d.carry.setCurrentIndex(1)
+        assert d.carry_from() == home / ".AffinityLinux"
     finally:
         d.reject()
 
