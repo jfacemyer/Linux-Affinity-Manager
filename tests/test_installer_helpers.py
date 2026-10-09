@@ -609,3 +609,36 @@ def test_update_wine_version_applies_the_new_install_fixes(ali, tmp_path):
     StandIn()._apply_wine_version_fixes("11.19")
     # a failing step (the facades here) does not stop the rest
     assert ran == ["winmetadata", "opencl 11.19", "handler", "fonts"]
+
+
+def _sudo_harness(ali, can_sudo, distro="arch"):
+    shown, logged = [], []
+
+    class StandIn:
+        sudo_password_validated = False
+        sudo_password = None
+        _account_can_sudo = can_sudo
+        log = staticmethod(lambda m, level="info": logged.append(m))
+        show_message = staticmethod(lambda title, text, level="info": shown.append((title, text)))
+        is_ubuntu_family_distro = staticmethod(lambda: False)
+    StandIn.distro = distro
+    for name in ("get_sudo_password", "account_can_sudo", "admin_install_command",
+                 "explain_admin_needed", "_distro_install_commands"):
+        setattr(StandIn, name, inspect.getattr_static(ali.AffinityInstallerGUI, name))
+    return StandIn(), shown, logged
+
+
+def test_an_account_without_sudo_is_not_asked_for_a_password(ali):
+    h, shown, logged = _sudo_harness(ali, can_sudo=False)
+    assert h.get_sudo_password() is None
+    assert any("cannot use sudo" in m for m in logged)
+
+
+def test_an_administrator_gets_the_exact_command(ali):
+    h, shown, _ = _sudo_harness(ali, can_sudo=False, distro="arch")
+    h.explain_admin_needed(["winetricks", "jq"])
+    title, text = shown[0]
+    assert "administrator" in title.lower()
+    assert "winetricks, jq" in text
+    assert "sudo pacman -S --needed --noconfirm wine winetricks" in text
+    assert "home folder" in text

@@ -320,6 +320,16 @@ def kept_installers():
     return out
 
 
+# The system wine package is not what runs Affinity -- each prefix has its own
+# Wine build -- but that build links against system libraries (GnuTLS,
+# FreeType, fontconfig, the Vulkan loader, X11/Wayland, audio, CUPS), and the
+# distro's wine package is what pulls them all in.
+DEP_LABELS = {
+    "wine": "wine (system package: supplies the libraries the prefix's own Wine needs; "
+            "system Wine itself is not used to run Affinity)",
+}
+
+
 # Serialises ensure_patcher_files across the installers in one process.
 _PATCHER_FILES_LOCK = threading.Lock()
 
@@ -1346,10 +1356,11 @@ class AffinityInstallerGUI(QMainWindow):
         deps = ["wine", "winetricks", "wget", "curl", "7z", "tar", "jq"]
         deps_installed = True
         for dep in deps:
+            label = DEP_LABELS.get(dep, dep)
             if self.check_command(dep):
-                self.log(f"  {dep}: ✓ Installed", "success")
+                self.log(f"  {label}: ✓ Installed", "success")
             else:
-                self.log(f"  {dep}: ✗ Not installed", "error")
+                self.log(f"  {label}: ✗ Not installed", "error")
                 deps_installed = False
 
         if self.check_command("unzstd") or self.check_command("zstd"):
@@ -4495,6 +4506,10 @@ class AffinityInstallerGUI(QMainWindow):
         """Get sudo password from user (thread-safe)"""
         if self.sudo_password_validated and self.sudo_password:
             return self.sudo_password
+        if not self.account_can_sudo():
+            self.log("This account cannot use sudo, so no administrator password is "
+                     "asked for; that step is skipped.", "warning")
+            return None
 
         self.sudo_password = None
         self.sudo_password_dialog_done = False
@@ -10547,10 +10562,11 @@ class AffinityInstallerGUI(QMainWindow):
             self.update_progress(progress)
             self.update_progress_text(f"Checking {dep}...")
 
+            label = DEP_LABELS.get(dep, dep)
             if self.check_command(dep):
-                self.log(f"{dep} is installed", "success")
+                self.log(f"{label} is installed", "success")
             else:
-                self.log(f"{dep} is not installed", "error")
+                self.log(f"{label} is not installed", "error")
                 missing.append(dep)
 
         # Check for either 7z or unzip (both can extract archives)
@@ -10635,6 +10651,13 @@ class AffinityInstallerGUI(QMainWindow):
 
         # Install missing dependencies (only for supported distributions)
         # For Ubuntu/Mint/Zorin, always run WineHQ setup to ensure proper Wine version
+        if missing and not self.account_can_sudo() and self.distro not in ["bazzite"]:
+            self.explain_admin_needed(missing)
+            return False
+        if self.is_ubuntu_family_distro() and not missing and not self.account_can_sudo():
+            self.log("All dependencies are installed; this account cannot use sudo, "
+                     "so the WineHQ repository setup is skipped.", "info")
+            return True
         if self.is_ubuntu_family_distro():
             # Always run WineHQ setup for Ubuntu-based distros
             self.log(f"\nSetting up WineHQ for {self.format_distro_name()}...", "info")
@@ -10753,19 +10776,9 @@ class AffinityInstallerGUI(QMainWindow):
         self.log("  • Nobara", "success")
         self.log("=" * 80 + "\n", "warning")
 
-    def install_dependencies(self):
-        """Install dependencies based on distribution"""
-        self.log(
-            f"DEBUG: install_dependencies called with distro={self.distro}", "info"
-        )
-        if self.distro == "pikaos":
-            return self.install_pikaos_dependencies()
-        if self.distro == "pop":
-            return self.install_popos_dependencies()
-        if self.is_ubuntu_family_distro():
-            return self.install_ubuntu_based_dependencies()
-
-        commands = {
+    def _distro_install_commands(self):
+        """The package-manager command that installs the dependencies, per distro."""
+        return {
             "arch": [
                 "sudo",
                 "pacman",
@@ -10937,6 +10950,72 @@ class AffinityInstallerGUI(QMainWindow):
                 "zstd",
             ],
         }
+
+    def account_can_sudo(self):
+        """Can this account use sudo at all? Asked before any password prompt:
+        an account outside the sudoers was asked for a password it could not
+        use, and the install churned and then failed without saying why."""
+        cached = getattr(self, "_account_can_sudo", None)
+        if cached is not None:
+            return cached
+        can = False
+        if shutil.which("sudo"):
+            try:
+                import grp
+                groups = {grp.getgrgid(g).gr_name for g in os.getgroups()}
+            except Exception:
+                groups = set()
+            if groups & {"wheel", "sudo", "admin"}:
+                can = True
+            else:
+                try:
+                    can = subprocess.run(["sudo", "-n", "true"], capture_output=True,
+                                         timeout=10).returncode == 0
+                except Exception:
+                    can = False
+        self._account_can_sudo = can
+        return can
+
+    def admin_install_command(self):
+        """The one command an administrator can run to install what this
+        installer needs from the system, or None for an unknown distro."""
+        commands = self._distro_install_commands()
+        if self.distro in commands:
+            return " ".join(shlex.quote(a) for a in commands[self.distro])
+        if self.is_ubuntu_family_distro() or self.distro in ("pop", "pikaos"):
+            return ("sudo apt install wine winetricks wget curl p7zip-full tar jq "
+                    "zstd dotnet-sdk-8.0")
+        return None
+
+    def explain_admin_needed(self, missing):
+        """Say plainly that this account cannot install packages, what is
+        missing, and the exact command for an administrator."""
+        command = self.admin_install_command()
+        text = (
+            "This account cannot install system packages (it is not allowed to use "
+            "sudo), and these are missing:\n\n    " + ", ".join(missing) + "\n\n"
+            "Everything else -- Wine, Affinity, the prefix -- installs into your home "
+            "folder and needs no administrator. Ask an administrator to run this once"
+            + (":\n\n    " + command if command else
+               " -- the packages above, from your distribution's package manager.")
+            + "\n\nThen run the installer again."
+        )
+        self.log(text, "error")
+        self.show_message("An administrator needs to install some packages", text, "error")
+
+    def install_dependencies(self):
+        """Install dependencies based on distribution"""
+        self.log(
+            f"DEBUG: install_dependencies called with distro={self.distro}", "info"
+        )
+        if self.distro == "pikaos":
+            return self.install_pikaos_dependencies()
+        if self.distro == "pop":
+            return self.install_popos_dependencies()
+        if self.is_ubuntu_family_distro():
+            return self.install_ubuntu_based_dependencies()
+
+        commands = self._distro_install_commands()
 
         if self.distro in commands:
             self.log(
