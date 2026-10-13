@@ -119,7 +119,7 @@ Installs what the Canva sign-in needs in an existing Affinity v3 prefix.
 
 **When to use:** If the browser sign-in never returns to Affinity, or Affinity crashes when it does.
 
-**Wine version:** 9.14 or 10.10 (tested with 10.10). With Wine 11.12 it shows a message and changes nothing.
+**Wine version:** 11.18 or 11.19 — both carry the login metadata, so the fix applies on either.
 
 **Requirements:** `7z`, WinMetadata in the prefix, and about 350 MB of temporary space. Downloads about 70 MB if the winetricks cache does not have the .NET 4.8 installer.
 

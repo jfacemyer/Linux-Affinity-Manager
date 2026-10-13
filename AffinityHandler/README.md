@@ -106,7 +106,6 @@ grep -n 'POC SOURCE' AffinityScripts/AffinityLinuxInstaller.py AffinityManager/r
 
 | What | Points at now | Should point at |
 |---|---|---|
-| Wine 11.16 tarball | `github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.16-r3/ElementalWarrior-wine-11.16.tar.xz`, pinned by `WINE_11_16_SHA256` | an upstream 11.16 release, once [ryzendew/Affinity-Wine-Builder#9](https://github.com/ryzendew/Affinity-Wine-Builder/pull/9) is merged |
 | Wine 11.18 tarball | `github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.18-r1/ElementalWarrior-wine-11.18.tar.xz`, pinned by `WINE_11_18_SHA256` | an upstream 11.18 release, likewise |
 | Wine 11.19 tarball | `github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.19-r6/ElementalWarrior-wine-11.19.tar.xz`, pinned by `WINE_11_19_SHA256` | an upstream 11.19 release, likewise |
 | AffinityPluginLoader + WineFix | `github.com/jfacemyer/AffinityPluginLoader`, release `wine-fixes-3` (`APL_RELEASE_REPO`, `APL_RELEASE_TAG`), each zip pinned in `APL_ASSET_SHA256` | `noahc3/AffinityPluginLoader`'s next release, once it carries upstream `dev` and the fork's fixes |

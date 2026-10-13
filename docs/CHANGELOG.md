@@ -1,5 +1,37 @@
 # Changelog
 
+## [2026-10-13] - Pinned Wine builds, merged upstream
+
+### Changed
+- **The 11.19 and 11.18 choices install pinned builds**: 11.19 is [`11.19-r6`](https://github.com/jfacemyer/Affinity-Wine-Builder/releases/tag/11.19-r6) (adds pen pressure through WinTab and correct window coordinates across DPI awareness) and 11.18 is [`11.18-r1`](https://github.com/jfacemyer/Affinity-Wine-Builder/releases/tag/11.18-r1). Each download is checked against a SHA-256 in `AffinityLinuxInstaller.py` and refused if it differs.
+- Merged the upstream changes of 2026-10-10: the two-version picker, WebView2 kept on Windows 11, and the updated documentation.
+- WinMetadata is still set up by asking the Wine build whether it implements `RoResolveNamespace`, not by version number.
+
+---
+
+## [2026-10-10] - Wine 11.18/11.19 and WebView2 Install Fix
+
+### Changed
+
+#### Wine versions replaced with 11.18 and 11.19
+- **Installer now offers only Wine 11.19 (Recommended) and Wine 11.18 (fallback)**
+  - Removed 9.14, 10.10, 11.12, and 11.12-v4 options from all version pickers in `AffinityLinuxInstaller.py`
+  - Both builds come from [Affinity-Wine-Builder](https://github.com/ryzendew/Affinity-Wine-Builder/releases/tag/11.18)
+  - 11.19: full Affinity patch set through 0085 (Direct2D throughput/brush-latency, wined3d Vulkan presentation, OpenCL dispatcher, color/printing/login fixes)
+  - 11.18: login fix + performance patches (D2D geometry cache, OpenCL cache, SDR white-level, printer mapping)
+- **Updated documentation** (`README.md`, `docs/WINE-VERSIONS.md`, `docs/INSTALLATION.md`, `docs/Known-issues.md`, `Guide/GUI-Installer-Guide.md`) to reference only 11.18/11.19
+
+### Fixed
+
+#### WebView2 Runtime stays on Windows 11 (Win7 breaks it)
+- **WebView2 requires Windows 10 or higher — no Win7 anywhere in its path**
+  - Pinning `msedgewebview2.exe` to Windows 7 makes it abort with "Microsoft Edge requires Windows 10 or higher"
+  - The installer installs the runtime under Win11 and pins `msedgewebview2.exe` to Win11 explicitly
+  - Removed the now-resolved "Microsoft Edge WebView2: Help Window Is Empty" entry from Known Issues
+- **Removed the obsolete "Wine 11.12 skips the Canva sign-in fix" note** — both 11.18 and 11.19 carry the login metadata, so the fix applies on either
+
+---
+
 ## [2025-12-04] - Documentation Restructure and Updates
 
 ### Added

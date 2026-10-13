@@ -1,11 +1,7 @@
 # AffinityOnLinux
 
-Work in the future will be stopped! Appimage is updated and loads of new fixes are merged.
-2 years ago i started my own project local Called Infinity Photo and 
-progress As of now all tools are finished with fastpath on both cpu and gpu
-Next step testing everything single tool and adding every setting so it feels right
+Here is my Own project! https://github.com/Event-Horizon-desktop-environment/pittore-studio/releases/tag/0.1.0 Feel free to test and report issues or features requests
 <img width="2560" height="1364" alt="image" src="https://github.com/user-attachments/assets/f70d4d0a-d2d6-4929-a166-7d832d66ba1f" />
-
 
 
 
@@ -36,7 +32,7 @@ AffinityOnLinux provides an easy way to install and run Affinity Photo, Designer
 
 **New to Linux or want the easiest option?** Use the AppImage:
 
-1. Download the AppImage from [GitHub Releases](https://github.com/ryzendew/AffinityOnLinux/releases/tag/Affinity-wine-10.10-Appimage)
+1. Download the AppImage from [GitHub Releases](https://github.com/ryzendew/AffinityOnLinux/releases/latest)
 2. Make it executable: `chmod +x Affinity-3-x86_64.AppImage`
 3. Run it: `./Affinity-3-x86_64.AppImage`
 

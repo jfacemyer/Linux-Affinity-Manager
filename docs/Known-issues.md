@@ -10,7 +10,7 @@ This document lists known issues and their workarounds. For the latest updates, 
 **Status:** Open ([#89](https://github.com/ryzendew/AffinityOnLinux/issues/89))
 
 **Workaround:**
-- Try a different Wine version (9.14 recommended for older systems)
+- Try the other Wine version (11.18 / 11.19)
 - Check GPU drivers are up to date
 - Use vkd3d-proton or DXVK instead of OpenCL (see [Hardware Acceleration](HARDWARE-ACCELERATION.md))
 
@@ -77,7 +77,7 @@ When DXVK provides d3d9, leave `DXVK_CONFIG` unset. `d3d9.deferSurfaceCreation =
 
 **Seen on:** Ubuntu 26.04, where the setup runs under the packaged Wine 10.0 and crashes this way. Its log is `drive_c/users/<user>/AppData/Local/Temp/AffinitySetup/<id>/SetupUI.log` in the prefix.
 
-**What the installer does:** When the setup finishes without installing Affinity v3, the installer offers to install the MSI package embedded in `Affinity-x64.exe`. The setup window installs the same package. The installer uses `msiexec` and the prefix's own Wine. This needs `7z` and about 700 MB of temporary space in the prefix. The MSI install is logged to `affinity-msi.log` in the prefix (default `~/.AffinityLinux`). If it does not install Affinity, the installer stops with a message and runs none of the post-install steps. Tested only with ElementalWarrior Wine 10.10, 7-Zip 26.00 and Affinity 3.3.0.4850.
+**What the installer does:** When the setup finishes without installing Affinity v3, the installer offers to install the MSI package embedded in `Affinity-x64.exe`. The setup window installs the same package. The installer uses `msiexec` and the prefix's own Wine. This needs `7z` and about 700 MB of temporary space in the prefix. The MSI install is logged to `affinity-msi.log` in the prefix (default `~/.AffinityLinux`). If it does not install Affinity, the installer stops with a message and runs none of the post-install steps. Tested with ElementalWarrior Wine 11.19, 7-Zip 26.00 and Affinity 3.3.0.4850.
 
 **Workaround:** Canva also distributes Affinity as `Affinity x64.msix`, which is a zip archive. Extract its `App/` folder into the install location instead of running the setup program:
 ```bash
@@ -162,29 +162,12 @@ unzip -q "$HOME/Downloads/Affinity x64.msix" 'App/*' && cp -a App/. . && rm -rf 
 WINEPREFIX="$HOME/.AffinityLinux" wine reg add 'HKCU\Control Panel\Desktop' /v LogPixels /t REG_DWORD /d 192 /f
 ```
 
-### Microsoft Edge WebView2: Help Window Is Empty
-**Issue:** In Affinity v3 the Help window opens but stays empty. Affinity shows the Help with the Microsoft Edge WebView2 Runtime.
-
-**Cause:** With `msedgewebview2.exe` set to Windows 11 compatibility, the WebView2 GPU process fails at startup and WebView2 stops with `GPU process isn't usable. Goodbye.`
-
-**Fix:** Troubleshooting → "WebView2 Runtime (v3)" installs the runtime if it is missing and sets `msedgewebview2.exe` to Windows 7 compatibility. When the runtime is already installed, it applies the WebView2 settings again. To set it by hand with the prefix's Wine:
-```bash
-WINEPREFIX="$HOME/.AffinityLinux" "$HOME/.AffinityLinux/ElementalWarriorWine/bin/wine" reg add 'HKCU\Software\Wine\AppDefaults\msedgewebview2.exe' /v Version /d win7 /f
-```
-Restart Affinity afterwards.
-
-Tested with ElementalWarrior Wine 10.10, WebView2 Runtime 142.0.3595.94 and Affinity 3.3.0.4850 on Ubuntu 26.04. Untested with Wine 9.14 and 11.12. Other WebView2 dialogs were not tested.
-
-For the Canva sign-in, see [Login/Authentication Issues](#loginauthentication-issues).
-
 ### Login/Authentication Issues
 **Issue:** After signing in to Canva in the browser, the `affinity://` callback never reaches Affinity v3, or Affinity crashes when it arrives.
 
-**Cause:** Affinity handles the callback in `ProcessCommandLineArguments`, which the .NET runtime cannot compile without WinMetadata and `System.Runtime.WindowsRuntime`. `winetricks dotnet48` does not install the second one. Wine's generated `affinity://` handler also uses `wine start`, which crashes on URLs longer than about 300 characters (Wine 10.0 and 10.10).
+**Cause:** Affinity handles the callback in `ProcessCommandLineArguments`, which the .NET runtime cannot compile without WinMetadata and `System.Runtime.WindowsRuntime`. `winetricks dotnet48` does not install the second one. Wine's generated `affinity://` handler also uses `wine start`, which crashes on URLs longer than about 300 characters (seen on older stock Wine builds).
 
-**Fix:** For Affinity v3 the installer copies the WinRT facades from the .NET 4.8 offline installer into the prefix, then registers `affinity-url-handler.desktop` as the `affinity://` handler. It needs `7z` and about 350 MB of temporary space in the prefix. It downloads the .NET installer (about 70 MB) if the winetricks cache no longer has it. The handler is only registered when the prefix also has WinMetadata, which the installer sets up for Wine 9.14 and 10.10. For an existing install, use **Troubleshooting → Fix Canva Sign-in (v3)**. Tested with ElementalWarrior Wine 10.10 on Ubuntu 26.04; untested with Wine 9.14.
-
-**Wine 11.12:** the installer skips this fix. With Wine 11.12 the callback method compiles only when the prefix also has the Windows WinMetadata and the native `wintypes.dll`, which the installer sets up only for Wine 9.14 and 10.10. Only checked by compiling the method in a test prefix.
+**Fix:** For Affinity v3 the installer copies the WinRT facades from the .NET 4.8 offline installer into the prefix, then registers `affinity-url-handler.desktop` as the `affinity://` handler. It needs `7z` and about 350 MB of temporary space in the prefix. It downloads the .NET installer (about 70 MB) if the winetricks cache no longer has it. The handler is only registered when the prefix also has WinMetadata. Both Wine 11.18 and 11.19 carry the login metadata, so the fix applies on either. For an existing install, use **Troubleshooting → Fix Canva Sign-in (v3)**.
 
 **Notes:**
 - WineFix 0.3.0 patches out the Canva sign-in dialog. With WineFix 0.3.0, a forwarded `affinity://` URL no longer crashes the running Affinity. Sign-in was not tested with it.
@@ -196,7 +179,7 @@ For the Canva sign-in, see [Login/Authentication Issues](#loginauthentication-is
 ### Wine 10.17 Bugs
 **Issue:** Wine 10.17 has major bugs and issues.
 
-**Workaround:** The installer does not use Wine 10.17. Use Wine 10.10 (recommended) or 9.14 (legacy fallback). See [Wine Versions](WINE-VERSIONS.md) for details.
+**Workaround:** The installer does not use Wine 10.17. Use Wine 11.19 (recommended) or 11.18 (fallback). See [Wine Versions](WINE-VERSIONS.md) for details.
 
 ### Publisher Crashes on Stock Wine (BadImageFormatException / StoreLicense Error)
 

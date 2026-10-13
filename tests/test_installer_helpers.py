@@ -267,9 +267,10 @@ def test_release_downloads_follow_the_override(ali, monkeypatch):
     )
     # The pin is the same: only the identical build installs from either host.
     assert config["wine_sha256"] == ali.WINE_11_19_SHA256
-    # Other projects' downloads are not the fork's and stay where they are.
-    other = ali.AffinityInstallerGUI._get_wine_version_config(None, "11.12")
-    assert other["wine_url"].startswith("https://github.com/ryzendew/")
+    # 11.18 is the fork's build too, so it follows the override as well.
+    other = ali.AffinityInstallerGUI._get_wine_version_config(None, "11.18")
+    assert other["wine_url"].startswith("https://git.example.org/someone/Affinity-Wine-Builder/")
+    assert other["wine_sha256"] == ali.WINE_11_18_SHA256
     assert ali.apl_release_api_url() == (
         "https://git.example.org/api/v1/repos/someone/AffinityPluginLoader/releases/tags/"
         + ali.APL_RELEASE_TAG

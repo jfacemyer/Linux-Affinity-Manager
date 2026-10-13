@@ -6,7 +6,7 @@ This guide covers all installation methods for AffinityOnLinux.
 
 **New to Linux or want the easiest option?** Use the AppImage:
 
-1. Download the AppImage from [GitHub Releases](https://github.com/ryzendew/AffinityOnLinux/releases/tag/Affinity-wine-10.10-Appimage)
+1. Download the AppImage from [GitHub Releases](https://github.com/ryzendew/AffinityOnLinux/releases/latest)
 2. Make it executable: `chmod +x Affinity-3-x86_64.AppImage`
 3. Run it: `./Affinity-3-x86_64.AppImage`
 
@@ -52,7 +52,7 @@ A modern graphical installer with comprehensive features and automatic dependenc
 
 **Features:**
 - One-click full setup with automatic dependency installation
-- Multiple Wine versions to choose from
+- Multiple Wine versions to choose from (11.19 recommended, 11.18 fallback)
 - Wine version switching without reinstalling applications
 - Automatic WebView2 Runtime installation for Affinity v3
 - DPI scaling configuration
@@ -74,7 +74,7 @@ curl -sSL https://raw.githubusercontent.com/ryzendew/AffinityOnLinux/refs/heads/
 **Usage:**
 1. Run the installer
 2. Click **"One-Click Full Setup"** for automatic configuration
-3. Choose your Wine version (10.10 recommended for most systems)
+3. Choose your Wine version (11.19 recommended, 11.18 fallback)
 4. Use **"Update Affinity Applications"** to install or update Affinity apps
 5. Check the status log to see what's installed
 

@@ -15,6 +15,7 @@ import threading
 import platform
 import urllib.request
 import urllib.error
+import urllib.parse
 import re
 import json
 import hashlib
@@ -38,7 +39,13 @@ WINETRICKS_COMPONENTS = [
     ("vcrun2022", "Visual C++ Redistributables 2022"),
     ("msxml3", "MSXML 3.0"),
     ("msxml6", "MSXML 6.0"),
-    ("crypt32", "Cryptographic API 32"),
+    # NOTE: no "crypt32" entry on purpose. winetricks' crypt32 verb installs
+    # Microsoft's native crypt32.dll + a native override, but native crypt32
+    # cannot validate chains against Wine's registry certificate stores, so
+    # every TLS handshake fails at cert verification (12157 /
+    # ERROR_INTERNET_SECURITY_CHANNEL_ERROR). Wine's builtin crypt32 reads
+    # the prefix ROOT store correctly. Existing prefixes are migrated by
+    # repair_crypt32_override().
     ("tahoma", "Tahoma Font"),
     ("renderer=vulkan", "Vulkan Renderer"),
 ]
@@ -456,20 +463,15 @@ def source_raw_url(path):
 # and "it starts with MZ and is over 4KB" does not tell those apart.
 HANDLER_SHA256 = "5bd31facbe433a884afab9dd6861d5094726055f3c1706a4d001a800e30ed97a"
 
-# The Wine 11.16 build this installer is meant to install, by content, for the
-# same reason. The 11.16 release was published on 2026-09-11 and never rebuilt;
-# for three weeks every new install got a Wine missing eight fixes from the
-# patch set while the local builds had them, and nothing noticed. A tarball that
-# is not this one is refused rather than installed. Rebuild, republish under a
-# new tag, and update the URL and this hash together.
-WINE_11_16_SHA256 = "e0027cb5b42931ca0f1fecdef9a6a59d1b69d2acd75de7cc1e07c6af3c123b39"
-
 # The same patch set on Wine 11.18, pinned for the same reason. Released on the
 # fork that carries the patches' upstream pull request.
 WINE_11_18_SHA256 = "c325bf804407abcf8070d02066b5be00680b0339e796a6583b4a1d2dae934853"
 
-# Wine 11.19 with the full Affinity patch set (no white flashes, lower brush
-# lag, OpenCL), published on the same fork.
+# Wine 11.19 with the full Affinity patch set, the default, pinned by content:
+# the 11.16 release once went three weeks without eight fixes the local builds
+# had, and nothing noticed. A tarball that is not this one is refused rather
+# than installed. Rebuild, republish under a new tag, and update the URL and
+# this hash together.
 WINE_11_19_SHA256 = "ae7f2049656b1343982975a5383cf8146d29193c8005c53d48d76a8c179a4ec8"
 
 # The plugin loader. Upstream's latest release (v0.3.0, April) predates Canva
@@ -3780,6 +3782,12 @@ class AffinityInstallerGUI(QMainWindow):
                     "wrench",
                 ),
                 (
+                    "Paste Sign-in URL (v3)",
+                    self.inject_canva_sign_in_callback,
+                    "Manually hand the browser sign-in callback to Affinity when the automatic handoff does not complete",
+                    "wrench",
+                ),
+                (
                     "WebView2 Runtime (v3)",
                     self.install_webview2_runtime,
                     "Install WebView2 for Affinity V3 Help system",
@@ -4750,7 +4758,7 @@ class AffinityInstallerGUI(QMainWindow):
         screen_height = screen.height()
 
         # Calculate optimal sizes based on screen size
-        # Account for 5 Wine version options now
+        # Account for 2 Wine version options now
         if screen_width < 800 or screen_height < 600:
             # Small screen - use smaller sizes
             min_width = min(400, int(screen_width * 0.9))
@@ -5068,119 +5076,52 @@ class AffinityInstallerGUI(QMainWindow):
         # Create button group to ensure only one radio button is selected at a time
         button_group = QButtonGroup(dialog)
 
-        # Wine 11.19 option - the newest build with the Affinity patches, the default
+        # Wine 11.19 option - clean frame with radio button and description (Recommended)
         wine_1119_frame = QFrame()
         wine_1119_frame.setObjectName("optionFrame")
         wine_1119_layout = QVBoxLayout(wine_1119_frame)
         wine_1119_layout.setContentsMargins(12, 10, 12, 10)
         wine_1119_layout.setSpacing(6)
-        wine_1119_radio = QRadioButton("Wine 11.19 (Affinity patches)")
+        wine_1119_radio = QRadioButton("Wine 11.19 (Recommended)")
         wine_1119_radio.setChecked(True)
         wine_1119_radio.setSizePolicy(
             QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Minimum
         )
         wine_1119_layout.addWidget(wine_1119_radio)
         wine_1119_desc = QLabel(
-            "ElementalWarrior Wine 11.19 with the newest Affinity patches: no white "
-            "flashes, much lower brush lag, OpenCL, and everything in 11.18."
+            "Latest build with the full Affinity patch set: Direct2D throughput and brush-latency fixes, wined3d Vulkan presentation fixes, OpenCL event dispatcher, pen pressure, plus color, printing and login fixes."
         )
         wine_1119_desc.setObjectName("optionDescription")
         wine_1119_desc.setWordWrap(True)
+        wine_1119_desc.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum
+        )
         wine_1119_layout.addWidget(wine_1119_desc)
-        button_group.addButton(wine_1119_radio)
         options_layout.addWidget(wine_1119_frame)
+        button_group.addButton(wine_1119_radio, 0)
 
-        # Wine 11.18 option - the previous build with the Affinity patches
+        # Wine 11.18 option - clean frame with radio button and description
         wine_1118_frame = QFrame()
         wine_1118_frame.setObjectName("optionFrame")
         wine_1118_layout = QVBoxLayout(wine_1118_frame)
         wine_1118_layout.setContentsMargins(12, 10, 12, 10)
         wine_1118_layout.setSpacing(6)
-        wine_1118_radio = QRadioButton("Wine 11.18 (Affinity patches)")
+        wine_1118_radio = QRadioButton("Wine 11.18")
         wine_1118_radio.setSizePolicy(
             QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Minimum
         )
         wine_1118_layout.addWidget(wine_1118_radio)
         wine_1118_desc = QLabel(
-            "ElementalWarrior Wine 11.18 with the Affinity patches: a double-clicked "
-            "document opens, Affinity exits when it is closed, dialogs stay on top "
-            "and panels dock back."
+            "Previous build with the Affinity login fix and performance patches (D2D geometry cache, OpenCL cache, SDR white-level and printer mapping). Use if 11.19 has issues."
         )
         wine_1118_desc.setObjectName("optionDescription")
         wine_1118_desc.setWordWrap(True)
+        wine_1118_desc.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum
+        )
         wine_1118_layout.addWidget(wine_1118_desc)
-        button_group.addButton(wine_1118_radio)
         options_layout.addWidget(wine_1118_frame)
-
-        # Wine 11.12 option - the most stable build without the Affinity patches
-        wine_1112_frame = QFrame()
-        wine_1112_frame.setObjectName("optionFrame")
-        wine_1112_layout = QVBoxLayout(wine_1112_frame)
-        wine_1112_layout.setContentsMargins(12, 10, 12, 10)
-        wine_1112_layout.setSpacing(6)
-        wine_1112_radio = QRadioButton("Wine 11.12 (stable)")
-        wine_1112_radio.setSizePolicy(
-            QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Minimum
-        )
-        wine_1112_layout.addWidget(wine_1112_radio)
-        wine_1112_desc = QLabel(
-            "ElementalWarrior Wine 11.12 with AMD GPU and OpenCL patches, without the "
-            "Affinity patches. The most stable earlier build."
-        )
-        wine_1112_desc.setObjectName("optionDescription")
-        wine_1112_desc.setWordWrap(True)
-        wine_1112_desc.setSizePolicy(
-            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum
-        )
-        wine_1112_layout.addWidget(wine_1112_desc)
-        options_layout.addWidget(wine_1112_frame)
-        button_group.addButton(wine_1112_radio, 0)
-
-        # Alternate Wine option - clean frame with radio button and description
-        wine_1010_frame = QFrame()
-        wine_1010_frame.setObjectName("optionFrame")
-        wine_1010_layout = QVBoxLayout(wine_1010_frame)
-        wine_1010_layout.setContentsMargins(12, 10, 12, 10)
-        wine_1010_layout.setSpacing(6)
-        wine_1010_radio = QRadioButton("Wine 10.10")
-        wine_1010_radio.setSizePolicy(
-            QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Minimum
-        )
-        wine_1010_layout.addWidget(wine_1010_radio)
-        wine_1010_desc = QLabel(
-            "ElementalWarrior Wine 10.10 with AMD GPU and OpenCL patches. Previous stable version."
-        )
-        wine_1010_desc.setObjectName("optionDescription")
-        wine_1010_desc.setWordWrap(True)
-        wine_1010_desc.setSizePolicy(
-            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum
-        )
-        wine_1010_layout.addWidget(wine_1010_desc)
-        options_layout.addWidget(wine_1010_frame)
-        button_group.addButton(wine_1010_radio, 2)
-
-        # Wine 9.14 option - clean frame with radio button and description
-        wine_914_frame = QFrame()
-        wine_914_frame.setObjectName("optionFrame")
-        wine_914_layout = QVBoxLayout(wine_914_frame)
-        wine_914_layout.setContentsMargins(12, 10, 12, 10)
-        wine_914_layout.setSpacing(6)
-        wine_914_radio = QRadioButton("Wine 9.14 (Legacy)")
-        wine_914_radio.setSizePolicy(
-            QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Minimum
-        )
-        wine_914_layout.addWidget(wine_914_radio)
-        wine_914_desc = QLabel(
-            "Legacy version with AMD GPU and OpenCL patches. Fallback option if you encounter issues with newer versions."
-        )
-        wine_914_desc.setObjectName("optionDescription")
-        wine_914_desc.setWordWrap(True)
-        wine_914_desc.setSizePolicy(
-            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum
-        )
-        wine_914_layout.addWidget(wine_914_desc)
-        options_layout.addWidget(wine_914_frame)
-        button_group.addButton(wine_914_radio, 3)
+        button_group.addButton(wine_1118_radio, 1)
 
         # Add scroll area to main layout with stretch factor
         main_layout.addWidget(scroll_area, 1)
@@ -5221,15 +5162,9 @@ class AffinityInstallerGUI(QMainWindow):
         result = dialog.exec()
         if result == QDialog.DialogCode.Accepted:
             if wine_1119_radio.isChecked():
-                self.question_dialog_response = "Wine 11.19 (Affinity patches)"
+                self.question_dialog_response = "Wine 11.19 (Recommended)"
             elif wine_1118_radio.isChecked():
-                self.question_dialog_response = "Wine 11.18 (Affinity patches)"
-            elif wine_1112_radio.isChecked():
-                self.question_dialog_response = "Wine 11.12 (stable)"
-            elif wine_1010_radio.isChecked():
-                self.question_dialog_response = "Wine 10.10"
-            elif wine_914_radio.isChecked():
-                self.question_dialog_response = "Wine 9.14 (Legacy)"
+                self.question_dialog_response = "Wine 11.18"
         else:
             # User cancelled - return "Cancel" to match expected format
             self.question_dialog_response = "Cancel"
@@ -5242,7 +5177,7 @@ class AffinityInstallerGUI(QMainWindow):
         is_wine_version_dialog = (
             "Wine Version" in title
             or "Wine version" in title
-            or any("Wine 9.14" in btn or "Wine 10.10" in btn for btn in buttons)
+            or any("Wine 11.18" in btn or "Wine 11.19" in btn for btn in buttons)
         )
         if is_wine_version_dialog:
             self._show_wine_version_dialog_safe()
@@ -5478,7 +5413,7 @@ class AffinityInstallerGUI(QMainWindow):
         return self.get_wine_dir() / "bin" / binary
 
     def get_current_wine_version(self):
-        """Get the current ElementalWarrior Wine version (9.14, 10.10, or 11.12)"""
+        """Get the current ElementalWarrior Wine version (11.18 or 11.19)"""
         # Try regular wine first
         wine = self.get_wine_path("wine")
         wine_staging = self.get_wine_path("wine-staging")
@@ -5502,7 +5437,7 @@ class AffinityInstallerGUI(QMainWindow):
                             elif version in ("11.16", "11.18", "11.19"):
                                 return version
                             elif version.startswith("11."):
-                                return "11.12"
+                                return version
                 except Exception:
                     continue
         return None
@@ -6412,8 +6347,8 @@ class AffinityInstallerGUI(QMainWindow):
         if major is not None and major >= 11:
             self.log(
                 f"winetricks is running on Wine {major}.x. Wine 11+ new WoW64 mode is "
-                "known to hang the .NET installers — if a component stalls, re-run "
-                "Wine setup with Wine 10.10 and try again.",
+                "known to hang the .NET installers — if a component stalls, switch "
+                "to the other Wine version (11.18 / 11.19) and try again.",
                 "warning",
             )
         return major
@@ -6711,7 +6646,7 @@ class AffinityInstallerGUI(QMainWindow):
         self.log(".NET Framework 4.8 is not installed in the Wine prefix.", "error")
         self.log("Affinity's SetupUI.exe crashes without it, which matches the JIT/debugger failures seen on Ubuntu.", "info")
         if self.is_ubuntu_family_distro():
-            self.log("Ubuntu-family systems should use Wine 10.x during setup until the Wine 11 new WoW64 path is reliable here.", "info")
+            self.log("Ubuntu-family systems use Wine 11.19 by default; if winetricks stalls on the Wine 11 new WoW64 path, switch to Wine 11.18 and try again.", "info")
         self.log("Aborting before launching the Affinity installer.", "info")
         return False
 
@@ -9573,39 +9508,18 @@ class AffinityInstallerGUI(QMainWindow):
 
     def get_recommended_wine_version(self):
         """Return the preferred bundled Wine version for the current distro"""
-        if self.is_ubuntu_family_distro():
-            return "10.10"
-        return "11.0"
+        return "11.19"
 
     def get_wine_version_dialog_options(self):
         """Return Wine version labels and descriptions for UI prompts"""
-        if self.is_ubuntu_family_distro():
-            return [
-                (
-                    "Wine 10.10 (Recommended)",
-                    "Stable bundled Wine build recommended on Ubuntu-family systems while Wine 11 new WoW64 issues are still affecting winetricks and Affinity setup."
-                ),
-                (
-                    "Wine 11.0",
-                    "Latest bundled Wine build with AMD GPU and OpenCL patches. Available, but not recommended on Ubuntu-family systems right now."
-                ),
-                (
-                    "Wine 9.14 (Legacy)",
-                    "Legacy version with AMD GPU and OpenCL patches. Fallback option if you encounter issues with newer versions."
-                ),
-            ]
         return [
             (
-                "Wine 11.0 (Recommended)",
-                "ElementalWarrior Wine 11.0 with AMD GPU and OpenCL patches. Latest version with best compatibility and performance for most systems."
+                "Wine 11.19 (Recommended)",
+                "Latest build with the full Affinity patch set: Direct2D throughput and brush-latency fixes, wined3d Vulkan presentation fixes, OpenCL event dispatcher, pen pressure, plus color, printing and login fixes."
             ),
             (
-                "Wine 10.10",
-                "ElementalWarrior Wine 10.10 with AMD GPU and OpenCL patches. Previous stable version."
-            ),
-            (
-                "Wine 9.14 (Legacy)",
-                "Legacy version with AMD GPU and OpenCL patches. Fallback option if you encounter issues with newer versions."
+                "Wine 11.18",
+                "Previous build with the Affinity login fix and performance patches (D2D geometry cache, OpenCL cache, SDR white-level and printer mapping). Fallback if 11.19 has issues."
             ),
         ]
 
@@ -9616,11 +9530,6 @@ class AffinityInstallerGUI(QMainWindow):
             option_lines.append(f"• {label} - {description}")
 
         note = "Note: You can switch versions later by running this setup again."
-        if self.is_ubuntu_family_distro():
-            note = (
-                "Note: Ubuntu-family systems currently default to Wine 10.10 here to avoid Wine 11 new WoW64 issues during setup. "
-                "You can switch versions later by running this setup again."
-            )
 
         return "Which Wine version would you like to install?\n\n" + "\n".join(option_lines) + f"\n\n{note}"
 
@@ -9628,6 +9537,10 @@ class AffinityInstallerGUI(QMainWindow):
         """Map a dialog label back to an internal Wine version"""
         if not wine_choice:
             return None
+        if wine_choice.startswith("Wine 11.19"):
+            return "11.19"
+        if wine_choice.startswith("Wine 11.18"):
+            return "11.18"
         if wine_choice.startswith("Wine 11.0"):
             return "11.0"
         if wine_choice.startswith("Wine 10.10"):
@@ -10056,31 +9969,16 @@ class AffinityInstallerGUI(QMainWindow):
         wine_version = self.show_question_dialog(
             "Choose Wine Version",
             "Which Wine version would you like to install?\n\n"
-            "• Wine 11.19 (Recommended) - the newest build with the Affinity patches: no white flashes, much lower brush lag, OpenCL, and everything in 11.18.\n"
-            "• Wine 11.18 - the previous build with the Affinity patches: a double-clicked document opens, Affinity exits when it is closed, dialogs stay on top and panels dock back.\n"
-            "• Wine 11.12 (stable) - ElementalWarrior Wine 11.12 with AMD GPU and OpenCL patches, without the Affinity patches. The most stable earlier build.\n"
-            "• Wine 10.10 - ElementalWarrior Wine 10.10 with AMD GPU and OpenCL patches. Previous stable version.\n"
-            "• Wine 9.14 (Legacy) - Legacy version with AMD GPU and OpenCL patches. Fallback option if you encounter issues with newer versions.\n\n"
+            "• Wine 11.19 (Recommended) - Latest build with the full Affinity patch set: Direct2D throughput and brush-latency fixes, wined3d Vulkan presentation fixes, OpenCL event dispatcher, pen pressure, plus color, printing and login fixes.\n"
+            "• Wine 11.18 - Previous build with the Affinity login fix and performance patches (D2D geometry cache, OpenCL cache, SDR white-level and printer mapping). Fallback if 11.19 has issues.\n\n"
             "Note: You can switch versions later by running 'Setup Wine Environment' again.",
-            [
-                "Wine 11.19 (Affinity patches)",
-                "Wine 11.18 (Affinity patches)",
-                "Wine 11.12 (stable)",
-                "Wine 10.10",
-                "Wine 9.14 (Legacy)",
-            ],
+            ["Wine 11.19 (Recommended)", "Wine 11.18"],
         )
 
-        if wine_version == "Wine 11.19 (Affinity patches)":
+        if wine_version == "Wine 11.19 (Recommended)":
             wine_version_choice = "11.19"
-        elif wine_version == "Wine 11.18 (Affinity patches)":
+        elif wine_version == "Wine 11.18":
             wine_version_choice = "11.18"
-        elif wine_version == "Wine 11.12 (stable)":
-            wine_version_choice = "11.12"
-        elif wine_version == "Wine 10.10":
-            wine_version_choice = "10.10"
-        elif wine_version == "Wine 9.14 (Legacy)":
-            wine_version_choice = "9.14"
         else:
             self.log("Wine setup cancelled", "warning")
             return
@@ -12335,12 +12233,12 @@ class AffinityInstallerGUI(QMainWindow):
         self.log(f"All dependencies installed for {distro_name}", "success")
         return True
 
-    def setup_wine(self, wine_version="11.12"):
-        """Setup Wine environment - installs custom Wine 9.14, 10.10, 11.12, or 11.12-v4 with AMD GPU and OpenCL patches
+    def setup_wine(self, wine_version="11.19"):
+        """Setup Wine environment - installs custom Wine 11.18 or 11.19 with Affinity patches
 
         Args:
-            wine_version: "9.14" for Wine 9.14 (legacy), "10.10" for Wine 10.10,
-                          "11.12" for Wine 11.12 (recommended), or "11.12-v4" for Wine 11.12 v4 (AMD Zen 4/5)
+            wine_version: "11.19" for Wine 11.19 (recommended, full patch set),
+                          or "11.18" for Wine 11.18 (login fix + performance patches)
         """
         self.start_operation("Setting up Wine environment")
 
@@ -13166,10 +13064,9 @@ class AffinityInstallerGUI(QMainWindow):
             QMessageBox.information(
                 self,
                 "Wine Version Not Supported",
-                "The Canva sign-in fix supports Wine 9.14, 10.10, and the 11.16 build "
-                "with the Affinity patches.\n\n"
-                "With Wine 11.12 the sign-in also needs the Windows WinMetadata and wintypes.dll, "
-                "which this installer only sets up for Wine 9.14 and 10.10.",
+                "The Canva sign-in fix supports Wine 11.18 and 11.19 with login metadata.\n\n"
+                "With other Wine 11 builds the sign-in also needs Windows WinMetadata and the "
+                "login Wine patches, which this prefix does not have.",
             )
             return
         self.start_operation("Fix Canva Sign-in")
@@ -13179,10 +13076,82 @@ class AffinityInstallerGUI(QMainWindow):
         """Wrapper: install the WinRT facades and the affinity:// handler, then end the operation."""
         try:
             facades_installed = self.install_windowsruntime_facades()
+            self.repair_affinity_url_protocol_command()
             if self.create_affinity_url_handler() and facades_installed:
                 self.log("\n✓ Canva sign-in fix installed", "success")
             else:
                 self.log("\n✗ Canva sign-in fix not installed, see the messages above", "error")
+        finally:
+            self.end_operation()
+
+    @staticmethod
+    def _extract_affinity_callback_url(pasted):
+        """Return the affinity:// URL from a pasted browser address or link, else None.
+
+        Accepts the raw affinity:// link or the full page address carrying it in
+        the url= parameter. The value is a short-lived credential: callers must
+        never log it, only its length.
+        """
+        if not pasted:
+            return None
+        pasted = pasted.strip()
+        if pasted.startswith("affinity://"):
+            url = pasted
+        else:
+            try:
+                values = urllib.parse.parse_qs(urllib.parse.urlparse(pasted).query).get("url")
+            except Exception:
+                return None
+            if not values:
+                return None
+            url = values[0]
+        if not url.startswith("affinity://"):
+            return None
+        if not (20 < len(url) < 8192):
+            return None
+        return url
+
+    def inject_canva_sign_in_callback(self):
+        """Ask for the sign-in callback URL and hand it to Affinity (manual fallback)."""
+        if not self.affinity_v3_exe_path().exists():
+            QMessageBox.warning(self, "Affinity Not Found", f"Affinity v3 is not installed:\n{self.affinity_v3_exe_path()}")
+            return
+        self.start_operation("Paste Sign-in URL")
+        threading.Thread(target=self._inject_canva_callback_entry, daemon=True).start()
+
+    def _inject_canva_callback_entry(self):
+        """Wrapper: paste the callback URL, hand it to Affinity, end the operation."""
+        try:
+            pasted = (self.get_interactive_response(
+                "Paste the sign-in callback URL from the browser, then press Enter.\n\n"
+                "Either the full page address or the affinity:// link.\n"
+                "Use this only when the browser handoff does not reach Affinity by itself.",
+                "") or "").strip()
+            url = self._extract_affinity_callback_url(pasted)
+            if not url:
+                self.log("That does not look like an affinity:// callback URL. Nothing was sent.", "warning")
+                return
+            exe = self.affinity_v3_exe_path()
+            try:
+                drive_c = Path(self.directory) / "drive_c"
+                windows_exe = "C:\\" + str(exe.relative_to(drive_c)).replace("/", "\\")
+            except (OSError, ValueError):
+                self.log("Could not map the Affinity exe into the prefix.", "warning")
+                return
+            wine = self.get_wine_path("wine")
+            env = self.get_winetricks_env()
+            self.log(f"Handing a {len(url)}-character callback URL to Affinity...", "info")
+            success, _, _ = self.run_command(
+                [str(wine), str(windows_exe), url], check=False, env=env, capture=True, timeout=120)
+            if self.cancel_event.is_set():
+                return
+            if success:
+                self.log("Callback handed to Affinity. If it does not sign in within a few "
+                         "seconds, the code expired: start the browser sign-in again and "
+                         "paste the fresh URL.", "success")
+            else:
+                self.log("Affinity did not accept the callback. Make sure Affinity is running, "
+                         "then try again with a fresh URL.", "warning")
         finally:
             self.end_operation()
 
@@ -13787,6 +13756,39 @@ class AffinityInstallerGUI(QMainWindow):
             self.log("DLL overrides configured for d3d12", "success")
 
 
+    def repair_crypt32_override(self):
+        """Force Wine builtin crypt32 (migrates prefixes harmed by native crypt32)
+
+        Older installer runs executed `winetricks crypt32`, which drops in
+        Microsoft's native crypt32.dll and sets a native override. Native
+        crypt32 cannot validate certificate chains against Wine's registry
+        stores, so all HTTPS from the prefix fails at cert verification
+        (ERROR_INTERNET_SECURITY_CHANNEL_ERROR 12157): Affinity update
+        checks, CanvaAI/cloud features, asset downloads. Wine's builtin
+        crypt32 handles the prefix ROOT store correctly. The leftover
+        native file in system32 is inert once the override is builtin.
+        Only affects new processes; running apps pick it up on restart.
+        """
+        self.log("Ensuring Wine builtin crypt32 for working TLS...", "info")
+
+        env = self.get_winetricks_env()
+        wine = self.get_wine_path("wine")
+        override_key = "HKEY_CURRENT_USER\\Software\\Wine\\DllOverrides"
+
+        success, _, stderr = self.run_command(
+            [str(wine), "reg", "add", override_key, "/v", "*crypt32", "/t", "REG_SZ", "/d", "builtin", "/f"],
+            check=False,
+            env=env,
+            capture=True
+        )
+        if success:
+            self.log("DLL override '*crypt32' set to builtin (TLS chain validation fixed)", "success")
+            return True
+
+        self.log(f"Warning: Could not set crypt32 override: {stderr.strip() or 'unknown error'}", "warning")
+        return False
+
+
     def setup_dxvk_overrides(self):
         """
         Set up DLL overrides for DXVK in Wine registry
@@ -14133,7 +14135,7 @@ class AffinityInstallerGUI(QMainWindow):
                         "error",
                     )
                     self.log(
-                        "If this repeats, re-run Wine setup with Wine 10.10 (Wine 11+ new WoW64 hangs winetricks).",
+                        "If this repeats, switch to the other Wine version (11.18 / 11.19) and try again (Wine 11+ new WoW64 hangs winetricks).",
                         "warning",
                     )
                 else:
@@ -14160,6 +14162,9 @@ class AffinityInstallerGUI(QMainWindow):
             regedit = self.get_wine_path("regedit")
             self.run_command([str(regedit), str(theme_file)], check=False, env=env)
             theme_file.unlink()
+
+        # Migrate prefixes created when `crypt32` was still installed native.
+        self.repair_crypt32_override()
 
         if not self.verify_required_wine_runtimes():
             self.update_progress_text("Missing required Wine runtimes")
@@ -14189,31 +14194,16 @@ class AffinityInstallerGUI(QMainWindow):
         wine_version = self.show_question_dialog(
             "Choose Wine Version",
             "Which Wine version would you like to install?\n\n"
-            "• Wine 11.19 (Recommended) - the newest build with the Affinity patches: no white flashes, much lower brush lag, OpenCL, and everything in 11.18.\n"
-            "• Wine 11.18 - the previous build with the Affinity patches: a double-clicked document opens, Affinity exits when it is closed, dialogs stay on top and panels dock back.\n"
-            "• Wine 11.12 (stable) - ElementalWarrior Wine 11.12 with AMD GPU and OpenCL patches, without the Affinity patches. The most stable earlier build.\n"
-            "• Wine 10.10 - ElementalWarrior Wine 10.10 with AMD GPU and OpenCL patches. Previous stable version.\n"
-            "• Wine 9.14 (Legacy) - Legacy version with AMD GPU and OpenCL patches. Fallback option if you encounter issues with newer versions.\n\n"
+            "• Wine 11.19 (Recommended) - Latest build with the full Affinity patch set: Direct2D throughput and brush-latency fixes, wined3d Vulkan presentation fixes, OpenCL event dispatcher, pen pressure, plus color, printing and login fixes.\n"
+            "• Wine 11.18 - Previous build with the Affinity login fix and performance patches (D2D geometry cache, OpenCL cache, SDR white-level and printer mapping). Fallback if 11.19 has issues.\n\n"
             "Note: You can switch versions later by running this setup again.",
-            [
-                "Wine 11.19 (Affinity patches)",
-                "Wine 11.18 (Affinity patches)",
-                "Wine 11.12 (stable)",
-                "Wine 10.10",
-                "Wine 9.14 (Legacy)",
-            ],
+            ["Wine 11.19 (Recommended)", "Wine 11.18"],
         )
 
-        if wine_version == "Wine 11.19 (Affinity patches)":
+        if wine_version == "Wine 11.19 (Recommended)":
             wine_version_choice = "11.19"
-        elif wine_version == "Wine 11.18 (Affinity patches)":
+        elif wine_version == "Wine 11.18":
             wine_version_choice = "11.18"
-        elif wine_version == "Wine 11.12 (stable)":
-            wine_version_choice = "11.12"
-        elif wine_version == "Wine 10.10":
-            wine_version_choice = "10.10"
-        elif wine_version == "Wine 9.14 (Legacy)":
-            wine_version_choice = "9.14"
         else:
             self.log("Wine setup cancelled", "warning")
             return
@@ -14229,45 +14219,26 @@ class AffinityInstallerGUI(QMainWindow):
         return config
 
     def _pinned_wine_version_config(self, wine_version):
-        """Get Wine version configuration (URL, filename, etc.)
+        """Get Wine version configuration (URL, filename, SHA-256, etc.)
 
         Args:
-            wine_version: "9.14", "10.10", or "11.12"
+            wine_version: "11.18" or "11.19"
 
         Returns:
-            dict with wine_url, wine_file_name, wine_dir_name, wine_dir_pattern, archive_format, wine_display_name
+            dict with wine_url, wine_file_name, wine_sha256, wine_dir_name, wine_dir_pattern, archive_format, wine_display_name
         """
-        if wine_version == "9.14":
+        if wine_version == "11.18":
             return {
-                "wine_url": "https://github.com/seapear/AffinityOnLinux/releases/download/Legacy/ElementalWarriorWine-x86_64.tar.gz",
-                "wine_file_name": "ElementalWarriorWine-x86_64.tar.gz",
+                # POC SOURCE -- the fork's release of the 11.18 patch set.
+                "wine_url": "https://github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.18-r1/ElementalWarrior-wine-11.18.tar.xz",
+                "wine_file_name": "ElementalWarrior-wine-11.18.tar.xz",
+                "wine_sha256": WINE_11_18_SHA256,
                 "wine_dir_name": "ElementalWarriorWine",
-                "wine_dir_pattern": "ElementalWarriorWine*",
-                "archive_format": "gz",
-                "wine_display_name": "Wine 9.14 (Legacy - with AMD GPU and OpenCL patches)",
-            }
-        elif wine_version == "10.10":
-            return {
-                "wine_url": "https://github.com/ryzendew/Affinity-Wine-Builder/releases/download/10.10/ElementalWarrior-wine-10.10.tar.xz",
-                "wine_file_name": "ElementalWarrior-wine-10.10.tar.xz",
-                "wine_dir_name": "ElementalWarriorWine",
-                "wine_dir_pattern": "ElementalWarrior-wine-10.10*",
+                "wine_dir_pattern": "ElementalWarrior-wine-11.18*",
                 "archive_format": "xz",
-                "wine_display_name": "Wine 10.10 (with AMD GPU and OpenCL patches)",
+                "wine_display_name": "Wine 11.18 (Affinity login fix + performance patches)",
             }
-        elif wine_version == "11.16":
-            return {
-                # POC SOURCE -- the fork that carries the patches' upstream pull
-                # request. Repoint at the upstream 11.16 release.
-                "wine_url": "https://github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.16-r3/ElementalWarrior-wine-11.16.tar.xz",
-                "wine_file_name": "ElementalWarrior-wine-11.16.tar.xz",
-                "wine_sha256": WINE_11_16_SHA256,
-                "wine_dir_name": "ElementalWarriorWine",
-                "wine_dir_pattern": "ElementalWarrior-wine-11.16*",
-                "archive_format": "xz",
-                "wine_display_name": "Wine 11.16 (Affinity patches, previous)",
-            }
-        elif wine_version == "11.19":
+        else:  # Default to 11.19
             return {
                 # POC SOURCE -- the fork's release of the 11.19 patch set.
                 "wine_url": "https://github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.19-r6/ElementalWarrior-wine-11.19.tar.xz",
@@ -14276,44 +14247,14 @@ class AffinityInstallerGUI(QMainWindow):
                 "wine_dir_name": "ElementalWarriorWine",
                 "wine_dir_pattern": "ElementalWarrior-wine-11.19*",
                 "archive_format": "xz",
-                "wine_display_name": "Wine 11.19 (Affinity patches)",
-            }
-        elif wine_version == "11.18":
-            return {
-                # POC SOURCE -- the fork that carries the upstream pull request
-                # for these patches. Repoint at the upstream 11.18 release.
-                "wine_url": "https://github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.18-r1/ElementalWarrior-wine-11.18.tar.xz",
-                "wine_file_name": "ElementalWarrior-wine-11.18.tar.xz",
-                "wine_sha256": WINE_11_18_SHA256,
-                "wine_dir_name": "ElementalWarriorWine",
-                "wine_dir_pattern": "ElementalWarrior-wine-11.18*",
-                "archive_format": "xz",
-                "wine_display_name": "Wine 11.18 (Affinity patches)",
-            }
-        elif wine_version == "11.12-v4":
-            return {
-                "wine_url": "https://github.com/ryzendew/Affinity-Wine-Builder/releases/download/11.12/ElementalWarrior-wine-11.12-v4.tar.xz",
-                "wine_file_name": "ElementalWarrior-wine-11.12-v4.tar.xz",
-                "wine_dir_name": "ElementalWarriorWine",
-                "wine_dir_pattern": "ElementalWarrior-wine-11.12-v4*",
-                "archive_format": "xz",
-                "wine_display_name": "Wine 11.12 v4 (AMD Zen 4/5 optimized)",
-            }
-        else:  # Default to 11.12
-            return {
-                "wine_url": "https://github.com/ryzendew/Affinity-Wine-Builder/releases/download/11.12/ElementalWarrior-wine-11.12.tar.xz",
-                "wine_file_name": "ElementalWarrior-wine-11.12.tar.xz",
-                "wine_dir_name": "ElementalWarriorWine",
-                "wine_dir_pattern": "ElementalWarrior-wine-11.12*",
-                "archive_format": "xz",
-                "wine_display_name": "Wine 11.12 (Latest - with AMD GPU and OpenCL patches)",
+                "wine_display_name": "Wine 11.19 (Latest - full Affinity patch set)",
             }
 
     def _download_wine_to_cache(self, wine_version, cache_dir):
         """Download a Wine version to cache directory
 
         Args:
-            wine_version: "9.14", "10.10", or "11.12"
+            wine_version: "11.18" or "11.19"
             cache_dir: Path to cache directory
 
         Returns:
@@ -14413,7 +14354,7 @@ class AffinityInstallerGUI(QMainWindow):
         cache_dir = Path(self.directory) / "Wine-Switch"
         cache_dir.mkdir(parents=True, exist_ok=True)
 
-        all_versions = ["9.14", "10.10", "11.12", "11.18", "11.19"]
+        all_versions = ["11.18", "11.19"]
 
         self.log(
             "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -14534,11 +14475,11 @@ class AffinityInstallerGUI(QMainWindow):
         except Exception as e:
             self.log(f"Error checking DXVK/vkd3d-proton updates: {e}", "warning")
 
-    def _setup_wine_switch(self, wine_version="10.10"):
+    def _setup_wine_switch(self, wine_version="11.19"):
         """Setup Wine binary only - for switching versions without reconfiguration
 
         Args:
-            wine_version: "9.14" for Wine 9.14 (legacy), or "10.10" for Wine 10.10 (recommended)
+            wine_version: "11.18" or "11.19" (recommended)
         """
         try:
             # Get Wine version configuration
@@ -14783,31 +14724,16 @@ class AffinityInstallerGUI(QMainWindow):
         wine_version = self.show_question_dialog(
             "Choose Wine Version",
             "Which Wine version would you like to install?\n\n"
-            "• Wine 11.19 (Recommended) - the newest build with the Affinity patches: no white flashes, much lower brush lag, OpenCL, and everything in 11.18.\n"
-            "• Wine 11.18 - the previous build with the Affinity patches: a double-clicked document opens, Affinity exits when it is closed, dialogs stay on top and panels dock back.\n"
-            "• Wine 11.12 (stable) - ElementalWarrior Wine 11.12 with AMD GPU and OpenCL patches, without the Affinity patches. The most stable earlier build.\n"
-            "• Wine 10.10 - ElementalWarrior Wine 10.10 with AMD GPU and OpenCL patches. Previous stable version.\n"
-            "• Wine 9.14 (Legacy) - Legacy version with AMD GPU and OpenCL patches. Fallback option if you encounter issues with newer versions.\n\n"
+            "• Wine 11.19 (Recommended) - Latest build with the full Affinity patch set: Direct2D throughput and brush-latency fixes, wined3d Vulkan presentation fixes, OpenCL event dispatcher, pen pressure, plus color, printing and login fixes.\n"
+            "• Wine 11.18 - Previous build with the Affinity login fix and performance patches (D2D geometry cache, OpenCL cache, SDR white-level and printer mapping). Fallback if 11.19 has issues.\n\n"
             "Note: This will replace your current Wine installation.",
-            [
-                "Wine 11.19 (Affinity patches)",
-                "Wine 11.18 (Affinity patches)",
-                "Wine 11.12 (stable)",
-                "Wine 10.10",
-                "Wine 9.14 (Legacy)",
-            ],
+            ["Wine 11.19 (Recommended)", "Wine 11.18"],
         )
 
-        if wine_version == "Wine 11.19 (Affinity patches)":
+        if wine_version == "Wine 11.19 (Recommended)":
             wine_version_choice = "11.19"
-        elif wine_version == "Wine 11.18 (Affinity patches)":
+        elif wine_version == "Wine 11.18":
             wine_version_choice = "11.18"
-        elif wine_version == "Wine 11.12 (stable)":
-            wine_version_choice = "11.12"
-        elif wine_version == "Wine 10.10":
-            wine_version_choice = "10.10"
-        elif wine_version == "Wine 9.14 (Legacy)":
-            wine_version_choice = "9.14"
         else:
             self.log("Wine version switch cancelled", "warning")
             return
@@ -15127,7 +15053,7 @@ Would you like to continue with {distro_name} anyway?"""
                             "info",
                         )
                         self.log(
-                            "Close the installer, re-run Wine setup with Wine 10.10, then try again.",
+                            "Close the installer, switch to the other Wine version (11.18 / 11.19), then try again.",
                             "warning",
                         )
                     else:
@@ -15193,6 +15119,9 @@ Would you like to continue with {distro_name} anyway?"""
                 self.log("Winetricks dependencies completed with warnings. Check the log above for any manual follow-up.", "warning")
             else:
                 self.log("\n✓ Winetricks dependencies installation completed!", "success")
+
+            # Migrate prefixes created when `crypt32` was still installed native.
+            self.repair_crypt32_override()
 
             self.update_progress(1.0)
             self.update_progress_text("Ready")
@@ -15397,23 +15326,6 @@ Would you like to continue with {distro_name} anyway?"""
                 )
                 if msxml6_path.exists():
                     return True
-            elif component == "crypt32":
-                # Check for Cryptographic API 32 (crypt32.dll)
-                crypt32_paths = [
-                    Path(self.directory)
-                    / "drive_c"
-                    / "windows"
-                    / "system32"
-                    / "crypt32.dll",
-                    Path(self.directory)
-                    / "drive_c"
-                    / "windows"
-                    / "syswow64"
-                    / "crypt32.dll",
-                ]
-                for crypt32_path in crypt32_paths:
-                    if crypt32_path.exists():
-                        return True
             # A component without a check of its own above -- Tahoma had none,
             # so it always read "Not installed" -- goes by the verbs winetricks
             # recorded in the prefix.
@@ -15522,16 +15434,16 @@ Would you like to continue with {distro_name} anyway?"""
         self.run_command([str(regedit), str(disable_edge_update_reg)], check=False, env=env)
         disable_edge_update_reg.unlink()
 
-        # With Wine 10.10 and msedgewebview2.exe as Windows 11, the WebView2 GPU
-        # process fails at startup and the Affinity v3 Help window stays empty.
-        # As Windows 7 it renders.
-        self.log("Setting msedgewebview2.exe to Windows 7 compatibility...", "info")
+        # msedgewebview2.exe refuses to run as Windows 7
+        # ("Microsoft Edge requires Windows 10 or higher"), so pin it to
+        # Windows 11 explicitly.
+        self.log("Setting msedgewebview2.exe to Windows 11 compatibility...", "info")
         self.run_command(
             [
                 str(wine), "reg", "add",
                 "HKEY_CURRENT_USER\\Software\\Wine\\AppDefaults\\msedgewebview2.exe",
                 "/v", "Version",
-                "/d", "win7",
+                "/d", "win11",
                 "/f",
             ],
             check=False,
@@ -15657,7 +15569,7 @@ Would you like to continue with {distro_name} anyway?"""
         self.log("WebView2 Runtime not found. Proceeding with installation...", "info")
 
         try:
-            # Step 1: Set Windows 11 compatibility mode
+            # Step 1: Set Windows 11 compatibility mode (WebView2 requires Win10/11)
             self.log("Setting Windows 11 compatibility mode...", "info")
             self.stop_prefix_wine_processes(env, reason="setting Windows version")
             self.run_command([str(wine_cfg), "-v", "win11"], check=False, env=env)
@@ -16232,13 +16144,13 @@ Would you like to continue with {distro_name} anyway?"""
                         self.show_affinity_not_installed(reason, declined=reason == self.MSI_DECLINED)
                     return
 
-            # Restore WinMetadata (only needed for Wine 9.14 and 10.10, not 11.12+)
+            # Restore WinMetadata (only needed for legacy Wine 9.14 and 10.10, not 11.18/11.19)
             wine_version = self.get_current_wine_version()
             if wine_version in ["9.14", "10.10"]:
                 self.restore_winmetadata()
             else:
                 self.log(
-                    "Skipping WinMetadata restore for Wine 11.12+ (not needed)", "info"
+                    "Skipping WinMetadata restore for Wine 11.18/11.19 (not needed)", "info"
                 )
 
             if app_name == "Add" and self.affinity_v3_exe_path().exists():
@@ -16246,7 +16158,7 @@ Would you like to continue with {distro_name} anyway?"""
                 self.create_affinity_url_handler()
                 self.precompile_affinity()
 
-            # Set up wintypes.dll and Wine overrides for Affinity apps (v2 and v3) - only for Wine < 11.12
+            # Set up wintypes.dll and Wine overrides for Affinity apps (v2 and v3) - only for legacy Wine (< 11.18)
             if app_name in ["Photo", "Designer", "Publisher", "Add"]:
                 wine_version = self.get_current_wine_version()
                 if wine_version in ["9.14", "10.10"]:
@@ -16257,7 +16169,7 @@ Would you like to continue with {distro_name} anyway?"""
                     self.setup_wintypes_dll(app_name)
                 else:
                     self.log(
-                        "Skipping wintypes.dll setup for Wine 11.12+ (not needed)",
+                        "Skipping wintypes.dll setup for Wine 11.18/11.19 (not needed)",
                         "info",
                     )
 
@@ -16939,7 +16851,7 @@ Would you like to continue with {distro_name} anyway?"""
                     return
                 self._keep_installer(installer_path_obj, affinity_v3_exe)
 
-            # Restore WinMetadata (only needed for Wine 9.14 and 10.10, not 11.12+)
+            # Restore WinMetadata (only needed for legacy Wine 9.14 and 10.10, not 11.18/11.19)
             wine_version = self.get_current_wine_version()
             if wine_version in ["9.14", "10.10"]:
                 self.update_progress_text("Restoring Windows Metadata...")
@@ -16947,7 +16859,7 @@ Would you like to continue with {distro_name} anyway?"""
                 self.restore_winmetadata()
             else:
                 self.log(
-                    "Skipping WinMetadata restore for Wine 11.12+ (not needed)", "info"
+                    "Skipping WinMetadata restore for Wine 11.18/11.19 (not needed)", "info"
                 )
 
             if app_name == "Add" and self.affinity_v3_exe_path().exists():
@@ -16961,7 +16873,7 @@ Would you like to continue with {distro_name} anyway?"""
             else:
                 self.log("GPU rendering was not chosen; vkd3d-proton not placed beside Affinity", "info")
 
-            # For Affinity v2 apps (Photo, Designer, Publisher), copy wintypes.dll and set override (only for Wine < 11.12)
+            # For Affinity v2 apps (Photo, Designer, Publisher), copy wintypes.dll and set override (only for legacy Wine < 11.18)
             if is_affinity_v2:
                 wine_version = self.get_current_wine_version()
                 if wine_version in ["9.14", "10.10"]:
@@ -16970,11 +16882,11 @@ Would you like to continue with {distro_name} anyway?"""
                     self.setup_wintypes_dll(app_name)
                 else:
                     self.log(
-                        "Skipping wintypes.dll setup for Wine 11.12+ (not needed)",
+                        "Skipping wintypes.dll setup for Wine 11.18/11.19 (not needed)",
                         "info",
                     )
 
-            # For Affinity v3 (Unified), copy wintypes.dll and set override, then patch the DLL (only for Wine < 11.12)
+            # For Affinity v3 (Unified), copy wintypes.dll and set override, then patch the DLL (only for legacy Wine < 11.18)
             if app_name == "Add" or app_name == "Affinity (Unified)":
                 wine_version = self.get_current_wine_version()
                 if wine_version in ["9.14", "10.10"]:
@@ -16984,7 +16896,7 @@ Would you like to continue with {distro_name} anyway?"""
                     self.setup_wintypes_dll(app_name)
                 else:
                     self.log(
-                        "Skipping wintypes.dll setup for Wine 11.12+ (not needed)",
+                        "Skipping wintypes.dll setup for Wine 11.18/11.19 (not needed)",
                         "info",
                     )
 
@@ -17361,9 +17273,11 @@ Would you like to continue with {distro_name} anyway?"""
     def canva_sign_in_wine_support(self):
         """Return "supported", "unsupported" or "unknown" for the prefix's Wine.
 
-        The Canva sign-in fix supports Wine 9.x and 10.x (the installer's 9.14 and 10.10).
-        With Wine 11.12 the callback method also needs the Windows WinMetadata and the
-        native wintypes.dll, which this installer only sets up for Wine 9.14 and 10.10.
+        The Canva sign-in fix supports Wine 11.18 and 11.19 (when the build
+        carries the login metadata: the applicationmodel.datatransfer,
+        applicationmodel.datatransfer, foundation and storage.streams WinMetadata plus
+        the SharedStorageAccessManager activation): the callback method needs those to
+        JIT, and the stock Wine 11 line does not ship them.
         "unknown" means the prefix's Wine could not be run.
         """
         wine = self.get_wine_path("wine")
@@ -17379,7 +17293,32 @@ Would you like to continue with {distro_name} anyway?"""
         match = re.search(r"wine-(\d+)\.", stdout) if success else None
         if not match:
             return "unknown"
-        return "supported" if match.group(1) in ("9", "10") else "unsupported"
+        if match.group(1) in ("9", "10"):
+            return "supported"
+        if match.group(1) == "11" and self.canva_sign_in_winmetadata_installed():
+            return "supported"
+        return "unsupported"
+
+    #: WinMetadata files the Canva sign-in callback needs on Wine 11+.
+    CANVA_SIGN_IN_WINMD = (
+        "windows.applicationmodel.datatransfer.winmd",
+        "windows.foundation.winmd",
+        "windows.storage.streams.winmd",
+    )
+
+    def canva_sign_in_winmetadata_dir(self):
+        """Return the prefix's WinMetadata directory (Wine uses lowercase)."""
+        return (
+            Path(self.directory) / "drive_c" / "windows" / "system32" / "winmetadata"
+        )
+
+    def canva_sign_in_winmetadata_installed(self):
+        """Return True when the prefix has the WinMetadata the sign-in needs."""
+        try:
+            winmetadata = self.canva_sign_in_winmetadata_dir()
+            return all((winmetadata / name).exists() for name in self.CANVA_SIGN_IN_WINMD)
+        except OSError:
+            return False
 
     @staticmethod
     def prefix_windows_path(directory, path):
@@ -17478,7 +17417,7 @@ Would you like to continue with {distro_name} anyway?"""
             self.log("Could not run the prefix's Wine, skipping the WinRT facades", "warning")
             return False
         if wine_support == "unsupported":
-            self.log("Skipping the WinRT facades: the Canva sign-in fix supports Wine 9.14 and 10.10", "info")
+            self.log("Skipping the WinRT facades: the Canva sign-in fix supports Wine 11.18 and 11.19 with login metadata", "info")
             return False
         if not self.has_dotnet48_runtime():
             self.log(".NET Framework 4.8 is not installed in the prefix, skipping the WinRT facades", "warning")
@@ -19184,12 +19123,17 @@ Would you like to continue with {distro_name} anyway?"""
         return exec_line
 
     def winmetadata_installed(self):
-        """Return True when the prefix has WinMetadata (.winmd files) in system32"""
-        winmetadata = Path(self.directory) / "drive_c" / "windows" / "system32" / "WinMetadata"
-        try:
-            return any(winmetadata.glob("*.winmd"))
-        except OSError:
-            return False
+        """Return True when the prefix has WinMetadata (.winmd files) in system32."""
+        # Wine creates the directory lowercase; previously this checked "WinMetadata"
+        # and never matched on a case-sensitive filesystem.
+        for dirname in ("winmetadata", "WinMetadata"):
+            winmetadata = Path(self.directory) / "drive_c" / "windows" / "system32" / dirname
+            try:
+                if any(winmetadata.glob("*.winmd")):
+                    return True
+            except OSError:
+                continue
+        return False
 
     def manages_host_entries(self):
         """Whether this installer writes the host's fixed-name entries.
@@ -19218,8 +19162,8 @@ Would you like to continue with {distro_name} anyway?"""
 
         The browser hands the sign-in callback to this handler. It launches Affinity with
         the URL, and a running Affinity receives it from that second instance over a named
-        pipe. It is only registered with Wine 9.14 or 10.10 and once WinMetadata and the
-        WinRT facades are installed: otherwise the running Affinity crashes when the URL
+        pipe. It is only registered on supported Wine (11.18 or 11.19 with login
+        metadata) and once WinMetadata and the WinRT facades are installed: otherwise the running Affinity crashes when the URL
         arrives. Wine's generated handler is replaced because it runs `wine start`, which
         crashes on URLs longer than about 300 characters.
         """
@@ -19238,8 +19182,7 @@ Would you like to continue with {distro_name} anyway?"""
             # A handler left from an earlier Wine version would crash the running Affinity.
             if handler_file.exists():
                 self.remove_affinity_url_handler()
-            self.log("Not registering the affinity:// handler: the Canva sign-in fix supports Wine 9.14, 10.10 "
-                     "and the builds with the Affinity patches (11.18, 11.19)", "info")
+            self.log("Not registering the affinity:// handler: the Canva sign-in fix supports Wine 11.18 and 11.19 with login metadata", "info")
             return False
         if not self.windowsruntime_facades_installed() or not self.winmetadata_installed():
             self.log("WinRT facades or WinMetadata missing, not registering the affinity:// handler", "warning")
@@ -19285,6 +19228,36 @@ Would you like to continue with {distro_name} anyway?"""
         if current != handler_file.name:
             self.log("Registered the affinity:// handler used by the Canva sign-in", "success")
         return True
+
+    def repair_affinity_url_protocol_command(self):
+        """Point HKCR\\affinity at the real v3 exe (fallback handoff path).
+
+        Affinity registers "C:\\Program Files\\Affinity\\Affinity.exe", but the v3
+        install lives one level deeper (...\\Affinity\\Affinity\\Affinity.exe), so
+        `wine start <affinity://-url>` fails and the browser handoff dies wherever
+        no desktop handler catches it first. The installer's own desktop handler
+        launches the exe directly and does not need this key.
+        """
+        exe = self.affinity_v3_exe_path()
+        if not exe.exists():
+            return False
+        try:
+            drive_c = Path(self.directory) / "drive_c"
+            windows_path = "C:\\" + str(exe.relative_to(drive_c)).replace("/", "\\")
+        except (OSError, ValueError):
+            return False
+        env = self.get_winetricks_env()
+        wine = self.get_wine_path("wine")
+        success, _, stderr = self.run_command(
+            [str(wine), "reg", "add", "HKEY_CLASSES_ROOT\\affinity\\shell\\open\\command",
+             "/ve", "/d", f'"{windows_path}" "%1"', "/f"],
+            check=False, env=env, capture=True,
+        )
+        if success:
+            self.log("affinity:// protocol handler points at the v3 exe", "success")
+            return True
+        self.log(f"Could not fix the affinity:// protocol command: {(stderr or '').strip() or 'unknown error'}", "warning")
+        return False
 
     def remove_affinity_url_handler(self):
         """Remove the affinity:// handler and its default-handler entry -- but
