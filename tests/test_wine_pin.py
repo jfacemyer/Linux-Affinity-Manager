@@ -17,7 +17,7 @@ from affinity_manager import aol  # noqa: E402
 
 try:
     inst = aol.module()
-    HAVE = hasattr(inst, "WINE_11_16_SHA256")
+    HAVE = hasattr(inst, "WINE_11_19_SHA256")
     HAVE_1118 = hasattr(inst, "WINE_11_18_SHA256")
 except aol.NotAvailable:
     inst, HAVE, HAVE_1118 = None, False, False
@@ -33,16 +33,16 @@ def check(path, config):
 
 
 def test_the_pin_is_a_real_checksum():
-    assert re.fullmatch(r"[0-9a-f]{64}", inst.WINE_11_16_SHA256), \
+    assert re.fullmatch(r"[0-9a-f]{64}", inst.WINE_11_19_SHA256), \
         "the placeholder was never replaced with the release's checksum"
 
 
-def test_the_11_16_download_carries_the_pin():
-    config = inst.AffinityInstallerGUI._get_wine_version_config(None, "11.16")
-    assert config["wine_sha256"] == inst.WINE_11_16_SHA256
-    # A rebuilt release goes up under a new tag; the old one stays for
-    # rollback, so the URL must not be the original 11.16 one.
-    assert "/releases/download/11.16/" not in config["wine_url"]
+def test_the_11_19_download_carries_the_pin():
+    config = inst.AffinityInstallerGUI._get_wine_version_config(None, "11.19")
+    assert config["wine_sha256"] == inst.WINE_11_19_SHA256
+    # A rebuilt release goes up under a new tag (11.19-rN); the old one stays
+    # for rollback, so the URL names a revision.
+    assert "/releases/download/11.19-r" in config["wine_url"]
 
 
 def test_a_different_tarball_is_refused(tmp_path):
@@ -68,7 +68,7 @@ def test_an_unpinned_build_is_not_checked(tmp_path):
 @pytest.mark.skipif(not HAVE_1118, reason="installer without Wine 11.18")
 def test_the_11_18_download_carries_its_own_pin():
     assert re.fullmatch(r"[0-9a-f]{64}", inst.WINE_11_18_SHA256)
-    assert inst.WINE_11_18_SHA256 != inst.WINE_11_16_SHA256
+    assert inst.WINE_11_18_SHA256 != inst.WINE_11_19_SHA256
     config = inst.AffinityInstallerGUI._get_wine_version_config(None, "11.18")
     assert config["wine_sha256"] == inst.WINE_11_18_SHA256
     assert config["wine_url"].endswith("/ElementalWarrior-wine-11.18.tar.xz")
