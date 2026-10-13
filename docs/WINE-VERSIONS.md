@@ -21,7 +21,7 @@ The installer defaults to Wine 11.19. You can switch between versions anytime us
 
 The installer downloads these releases and checks each against a SHA-256 pinned in `AffinityLinuxInstaller.py`; a tarball that does not match is refused:
 
-- 11.19: [`11.19-r6`](https://github.com/jfacemyer/Affinity-Wine-Builder/releases/tag/11.19-r6), `ElementalWarrior-wine-11.19.tar.xz`
+- 11.19: [`11.19-r7`](https://github.com/jfacemyer/Affinity-Wine-Builder/releases/tag/11.19-r7), `ElementalWarrior-wine-11.19.tar.xz`
 - 11.18: [`11.18-r1`](https://github.com/jfacemyer/Affinity-Wine-Builder/releases/tag/11.18-r1), `ElementalWarrior-wine-11.18.tar.xz`
 
 ## Important Notes

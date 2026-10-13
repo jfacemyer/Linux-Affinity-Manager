@@ -1,5 +1,16 @@
 # Changelog
 
+## [2026-10-13] - Wine 11.19-r7
+
+### Changed
+- **The 11.19 choice installs [`11.19-r7`](https://github.com/jfacemyer/Affinity-Wine-Builder/releases/tag/11.19-r7)**, pinned by SHA-256 like r6. It fixes:
+  - **Dragging files from Wayland applications onto the canvas:** drops from Dolphin on Plasma were refused or canceled, and could crash Affinity with "Unrecoverable system error".
+  - **Copy and paste between documents:** the paste sometimes did nothing until a second copy. The clipboard briefly had no owner during a copy, and Klipper restored its previous entry.
+  - **Dropping a file on the toolbar:** after the drag had passed over the canvas, the file opened only once focus moved to another window.
+  - The OpenCL bridge work and wined3d fixes from the 11.18 set, sign-in metadata, and much faster reads in Affinity's PDF importer.
+
+---
+
 ## [2026-10-13] - Pinned Wine builds, merged upstream
 
 ### Changed

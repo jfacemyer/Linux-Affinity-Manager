@@ -472,7 +472,7 @@ WINE_11_18_SHA256 = "c325bf804407abcf8070d02066b5be00680b0339e796a6583b4a1d2dae9
 # had, and nothing noticed. A tarball that is not this one is refused rather
 # than installed. Rebuild, republish under a new tag, and update the URL and
 # this hash together.
-WINE_11_19_SHA256 = "ae7f2049656b1343982975a5383cf8146d29193c8005c53d48d76a8c179a4ec8"
+WINE_11_19_SHA256 = "2e94d07e6a8e3436d5bcafbe8d8bec4a1b7f7ff6ef9e6a746f44f82409078963"
 
 # The plugin loader. Upstream's latest release (v0.3.0, April) predates Canva
 # sign-in, the command-line open fix and the runtime Direct2D patches, all of
@@ -14241,7 +14241,7 @@ class AffinityInstallerGUI(QMainWindow):
         else:  # Default to 11.19
             return {
                 # POC SOURCE -- the fork's release of the 11.19 patch set.
-                "wine_url": "https://github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.19-r6/ElementalWarrior-wine-11.19.tar.xz",
+                "wine_url": "https://github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.19-r7/ElementalWarrior-wine-11.19.tar.xz",
                 "wine_file_name": "ElementalWarrior-wine-11.19.tar.xz",
                 "wine_sha256": WINE_11_19_SHA256,
                 "wine_dir_name": "ElementalWarriorWine",
