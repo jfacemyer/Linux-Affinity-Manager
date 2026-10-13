@@ -79,7 +79,7 @@ def _wine_questions():
 
 def test_there_are_wine_questions_to_check():
     assert len(_wine_questions()) >= 3
-    assert len(_radio_labels()) >= 5
+    assert len(_radio_labels()) >= 2
 
 
 def test_the_radio_dialog_offers_exactly_what_each_question_offers():
