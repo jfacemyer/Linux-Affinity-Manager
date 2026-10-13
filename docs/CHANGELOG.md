@@ -4,7 +4,7 @@
 
 ### Changed
 - **The 11.19 and 11.18 choices install pinned builds**: 11.19 is [`11.19-r6`](https://github.com/jfacemyer/Affinity-Wine-Builder/releases/tag/11.19-r6) (adds pen pressure through WinTab and correct window coordinates across DPI awareness) and 11.18 is [`11.18-r1`](https://github.com/jfacemyer/Affinity-Wine-Builder/releases/tag/11.18-r1). Each download is checked against a SHA-256 in `AffinityLinuxInstaller.py` and refused if it differs.
-- Merged the upstream changes of 2026-10-10: the two-version picker, WebView2 kept on Windows 11, and the updated documentation.
+- Merged the upstream changes of 2026-10-10: the two-version picker, the WebView2 runtime installed as Windows 11, and the updated documentation. `msedgewebview2.exe` itself stays set to Windows 7: on Wine 11.19 with runtime 142 its processes all stay up as Windows 7, while as Windows 11 its GPU processes die and the Help window stays empty.
 - WinMetadata is still set up by asking the Wine build whether it implements `RoResolveNamespace`, not by version number.
 
 ---

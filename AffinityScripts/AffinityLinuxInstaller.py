@@ -15434,16 +15434,18 @@ Would you like to continue with {distro_name} anyway?"""
         self.run_command([str(regedit), str(disable_edge_update_reg)], check=False, env=env)
         disable_edge_update_reg.unlink()
 
-        # msedgewebview2.exe refuses to run as Windows 7
-        # ("Microsoft Edge requires Windows 10 or higher"), so pin it to
-        # Windows 11 explicitly.
-        self.log("Setting msedgewebview2.exe to Windows 11 compatibility...", "info")
+        # The runtime installs as Windows 11, but msedgewebview2.exe runs as
+        # Windows 7: as Windows 11 the WebView2 GPU process fails at startup
+        # and the Affinity v3 Help window stays empty (Wine 10.10; on 11.19
+        # with runtime 142 the GPU processes still die as Windows 11 and all
+        # stay up as Windows 7).
+        self.log("Setting msedgewebview2.exe to Windows 7 compatibility...", "info")
         self.run_command(
             [
                 str(wine), "reg", "add",
                 "HKEY_CURRENT_USER\\Software\\Wine\\AppDefaults\\msedgewebview2.exe",
                 "/v", "Version",
-                "/d", "win11",
+                "/d", "win7",
                 "/f",
             ],
             check=False,
