@@ -25,6 +25,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from PyQt6 import sip
 from PyQt6.QtCore import Qt, QThread, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QBrush, QColor, QDesktopServices
 from PyQt6.QtWidgets import (
@@ -71,6 +72,7 @@ from affinity_manager import (
     liveness,
     prefsseed,
     removal,
+    renaming,
     snapshots,
     oplock,
     prefixlog,
@@ -364,7 +366,8 @@ class ActivityBanner(QFrame):
 
         self._closed_timer = QTimer(self)
         self._closed_timer.setSingleShot(True)
-        self._closed_timer.timeout.connect(lambda: self._paint())
+        self._closed_timer.timeout.connect(
+            lambda: None if self._gone_away() else self._paint())
         self._timer = QTimer(self)
         self._timer.setInterval(self.INTERVAL_MS)
         self._timer.timeout.connect(self.check)
@@ -397,6 +400,26 @@ class ActivityBanner(QFrame):
     # -- polling -------------------------------------------------------------
 
     def check(self):
+        # A slot: an exception escaping it makes PyQt abort the whole manager.
+        # That happened (2026-10-14, after a settings copy): this ran with its
+        # _closed_timer already deleted. Whatever the cause, a banner whose
+        # parts are gone stops checking instead of taking the manager with it.
+        if self._gone_away():
+            return
+        try:
+            self._check()
+        except RuntimeError:
+            if not self._gone_away():
+                raise
+
+    def _gone_away(self) -> bool:
+        if not any(sip.isdeleted(o) for o in (self, self._timer, self._closed_timer)):
+            return False
+        if not sip.isdeleted(self._timer):
+            self._timer.stop()
+        return True
+
+    def _check(self):
         try:
             now = (liveness.scan(self.prefix) if self.prefix
                    else liveness.Activity(""))
@@ -3421,6 +3444,10 @@ class ManagerWindow(QMainWindow):
             "files -- take one before anything risky")
         self.protect_button = self._action(
             "Protect", self.toggle_protection, "Mark this prefix as not deletable")
+        self.rename_button = self._action(
+            "Rename / Move…", self.rename_selected,
+            "Change the prefix's name, and optionally move its folder to match. "
+            "Menu entries, launchers, the log, snapshots and the Default follow")
         self.forget_button = self._action(
             "Stop managing", self.forget_selected,
             "Remove from the list. The directory is left alone")
@@ -3473,8 +3500,8 @@ class ManagerWindow(QMainWindow):
              (self.snapshots_button, COPY_CAPTIONS["snapshot"])]))
         left_layout.addWidget(self._button_card(
             "Maintenance",
-            [self.clean_button, self.fonts_button, self.protect_button,
-             self.forget_button, self.delete_button]))
+            [self.clean_button, self.fonts_button, self.rename_button,
+             self.protect_button, self.forget_button, self.delete_button]))
         left_layout.addWidget(self._button_card("View", [self.refresh_button]))
         left_layout.addStretch(1)
 
@@ -4107,6 +4134,7 @@ class ManagerWindow(QMainWindow):
             self.copy_settings_button,
             self.backup_button,
             self.protect_button,
+            self.rename_button,
             self.delete_button,
             # Clone and Clean act on the selection too, and refresh() rebuilds
             # the tree without restoring it -- so these were clickable with
@@ -4493,6 +4521,61 @@ class ManagerWindow(QMainWindow):
             QMessageBox.warning(self, "Menu entry", str(exc))
             return
         self.refresh()
+
+    def rename_selected(self):
+        entry = self.selected_entry()
+        if not entry:
+            return
+        old = entry["name"]
+        held = self.lock.held
+        if held is not None:
+            # The running operation, its Setup page and its log are all keyed by
+            # name and path; changing either under it would split one job in two.
+            QMessageBox.information(
+                self, "Not now",
+                f"{held.operation} is running in {held.prefix}. Rename or move "
+                f"{old} when it has finished.")
+            return
+        dialog = RenameMoveDialog(self, self.reg, entry)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        new, dest = dialog.result()
+        if dest is not None and probe.running_pids(entry["path"]):
+            QMessageBox.warning(self, "Affinity is running",
+                                f"Close Affinity in {old} first: its folder cannot "
+                                "be moved while it runs.")
+            return
+        notes = []
+        try:
+            if new != old:
+                notes += renaming.rename(self.reg, old, new)
+            if dest is not None:
+                notes += renaming.move(self.reg, new, dest)
+        except (registry.InvalidName, registry.DuplicateName) as exc:
+            QMessageBox.warning(self, "Cannot use that name", str(exc))
+            return
+        except (renaming.CannotMove, OSError) as exc:
+            QMessageBox.warning(
+                self, "Not moved",
+                (f"{old} is now {new}, but its folder was not moved:\n\n{exc}"
+                 if new != old else f"The folder was not moved:\n\n{exc}"))
+        page = self._setup_pages.pop(old, None)
+        if page is not None:
+            # Built for the old name and path; the next Configure builds afresh.
+            if self.stack.currentWidget() is page:
+                self.stack.setCurrentWidget(self.list_page)
+            self.stack.removeWidget(page)
+            page.dispose()
+            page.deleteLater()
+        moved = self.reg.by_name(new)["path"] if self.reg.by_name(new) else entry["path"]
+        what = ([f"renamed from {old}"] if new != old else []) + \
+               ([f"moved to {moved}"] if moved != entry["path"] else [])
+        if what:
+            prefixlog.write(new, "Prefix " + " and ".join(what))
+            self.status.setText(f"{new}: " + " and ".join(what) + ".")
+        self.refresh()
+        if notes:
+            QMessageBox.information(self, "Rename / Move", "\n".join(notes))
 
     def toggle_protection(self):
         entry = self.selected_entry()
@@ -4889,6 +4972,94 @@ class ManagerWindow(QMainWindow):
         self.refresh()
 
 
+class RenameMoveDialog(SizedDialog):
+    """A new name for a prefix, and whether its folder follows.
+
+    Two separate things, said separately, because they differ in what they
+    touch. The name is the manager's own: the list, the menu entries it wrote,
+    the log and snapshots. The folder is the path every launcher, Wine file
+    association and backup names -- moving it rewrites those (each kept beside
+    itself as .before-move-*), and needs Affinity closed."""
+
+    FIT_MIN_WIDTH = 560
+
+    def __init__(self, parent, reg, entry):
+        super().__init__(parent)
+        self.setWindowTitle("Rename / Move prefix")
+        self.setModal(True)
+        ui.apply(self)
+        self.reg = reg
+        self.entry = entry
+        self.path = Path(entry["path"]).expanduser()
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("<b>Name</b>"))
+        self.field = QLineEdit(entry["name"])
+        layout.addWidget(self.field)
+        note = QLabel(
+            "The name is what this list, the menu entries and the log use. "
+            "Renaming changes those, the prefix's snapshots, and the Default's "
+            "entries if this is the Default. Nothing in the prefix changes.")
+        note.setWordWrap(True)
+        note.setObjectName("descriptionLabel")
+        layout.addWidget(note)
+        layout.addSpacing(8)
+        self.move_box = QCheckBox("Also move the folder to match the name")
+        layout.addWidget(self.move_box)
+        self.move_note = QLabel("")
+        self.move_note.setWordWrap(True)
+        self.move_note.setObjectName("descriptionLabel")
+        layout.addWidget(self.move_note)
+        self.problem = QLabel("")
+        self.problem.setWordWrap(True)
+        layout.addWidget(self.problem)
+        self.buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        layout.addWidget(self.buttons)
+        self.field.textChanged.connect(self._update)
+        self.move_box.toggled.connect(self._update)
+        self._update()
+
+    def destination(self) -> Path:
+        return self.path.parent / registry.dir_name(self.field.text().strip() or "x")
+
+    def _update(self):
+        name = self.field.text().strip()
+        dest = self.destination()
+        problem = ""
+        try:
+            registry.validate_name(name)
+        except registry.InvalidName as exc:
+            problem = str(exc)
+        else:
+            clash = self.reg.by_name(name)
+            if clash is not None and clash is not self.entry:
+                problem = f"A prefix named {name!r} is already managed."
+        same_place = dest == self.path
+        self.move_box.setEnabled(not same_place)
+        if same_place:
+            self.move_note.setText(f"The folder already matches: {self.path}")
+        else:
+            self.move_note.setText(
+                f"{self.path}\n→ {dest}\n\nA rename on the same disk: instant, "
+                "nothing is copied. Launchers and menu entries that name the old "
+                "folder are rewritten, each kept beside itself as .before-move-*. "
+                "Affinity must be closed in it.")
+            if self.move_box.isChecked() and dest.exists():
+                problem = problem or f"{dest} already exists."
+        self.problem.setText(f"<span style='color:#E5484D'>{html.escape(problem)}</span>"
+                             if problem else "")
+        unchanged = name == self.entry["name"] and not (self.move_box.isChecked() and not same_place)
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(
+            not problem and not unchanged)
+
+    def result(self):
+        """(new name, destination folder or None)."""
+        move = self.move_box.isChecked() and self.move_box.isEnabled()
+        return self.field.text().strip(), (self.destination() if move else None)
+
+
 def _ask_name(parent, suggested, *, title="Name this prefix", label="Name"):
     dialog = QDialog(parent)
     dialog.setWindowTitle(title)
@@ -4912,7 +5083,24 @@ def _ask_name(parent, suggested, *, title="Name this prefix", label="Name"):
     return field.text().strip(), accepted
 
 
+def _log_unhandled(kind, value, tb):
+    """PyQt aborts the process when an exception escapes a slot and
+    sys.excepthook is the default one, so one bug in a timer callback took the
+    whole manager down, mid-install. Log it instead and keep going."""
+    import traceback
+    text = "".join(traceback.format_exception(kind, value, tb))
+    print(text, file=sys.stderr)
+    try:
+        log = registry.manager_dir() / "logs" / "manager-errors.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with log.open("a", encoding="utf-8") as f:
+            f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {__version__}\n{text}\n")
+    except OSError:
+        pass
+
+
 def main():
+    sys.excepthook = _log_unhandled
     app = QApplication(sys.argv)
     # The stylesheet only -- ui.apply() also sets WA_StyledBackground, which is
     # a widget attribute and not one a QApplication accepts. This is here so the

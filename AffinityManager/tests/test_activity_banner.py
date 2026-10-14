@@ -81,6 +81,18 @@ def test_closing_affinity_is_noticed_without_reopening_anything(world):
     assert b.isHidden(), "the green confirmation should go away"
 
 
+def test_a_banner_whose_timer_is_gone_stops_instead_of_raising(world):
+    """The crash of 2026-10-14: check ran with _closed_timer already deleted,
+    the RuntimeError escaped the slot, and PyQt aborted the manager."""
+    from PyQt6 import sip
+    world["now"] = activity(AFFINITY)
+    b, _ = banner(world)
+    world["now"] = activity()
+    sip.delete(b._closed_timer)
+    b.check()                                   # must not raise
+    assert not b._timer.isActive(), "a banner missing its parts stops polling"
+
+
 def test_it_polls(world):
     b, _ = banner(world)
     assert b._timer.isActive() and b._timer.interval() <= 2000
