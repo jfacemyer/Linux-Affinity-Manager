@@ -16576,6 +16576,8 @@ Would you like to continue with {distro_name} anyway?"""
                 if self.affinity_v3_exe_path().exists():
                     self.install_windowsruntime_facades()
                     self.create_affinity_url_handler()
+                    # the update replaced the assemblies the old native images were made from
+                    self.precompile_affinity()
 
             self.update_progress(1.0)
             self.update_progress_text("Update complete!")
@@ -16866,6 +16868,7 @@ Would you like to continue with {distro_name} anyway?"""
 
             if app_name == "Add" and self.affinity_v3_exe_path().exists():
                 self.install_windowsruntime_facades()
+                self.precompile_affinity()
 
             # Configure OpenCL (if enabled)
             if self.is_opencl_enabled():

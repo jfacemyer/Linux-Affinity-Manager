@@ -705,3 +705,10 @@ def test_the_advice_names_the_package_for_this_gpu_and_distro(ali, monkeypatch):
     assert "intel-compute-runtime" in h.opencl_advice()
     monkeypatch.setattr(ali, "opencl_drivers", lambda *a: ["intel"])
     assert h.opencl_advice() is None
+
+
+@pytest.mark.parametrize("method", ["run_installation", "run_update"])
+def test_installing_or_updating_affinity_compiles_native_images(ali, method):
+    # The manager installs through run_installation; an update replaces the assemblies the
+    # old images were made from. Both must compile, not only the "Add" path.
+    assert "self.precompile_affinity(" in inspect.getsource(getattr(ali.AffinityInstallerGUI, method))
