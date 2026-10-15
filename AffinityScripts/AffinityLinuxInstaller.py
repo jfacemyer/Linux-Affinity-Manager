@@ -9773,12 +9773,10 @@ class AffinityInstallerGUI(QMainWindow):
                 "Without it, Affinity falls back to slow software rendering and "
                 "reports an unsupported graphics card.\n\n"
                 "Recommended: Yes.\n\n"
-                "About OpenCL: on Wine 11.11 and newer, Affinity's OpenCL "
-                "acceleration is kept switched off whichever you choose, because "
-                "turning it on has made Affinity hang at startup. That has been "
-                "seen on Intel Arc; other cards have not been tested, so it is "
-                "off for all of them to be safe. On an older Wine build, Yes "
-                "here also lets Affinity use OpenCL.\n\n"
+                "About OpenCL: with Yes, Affinity can also use OpenCL "
+                "acceleration on the recommended Wine 11.19. On Wine 11.11 to "
+                "11.18 OpenCL stays switched off whichever you choose, because "
+                "there it made Affinity hang at startup; 11.19 carries the fix.\n\n"
                 "You can change this later.",
                 ["Yes", "No"],
             )
@@ -12809,7 +12807,10 @@ class AffinityInstallerGUI(QMainWindow):
             self.log(f"Could not check the Wine download: {e}", "error")
             return False
         if got == want:
-            self.log(f"{config['wine_display_name']}: checksum matches", "success")
+            # Name the pinned release, so a log says which build was installed.
+            release = re.search(r"/releases/download/([^/]+)/", config.get("wine_url", ""))
+            pinned = f" (release {release.group(1)})" if release else ""
+            self.log(f"{config['wine_display_name']}{pinned}: checksum matches", "success")
             return True
         self.log(
             f"The downloaded {config['wine_display_name']} is not the build this "
@@ -15455,6 +15456,30 @@ Would you like to continue with {distro_name} anyway?"""
 
         return True
 
+    def ensure_webview2_runtime(self):
+        """Install the WebView2 Runtime with Affinity v3, unless it is already there.
+
+        Affinity v3's Help is a WebView2 page: without the runtime Help stays
+        blank and Affinity logs "Couldn't find a compatible Webview2 Runtime".
+        It used to come only from its own button, so every install made by
+        One-Click Full Setup or the manager had a blank Help. Failing here is
+        not an install failure: the button can still add it later."""
+        if self.check_webview2_installed():
+            self.configure_webview2_runtime()
+            return True
+        self.update_progress_text("Installing WebView2 for Affinity's Help...")
+        try:
+            if self._install_webview2_runtime_thread():
+                return True
+        except Exception as e:
+            self.log(f"WebView2 Runtime was not installed: {e}", "warning")
+        self.log(
+            "Affinity's Help needs the WebView2 Runtime; add it later with "
+            "'WebView2 Runtime (v3)'.",
+            "warning",
+        )
+        return False
+
     def install_webview2_runtime(self):
         """Install Microsoft Edge WebView2 Runtime for Affinity v3 (Unified)"""
         self.log(
@@ -16159,6 +16184,7 @@ Would you like to continue with {distro_name} anyway?"""
                 self.install_windowsruntime_facades()
                 self.create_affinity_url_handler()
                 self.precompile_affinity()
+                self.ensure_webview2_runtime()
 
             # Set up wintypes.dll and Wine overrides for Affinity apps (v2 and v3) - only for legacy Wine (< 11.18)
             if app_name in ["Photo", "Designer", "Publisher", "Add"]:
@@ -16914,6 +16940,7 @@ Would you like to continue with {distro_name} anyway?"""
                 # Affinity dies in clr.dll at every start.
                 if self.affinity_v3_exe_path().exists():
                     self.precompile_affinity()
+                    self.ensure_webview2_runtime()
 
             # Install the file-manager handler before the desktop entry, which
             # only claims the document types once the handler is in place.

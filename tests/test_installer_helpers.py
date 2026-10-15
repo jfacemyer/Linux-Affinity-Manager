@@ -717,3 +717,32 @@ def test_installing_or_updating_affinity_compiles_native_images(ali, method):
     # images compiled before it are stale yet still loaded: Affinity then crashed in
     # clr.dll at every start (fresh manager install, 2026-10-15). Compile after patching.
     assert source.index("self.patch_affinity_dll(") < source.index("self.precompile_affinity(")
+
+
+@pytest.mark.parametrize("method", ["run_installation", "run_custom_installation"])
+def test_installing_affinity_installs_the_webview2_runtime(ali, method):
+    # Help is a WebView2 page. It came only from its own button, so installs made by
+    # One-Click Full Setup and the manager had a blank Help (r8 fresh install, 2026-10-15).
+    assert "self.ensure_webview2_runtime(" in inspect.getsource(getattr(ali.AffinityInstallerGUI, method))
+
+
+def test_webview2_is_configured_not_reinstalled_when_present(ali, monkeypatch):
+    gui = ali.AffinityInstallerGUI.__new__(ali.AffinityInstallerGUI)
+    calls = []
+    monkeypatch.setattr(gui, "check_webview2_installed", lambda: True, raising=False)
+    monkeypatch.setattr(gui, "configure_webview2_runtime", lambda *a: calls.append("configure"), raising=False)
+    monkeypatch.setattr(gui, "_install_webview2_runtime_thread", lambda: calls.append("install"), raising=False)
+    monkeypatch.setattr(gui, "update_progress_text", lambda *a: None, raising=False)
+    assert gui.ensure_webview2_runtime() is True
+    assert calls == ["configure"]
+
+
+def test_a_failed_webview2_install_does_not_fail_the_install(ali, monkeypatch):
+    gui = ali.AffinityInstallerGUI.__new__(ali.AffinityInstallerGUI)
+    logged = []
+    monkeypatch.setattr(gui, "check_webview2_installed", lambda: False, raising=False)
+    monkeypatch.setattr(gui, "_install_webview2_runtime_thread", lambda: False, raising=False)
+    monkeypatch.setattr(gui, "update_progress_text", lambda *a: None, raising=False)
+    monkeypatch.setattr(gui, "log", lambda msg, level="info": logged.append(level), raising=False)
+    assert gui.ensure_webview2_runtime() is False
+    assert "warning" in logged
