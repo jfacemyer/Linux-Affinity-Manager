@@ -711,4 +711,9 @@ def test_the_advice_names_the_package_for_this_gpu_and_distro(ali, monkeypatch):
 def test_installing_or_updating_affinity_compiles_native_images(ali, method):
     # The manager installs through run_installation; an update replaces the assemblies the
     # old images were made from. Both must compile, not only the "Add" path.
-    assert "self.precompile_affinity(" in inspect.getsource(getattr(ali.AffinityInstallerGUI, method))
+    source = inspect.getsource(getattr(ali.AffinityInstallerGUI, method))
+    assert "self.precompile_affinity(" in source
+    # The settings patch rewrites Serif.Affinity.dll without changing its identity, so
+    # images compiled before it are stale yet still loaded: Affinity then crashed in
+    # clr.dll at every start (fresh manager install, 2026-10-15). Compile after patching.
+    assert source.index("self.patch_affinity_dll(") < source.index("self.precompile_affinity(")

@@ -16868,7 +16868,6 @@ Would you like to continue with {distro_name} anyway?"""
 
             if app_name == "Add" and self.affinity_v3_exe_path().exists():
                 self.install_windowsruntime_facades()
-                self.precompile_affinity()
 
             # Configure OpenCL (if enabled)
             if self.is_opencl_enabled():
@@ -16909,6 +16908,12 @@ Would you like to continue with {distro_name} anyway?"""
                 self.update_progress_text("Patching DLL for settings fix...")
                 self.update_progress(0.85)
                 self.patch_affinity_dll(app_name)
+
+                # Only now: the patch rewrites Serif.Affinity.dll and keeps its
+                # identity, so images compiled before it are loaded anyway and
+                # Affinity dies in clr.dll at every start.
+                if self.affinity_v3_exe_path().exists():
+                    self.precompile_affinity()
 
             # Install the file-manager handler before the desktop entry, which
             # only claims the document types once the handler is in place.
