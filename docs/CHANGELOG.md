@@ -1,5 +1,19 @@
 # Changelog
 
+## [2026-10-15] - Wine 11.19-r8, Help works
+
+### Changed
+- **The 11.19 choice installs [`11.19-r8`](https://github.com/jfacemyer/Affinity-Wine-Builder/releases/tag/11.19-r8)**, pinned by SHA-256 like r7. It fixes:
+  - **Help:** the Help panel shows its pages on every opening, floating or docked, and they stay while you work in Affinity. Before, it was blank from the second opening, went blank whenever Affinity redrew its panels, and showed black boxes when the pointer moved over a page.
+  - **Updating Wine in an existing install** no longer shows "This application could not be started" two to four times.
+  - **Faster drawing of selections and node edits** (about 7% and 15% more frames), and less waiting in Affinity's thread pool.
+  - **Ctrl and Shift drops** from the file manager reach Affinity as such.
+- **Installing Affinity v3 also installs the WebView2 runtime**, so Help works without the separate button. If that install fails, the installer says so and points to the button.
+- .NET native images are compiled after the settings patch, not before: a fresh install could otherwise crash at the first start.
+- The OpenCL prompt describes the current state, and the checksum check in the log names the Wine release it verified.
+
+---
+
 ## [2026-10-13] - Wine 11.19-r7
 
 ### Changed
