@@ -3937,6 +3937,11 @@ class ManagerWindow(QMainWindow):
             # ended without reporting a result is exactly the case where the
             # prefix needs looking at.
             note = "%s stopped without reporting a result." % swept.label
+            if swept.prefix in getattr(self, "_setup_pages", {}):
+                # The hosted installer's flag dropping is how its work normally
+                # ends -- it reports its own results in its log -- and it may be
+                # asking its next question right now. Not a failure to report.
+                note = "%s finished." % swept.label
             if getattr(self, "_busy_prefix", None) == swept.prefix:
                 self._busy_done(note)
             else:
