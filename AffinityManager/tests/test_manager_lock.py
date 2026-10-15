@@ -443,3 +443,18 @@ def test_a_setup_ended_by_the_watchdog_still_offers_the_settings_copy(window, mo
     monkeypatch.setattr(w.lock, "sweep", lambda: w.lock.held)
     w._lock_tick()
     assert settled == ["Managed"]
+
+
+def test_a_setup_ended_by_the_watchdog_is_reported_as_finished(window, monkeypatch):
+    """The usual end of a hosted installer step, often with the installer's next
+    question already on screen: "stopped without reporting a result" read as a failure."""
+    w, _, prefixlog = window
+    w.setup_settled = lambda *_: None
+    w._setup_pages = {"Managed": types.SimpleNamespace(name="Managed", set_actions_enabled=lambda *_: None)}
+    running = {"yes": True}
+    w._busy_start("Managed — Setup", 100, prefix="Managed", operation="Setup", alive=lambda: running["yes"])
+    running["yes"] = False
+    monkeypatch.setattr(w.lock, "sweep", lambda: w.lock.held)
+    w._lock_tick()
+    assert "without reporting" not in prefixlog.tail("Managed")
+    assert "finished" in prefixlog.tail("Managed")
