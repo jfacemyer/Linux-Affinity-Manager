@@ -472,7 +472,7 @@ WINE_11_18_SHA256 = "c325bf804407abcf8070d02066b5be00680b0339e796a6583b4a1d2dae9
 # had, and nothing noticed. A tarball that is not this one is refused rather
 # than installed. Rebuild, republish under a new tag, and update the URL and
 # this hash together.
-WINE_11_19_SHA256 = "0f93d1b397d43ba034cb351c54d67b80e264cafff56f6f94449b41cac9881300"
+WINE_11_19_SHA256 = "79c21583755a4b168394fc984332d1235e48768b9ce1c4ed60cd49e78da0eaa9"
 
 # The plugin loader. Upstream's latest release (v0.3.0, April) predates Canva
 # sign-in, the command-line open fix and the runtime Direct2D patches, all of
@@ -14497,6 +14497,9 @@ class AffinityInstallerGUI(QMainWindow):
             # Mark this component as complete
             self.update_progress(base_progress + component_progress_range)
 
+        if not self.cancel_event.is_set():
+            self.ensure_vulkan_renderer(env)
+
         # Set Windows version to 11
         self.log("Setting Windows version to 11...", "info")
         # A leftover process would make winecfg queue behind it (or talk to a
@@ -14594,7 +14597,7 @@ class AffinityInstallerGUI(QMainWindow):
         else:  # Default to 11.19
             return {
                 # POC SOURCE -- the fork's release of the 11.19 patch set.
-                "wine_url": "https://github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.19-r8/ElementalWarrior-wine-11.19.tar.xz",
+                "wine_url": "https://github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.19-r9/ElementalWarrior-wine-11.19.tar.xz",
                 "wine_file_name": "ElementalWarrior-wine-11.19.tar.xz",
                 "wine_sha256": WINE_11_19_SHA256,
                 "wine_dir_name": "ElementalWarriorWine",
@@ -15451,6 +15454,8 @@ Would you like to continue with {distro_name} anyway?"""
             if self.check_cancelled():
                 return False
 
+            self.ensure_vulkan_renderer(env)
+
             self.log("Setting Windows version to 11...", "info")
             self.stop_prefix_wine_processes(env, reason="setting Windows version")
             self.run_command([str(wine_cfg), "-v", "win11"], check=False, env=env)
@@ -15573,6 +15578,32 @@ Would you like to continue with {distro_name} anyway?"""
         except Exception:
             pass
         return False
+
+    def ensure_vulkan_renderer(self, env):
+        """Set Wine's renderer to Vulkan again if the prefix has no renderer setting.
+
+        Without the setting Wine draws with OpenGL, where Affinity's popups have
+        come up black. The setting has been lost when Wine was stopped before
+        writing the registry to disk. A renderer that was chosen (OpenGL) is
+        kept. Returns True when the prefix has a renderer setting."""
+        key = r"Software\Wine\Direct3D"
+        # The registry files are read directly: stop Wine so they are current.
+        self.stop_prefix_wine_processes(env, reason="checking the renderer setting")
+        if self._read_wine_reg_value("HKCU", key, "renderer") is not None:
+            return True
+        self.log("Wine's renderer setting is missing; setting it to Vulkan again", "warning")
+        self.run_command(
+            [str(self.get_wine_path("wine")), "reg", "add", "HKCU\\" + key,
+             "/v", "renderer", "/d", "vulkan", "/f"],
+            check=False, env=env, timeout=120,
+        )
+        self.run_command([str(self.get_wine_path("wineserver")), "-w"],
+                         check=False, env=env, timeout=60)
+        if self._read_wine_reg_value("HKCU", key, "renderer") is None:
+            self.log("Could not set Wine's renderer to Vulkan", "error")
+            return False
+        self.log("Wine's renderer is set to Vulkan", "success")
+        return True
 
     def _read_wine_reg_value(self, hive, key_path, value_name):
         """Read a registry value from the prefix's reg files (system.reg/user.reg).

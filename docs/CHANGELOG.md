@@ -1,5 +1,19 @@
 # Changelog
 
+## [2026-10-16] - Wine 11.19-r9, OpenGL
+
+### Changed
+- **The 11.19 choice installs [`11.19-r9`](https://github.com/jfacemyer/Affinity-Wine-Builder/releases/tag/11.19-r9)**, pinned by SHA-256 like r8. It fixes Affinity on Wine's OpenGL renderer (the "OpenGL" renderer choice, or a prefix without a renderer setting):
+  - **Tool flyouts and tooltips** were black boxes.
+  - **The floating Help panel** came back from a studio switch with an empty white frame.
+  
+  Nothing changes on the Vulkan renderer.
+
+### Fixed
+- **A prefix that lost its renderer setting gets Vulkan back.** The installer checks for the setting after the Wine components and sets it again if it is missing, and the manager does the same for each of its prefixes while nothing runs in it (noted in the prefix's log). A renderer that was chosen, such as OpenGL, is kept.
+
+---
+
 ## [2026-10-16] - Faster setup, WineFix wine-fixes-4
 
 ### Changed

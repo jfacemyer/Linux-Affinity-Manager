@@ -264,7 +264,7 @@ def test_release_downloads_follow_the_override(ali, monkeypatch):
     monkeypatch.setenv("AFFINITY_RELEASES_FROM", "https://git.example.org/someone/")
     config = ali.AffinityInstallerGUI._get_wine_version_config(None, "11.19")
     assert config["wine_url"] == (
-        "https://git.example.org/someone/Affinity-Wine-Builder/releases/download/11.19-r8/"
+        "https://git.example.org/someone/Affinity-Wine-Builder/releases/download/11.19-r9/"
         "ElementalWarrior-wine-11.19.tar.xz"
     )
     # The pin is the same: only the identical build installs from either host.
@@ -1022,3 +1022,41 @@ def test_the_clock_stops_after_the_last_end(clock):
     assert clock.logged and clock.logged[0].startswith("Finished in 0:00 (started ")
     clock._operation_clock_safe(False)          # a stray end changes nothing
     assert len(clock.logged) == 1
+
+
+# --------------------------------------------------------------------------- #
+# the renderer setting
+# --------------------------------------------------------------------------- #
+
+def _renderer_gui(ali, monkeypatch, tmp_path, user_reg):
+    gui = ali.AffinityInstallerGUI.__new__(ali.AffinityInstallerGUI)
+    gui.directory = str(tmp_path)
+    (tmp_path / "user.reg").write_text(user_reg)
+    calls = []
+
+    def run_command(command, check=True, env=None, timeout=None, **kw):
+        calls.append(list(command))
+        if "add" in command:
+            with open(tmp_path / "user.reg", "a") as f:
+                f.write('\n[Software\\\\Wine\\\\Direct3D] 1\n"renderer"="vulkan"\n')
+        return True, "", ""
+
+    monkeypatch.setattr(gui, "run_command", run_command, raising=False)
+    monkeypatch.setattr(gui, "stop_prefix_wine_processes", lambda *a, **k: True, raising=False)
+    monkeypatch.setattr(gui, "get_wine_path", lambda name: tmp_path / name, raising=False)
+    monkeypatch.setattr(gui, "log", lambda *a, **k: None, raising=False)
+    return gui, calls
+
+
+def test_a_missing_renderer_setting_is_set_to_vulkan_again(ali, monkeypatch, tmp_path):
+    gui, calls = _renderer_gui(ali, monkeypatch, tmp_path, "WINE REGISTRY Version 2\n")
+    assert gui.ensure_vulkan_renderer({}) is True
+    assert any("add" in c and "vulkan" in c for c in calls)
+    assert gui._read_wine_reg_value("HKCU", r"Software\Wine\Direct3D", "renderer") == "vulkan"
+
+
+def test_a_chosen_renderer_is_kept(ali, monkeypatch, tmp_path):
+    gui, calls = _renderer_gui(ali, monkeypatch, tmp_path,
+        'WINE REGISTRY Version 2\n\n[Software\\\\Wine\\\\Direct3D] 1\n"renderer"="gl"\n')
+    assert gui.ensure_vulkan_renderer({}) is True
+    assert calls == []
