@@ -444,3 +444,41 @@ def test_disposal_disconnects_the_progress_signals(hosting, qapp):
     installer.progress_text_signal.emit("still going")   # must reach nobody
     installer.progress_signal.emit(0.5)
     qapp.processEvents()
+
+
+# -- the closing message ------------------------------------------------------
+
+def test_the_closing_message_sends_a_non_default_prefix_to_the_manager(hosting, monkeypatch):
+    """Hosted, the install writes no menu entry, so "launch it from your
+    application menu" pointed at an entry that starts another prefix, or none."""
+    from affinity_manager import defaultentry
+    monkeypatch.setattr(defaultentry, "current", lambda: "Everyday")
+    text = page_for(hosting).installer.launch_instructions()
+    assert '"Scratch"' in text and "Launch" in text
+    assert "Make Default" in text and 'instead of "Everyday"' in text
+    assert "Add to menu" in text
+    assert "application menu starts it" not in text
+
+
+def test_the_closing_message_for_the_default_prefix_points_at_the_menu(hosting, monkeypatch):
+    from affinity_manager import defaultentry
+    monkeypatch.setattr(defaultentry, "current", lambda: "Scratch")
+    text = page_for(hosting).installer.launch_instructions()
+    assert "is the Default prefix" in text and "application menu starts it" in text
+    assert "Make Default" not in text
+
+
+def test_the_closing_message_without_any_default(hosting, monkeypatch):
+    from affinity_manager import defaultentry
+    monkeypatch.setattr(defaultentry, "current", lambda: None)
+    text = page_for(hosting).installer.launch_instructions()
+    assert "Make Default" in text and "instead of" not in text
+
+
+def test_the_closing_message_survives_an_unreadable_default(hosting, monkeypatch):
+    from affinity_manager import defaultentry
+
+    def broken():
+        raise OSError("unreadable")
+    monkeypatch.setattr(defaultentry, "current", broken)
+    assert "Make Default" in page_for(hosting).installer.launch_instructions()
