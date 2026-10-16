@@ -4591,6 +4591,14 @@ class AffinityInstallerGUI(QMainWindow):
             return True
         return False
 
+    def dialog_parent(self):
+        """The window this installer's dialogs belong to: its own, or the
+        manager's when it is hosted there. A dialog without a parent is a
+        window of its own, and on Wayland it can end up behind the main
+        window while it still blocks it (a finished install sat there with an
+        "Installation Complete" box nobody could see)."""
+        return self.window()
+
     def show_message(self, title, message, msg_type="info"):
         """Show message box (thread-safe via signal)"""
         self.show_message_signal.emit(title, message, msg_type)
@@ -4601,7 +4609,7 @@ class AffinityInstallerGUI(QMainWindow):
 
     def _show_message_safe(self, title, message, msg_type="info"):
         """Thread-safe message box handler (called from main thread)"""
-        msg_box = QMessageBox()
+        msg_box = QMessageBox(self.dialog_parent())
         msg_box.setWindowTitle(title)
         msg_box.setText(message)
         msg_box.setStyleSheet(self.get_messagebox_stylesheet())
@@ -4619,7 +4627,7 @@ class AffinityInstallerGUI(QMainWindow):
 
     def _request_sudo_password_safe(self):
         """Request sudo password from user (called from main thread)"""
-        dialog = QDialog()
+        dialog = QDialog(self.dialog_parent())
         dialog.setWindowTitle("Administrator Authentication Required")
         dialog.setModal(True)
         dialog.setWindowFlags(dialog.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
@@ -4908,7 +4916,7 @@ class AffinityInstallerGUI(QMainWindow):
 
     def _show_wine_version_dialog_safe(self):
         """Show professional Wine version selection dialog (called from main thread)"""
-        dialog = QDialog()
+        dialog = QDialog(self.dialog_parent())
         dialog.setWindowTitle("Choose Wine Version")
         dialog.setModal(True)
         dialog.setWindowFlags(dialog.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
@@ -5358,7 +5366,7 @@ class AffinityInstallerGUI(QMainWindow):
                 qbuttons |= QMessageBox.StandardButton.Cancel
 
         # Create message box and apply theme
-        msg_box = QMessageBox()
+        msg_box = QMessageBox(self.dialog_parent())
         msg_box.setWindowTitle(title)
         msg_box.setText(message)
         msg_box.setStandardButtons(qbuttons)
@@ -8289,7 +8297,7 @@ class AffinityInstallerGUI(QMainWindow):
             return
 
         # Create a custom dialog
-        dialog = QDialog()
+        dialog = QDialog(self.dialog_parent())
         dialog.setWindowTitle("Choose Graphics Backend for NVIDIA GPU")
         dialog.setModal(True)
         dialog.setWindowFlags(dialog.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
@@ -8905,7 +8913,7 @@ class AffinityInstallerGUI(QMainWindow):
                 pass
 
         # Create dialog for GPU selection (without parent to avoid threading issues)
-        dialog = QDialog()
+        dialog = QDialog(self.dialog_parent())
         dialog.setWindowTitle("GPU Selection for Affinity Applications")
         dialog.setModal(True)
         dialog.setWindowFlags(dialog.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
@@ -10308,7 +10316,7 @@ class AffinityInstallerGUI(QMainWindow):
 
         if reply == QMessageBox.StandardButton.Yes:
             # Show a dialog to select which app (without parent to avoid threading issues)
-            dialog = QDialog()
+            dialog = QDialog(self.dialog_parent())
             dialog.setWindowTitle("Select Affinity Application")
             dialog.setModal(True)
             dialog.setWindowFlags(
@@ -10511,7 +10519,7 @@ class AffinityInstallerGUI(QMainWindow):
             return
 
         # Ask user if they want to download or provide their own exe (without parent to avoid threading issues)
-        dialog = QDialog()
+        dialog = QDialog(self.dialog_parent())
         dialog.setWindowTitle(f"Install {display_name}")
         dialog.setModal(True)
         dialog.setWindowFlags(dialog.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
@@ -16495,12 +16503,12 @@ Would you like to continue with {distro_name} anyway?"""
                 }.get(app_name, app_name)
 
                 self.log(f"\n✓ {display_name} installation completed!", "success")
-                self.log("You can now launch it from your application menu.", "info")
+                how = self.launch_instructions()
+                self.log(how, "info")
 
                 self.show_message(
                     "Installation Complete",
-                    f"{display_name} has been successfully installed!\n\n"
-                    "You can launch it from your application menu.",
+                    f"{display_name} has been successfully installed!\n\n{how}",
                     "info",
                 )
             else:
@@ -17244,12 +17252,12 @@ Would you like to continue with {distro_name} anyway?"""
                 "Publisher": "Affinity Publisher",
             }.get(app_name, app_name)
             self.log(f"\n✓ {display_name} installation completed!", "success")
-            self.log("You can now launch it from your application menu.", "info")
+            how = self.launch_instructions()
+            self.log(how, "info")
 
             self.show_message(
                 "Installation Complete",
-                f"{display_name} has been successfully installed!\n\n"
-                "You can launch it from your application menu.",
+                f"{display_name} has been successfully installed!\n\n{how}",
                 "info",
             )
         except Exception as e:
@@ -19412,6 +19420,14 @@ Would you like to continue with {distro_name} anyway?"""
                 continue
         return False
 
+    def launch_instructions(self):
+        """How to start what was just installed, for the closing message.
+
+        Run on its own, this installer writes the menu entry. A caller that
+        keeps its own entries (manages_host_entries) says where to start it
+        instead."""
+        return "You can now launch it from your application menu."
+
     def manages_host_entries(self):
         """Whether this installer writes the host's fixed-name entries.
 
@@ -20380,7 +20396,7 @@ Would you like to continue with {distro_name} anyway?"""
             return
 
         # Ask user to choose renderer (without parent to avoid threading issues)
-        dialog = QDialog()
+        dialog = QDialog(self.dialog_parent())
         dialog.setWindowTitle("Select Renderer")
         dialog.setModal(True)
         dialog.setWindowFlags(dialog.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
@@ -21540,7 +21556,7 @@ Would you like to continue with {distro_name} anyway?"""
             pass  # Use default if reading fails
 
         # Create dialog (without parent to avoid threading issues)
-        dialog = QDialog()
+        dialog = QDialog(self.dialog_parent())
         dialog.setWindowTitle("Set DPI Scaling")
         dialog.setModal(True)
         dialog.setWindowFlags(dialog.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
