@@ -16696,6 +16696,7 @@ Would you like to continue with {distro_name} anyway?"""
                     f"{display_name} has been successfully installed!\n\n{how}",
                     "info",
                 )
+                self.offer_after_install()
             else:
                 # For non-Affinity apps, just complete without desktop entry
                 display_name = app_name if app_name else "Application"
@@ -17445,6 +17446,7 @@ Would you like to continue with {distro_name} anyway?"""
                 f"{display_name} has been successfully installed!\n\n{how}",
                 "info",
             )
+            self.offer_after_install()
         except Exception as e:
             self.log(f"Installation error: {e}", "error")
             self.show_message("Installation Error", f"An error occurred:\n{e}", "error")
@@ -19604,6 +19606,12 @@ Would you like to continue with {distro_name} anyway?"""
             except OSError:
                 continue
         return False
+
+    def offer_after_install(self):
+        """Called after the closing message of an Affinity install. Nothing to
+        offer when the installer runs by itself: it writes the menu entry for
+        the prefix it installed. The manager offers to make the new prefix its
+        Default, the one the menu and double-clicked documents start."""
 
     def launch_instructions(self):
         """How to start what was just installed, for the closing message.
