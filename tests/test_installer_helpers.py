@@ -842,7 +842,7 @@ def _fake_font_env(tmp_path, monkeypatch, ali):
     seen = tmp_path / "seen.reg"
     wine = bin_dir / "wine"
     wine.write_text(f'#!/bin/sh\necho "$@" >> "{tmp_path}/wine-args"\n'
-                    f'cp "$WINEPREFIX/drive_c/windows/Temp/$(basename "$(echo "$3" | tr "\\\\\\\\" /)")" "{seen}"\n')
+                    f'cp "$WINEPREFIX/drive_c/windows/temp/$(basename "$(echo "$3" | tr "\\\\\\\\" /)")" "{seen}"\n')
     wine.chmod(0o755)
     prefix = tmp_path / "prefix"
     prefix.mkdir()
@@ -868,7 +868,7 @@ def test_install_font_verb_copies_registers_and_logs(ali, tmp_path, monkeypatch)
     assert reg.count('"Fake Sans Bold (TrueType)"="fakebd.ttf"') == 3
     assert (tmp_path / "wine-args").read_text().count("regedit") == 1, "one Wine start"
     assert (prefix / "winetricks.log").read_text().splitlines() == ["fakefonts"]
-    assert not list((prefix / "drive_c" / "windows" / "Temp").glob("*.reg"))
+    assert not list((prefix / "drive_c" / "windows" / "temp").glob("*.reg"))
 
 
 def test_install_font_verb_refuses_a_bad_download(ali, tmp_path, monkeypatch):
@@ -1060,3 +1060,23 @@ def test_a_chosen_renderer_is_kept(ali, monkeypatch, tmp_path):
         'WINE REGISTRY Version 2\n\n[Software\\\\Wine\\\\Direct3D] 1\n"renderer"="gl"\n')
     assert gui.ensure_vulkan_renderer({}) is True
     assert calls == []
+
+
+def test_prefix_temp_dir_folds_a_capitalised_copy_into_wines_temp(ali, tmp_path):
+    """A second "Temp" beside Wine's "temp" is what Wine opens for
+    C:\\windows\\Temp, so winetricks' .reg files (written into "temp") were
+    not found and its registry changes were lost."""
+    windows = tmp_path / "drive_c" / "windows"
+    (windows / "temp" / "_vcrun2022").mkdir(parents=True)
+    (windows / "Temp").mkdir()
+    (windows / "Temp" / "font-corefonts.reg").write_text("x")
+    (windows / "Temp" / "_vcrun2022").mkdir()
+    temp = ali.prefix_temp_dir(tmp_path)
+    assert temp == windows / "temp"
+    assert sorted(p.name for p in windows.iterdir()) == ["temp"]
+    assert sorted(p.name for p in temp.iterdir()) == ["_vcrun2022", "font-corefonts.reg"]
+
+
+def test_prefix_temp_dir_creates_wines_name(ali, tmp_path):
+    (tmp_path / "drive_c" / "windows").mkdir(parents=True)
+    assert ali.prefix_temp_dir(tmp_path).name == "temp"

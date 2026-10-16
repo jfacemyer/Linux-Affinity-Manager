@@ -791,6 +791,30 @@ def winetricks_cache_dir():
     return Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "winetricks"
 
 
+def prefix_temp_dir(prefix):
+    """The prefix's C:\\windows\\temp as a host path, created if missing.
+
+    Wine names the folder "temp". Host file names are case-sensitive and
+    Wine's are not, so a second "Temp" beside it is what Wine opens for
+    C:\\windows\\Temp, while winetricks writes its .reg files into "temp".
+    The direct font install once created that "Temp", and every winetricks
+    registry change after it failed with "file not found": vcrun2022's and
+    msxml's DLL overrides and renderer=vulkan were never set, and Affinity
+    crashed on Wine's own C++ runtime. A stray copy in another case is folded
+    back into "temp" and removed."""
+    windows = Path(prefix) / "drive_c" / "windows"
+    temp = windows / "temp"
+    temp.mkdir(parents=True, exist_ok=True)
+    for other in list(windows.iterdir()):
+        if other.name.lower() != "temp" or other.name == "temp" or not other.is_dir():
+            continue
+        for item in list(other.iterdir()):
+            if not (temp / item.name).exists():
+                shutil.move(str(item), str(temp / item.name))
+        shutil.rmtree(other, ignore_errors=True)
+    return temp
+
+
 def install_font_verb(prefix, wine, verb, fetch, log=None, cabextract=None, env=None):
     """Install one of DIRECT_FONT_VERBS into the prefix without winetricks.
 
@@ -807,10 +831,9 @@ def install_font_verb(prefix, wine, verb, fetch, log=None, cabextract=None, env=
         log("cabextract not found; installing the fonts through winetricks", "info")
         return False
     fonts_dir = prefix / "drive_c" / "windows" / "Fonts"
-    temp_root = prefix / "drive_c" / "windows" / "Temp"
     try:
         fonts_dir.mkdir(parents=True, exist_ok=True)
-        temp_root.mkdir(parents=True, exist_ok=True)
+        temp_root = prefix_temp_dir(prefix)
         registrations = {}
         with tempfile.TemporaryDirectory(dir=temp_root) as work:
             for subdir, name, url, sha256, pattern, fonts in packages:
@@ -861,7 +884,7 @@ def install_font_verb(prefix, wine, verb, fetch, log=None, cabextract=None, env=
         env["WINEPREFIX"] = str(prefix)
         env["WINEDEBUG"] = "-all"
         try:
-            result = subprocess.run([str(wine), "regedit", "/S", f"C:\\windows\\Temp\\{patch.name}"],
+            result = subprocess.run([str(wine), "regedit", "/S", f"C:\\windows\\temp\\{patch.name}"],
                                     env=env, capture_output=True, timeout=180)
             if result.returncode != 0:
                 log(f"Could not register the fonts (regedit exit {result.returncode})", "warning")
@@ -906,11 +929,10 @@ def repair_font_registrations(prefix, wine, log=None):
             prefix / "drive_c" / "windows" / "Fonts", registered, external, own)
         if not add and not any(remove.values()):
             return []
-        patch = prefix / "drive_c" / "windows" / "Temp" / "font-registrations.reg"
-        patch.parent.mkdir(parents=True, exist_ok=True)
+        patch = prefix_temp_dir(prefix) / "font-registrations.reg"
         patch.write_text(font_registry_patch(add, remove), encoding="utf-16")
         result = subprocess.run(
-            [str(wine), "regedit", "/S", r"C:\windows\Temp\font-registrations.reg"],
+            [str(wine), "regedit", "/S", r"C:\windows\temp\font-registrations.reg"],
             env=env, capture_output=True, timeout=120)
         try:
             patch.unlink()
@@ -14405,6 +14427,7 @@ class AffinityInstallerGUI(QMainWindow):
             env, reason="winetricks needs an idle prefix"
         )
 
+        prefix_temp_dir(self.directory)
         self.log(
             "Installing Wine components (this may take several minutes)...", "info"
         )
@@ -15357,6 +15380,7 @@ Would you like to continue with {distro_name} anyway?"""
                     self.update_progress(overall_progress)
                 return update_component_progress
 
+            prefix_temp_dir(self.directory)
             self.log("Installing Wine components (this may take several minutes)...", "info")
 
             # Clear out anything still holding the prefix (a wedged installer

@@ -10,6 +10,7 @@
   Nothing changes on the Vulkan renderer.
 
 ### Fixed
+- **Wine components after the fonts were missing their registry settings.** The direct font install created a second `C:\windows\Temp` folder (`Temp` beside Wine's `temp`), and winetricks' registry files were then not found: vcrun2022's and msxml's DLL overrides and the Vulkan renderer were never set. Affinity ran on Wine's own C++ runtime and crashed, and its setup could report .NET 3.5 missing. Fonts now use Wine's `temp`, and a stray `Temp` is folded back into it before the components are installed.
 - **A prefix that lost its renderer setting gets Vulkan back.** The installer checks for the setting after the Wine components and sets it again if it is missing, and the manager does the same for each of its prefixes while nothing runs in it (noted in the prefix's log). A renderer that was chosen, such as OpenGL, is kept.
 
 ---
