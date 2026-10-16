@@ -1080,3 +1080,44 @@ def test_prefix_temp_dir_folds_a_capitalised_copy_into_wines_temp(ali, tmp_path)
 def test_prefix_temp_dir_creates_wines_name(ali, tmp_path):
     (tmp_path / "drive_c" / "windows").mkdir(parents=True)
     assert ali.prefix_temp_dir(tmp_path).name == "temp"
+
+
+# --------------------------------------------------------------------------- #
+# one action at a time
+# --------------------------------------------------------------------------- #
+
+def _click_gui(ali, monkeypatch):
+    gui = ali.AffinityInstallerGUI.__new__(ali.AffinityInstallerGUI)
+    gui.operation_in_progress = False
+    gui.current_operation = None
+    shown = []
+    monkeypatch.setattr(ali.QMessageBox, "information", lambda *a, **k: shown.append(a), raising=False)
+    monkeypatch.setattr(gui, "dialog_parent", lambda: None, raising=False)
+    monkeypatch.setattr(gui, "log", lambda *a, **k: None, raising=False)
+    return gui, shown
+
+
+def test_a_second_click_while_an_action_runs_is_refused(ali, monkeypatch):
+    """One-Click Full Setup ran twice at once on a second click: the two runs
+    unpacked Wine over each other and deleted each other's download."""
+    gui, shown = _click_gui(ali, monkeypatch)
+    release = threading.Event()
+    calls = []
+
+    def action():
+        calls.append(1)
+        def work():
+            gui.operation_in_progress = True
+            release.wait(10)
+        threading.Thread(target=work, daemon=True).start()
+        time.sleep(0.2)
+
+    gui._handle_button_click(None, action)
+    gui._handle_button_click(None, action)
+    assert calls == [1] and len(shown) == 1
+    release.set()
+    for t in gui._action_threads:
+        t.join(5)
+    # The thread is gone: a path that skipped end_operation() does not lock the buttons.
+    gui._handle_button_click(None, lambda: calls.append(2))
+    assert calls == [1, 2]

@@ -4189,9 +4189,29 @@ class AffinityInstallerGUI(QMainWindow):
 
     def _handle_button_click(self, button, command):
         """Record last clicked button and invoke the original command."""
+        # Every action changes the prefix. A second click while one ran
+        # started One-Click Full Setup twice, and the two runs unpacked Wine
+        # over each other and deleted each other's download (2026-10-16).
+        # Actions run in threads they start: one is running while it is marked
+        # as an operation and a thread the click started is alive. Either alone
+        # could stick (a path that skips end_operation(), a helper thread that
+        # outlives the action) and lock every button.
+        busy = self.operation_in_progress and any(
+            t.is_alive() for t in getattr(self, "_action_threads", []))
+        if busy:
+            QMessageBox.information(
+                self.dialog_parent(),
+                "Still working",
+                f"'{self.current_operation or 'The current action'}' is still running.\n\n"
+                "Wait for it to finish, or cancel it first.",
+            )
+            return
+        before = set(threading.enumerate())
         try:
             self._last_clicked_button = button
             command()
+            self._action_threads = [t for t in threading.enumerate()
+                                    if t not in before and t.is_alive()]
         except Exception as e:
             self._last_clicked_button = None
             self.log(f"Error executing command: {e}", "error")
@@ -10339,6 +10359,7 @@ class AffinityInstallerGUI(QMainWindow):
             wine_version_choice = "11.18"
         else:
             self.log("Wine setup cancelled", "warning")
+            self.end_operation()
             return
 
         # setup_wine() returns False when it gives up -- most often because the
@@ -10356,6 +10377,7 @@ class AffinityInstallerGUI(QMainWindow):
                     "different Wine version.",
                     "error",
                 )
+                self.end_operation()
             return
 
         if self.check_cancelled():
