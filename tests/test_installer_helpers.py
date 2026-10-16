@@ -746,3 +746,116 @@ def test_a_failed_webview2_install_does_not_fail_the_install(ali, monkeypatch):
     monkeypatch.setattr(gui, "log", lambda msg, level="info": logged.append(level), raising=False)
     assert gui.ensure_webview2_runtime() is False
     assert "warning" in logged
+
+
+def test_stop_prefix_wine_processes_does_not_wait_out_a_straggler(harness, tmp_path):
+    """After `wineserver -k` a process that ignores SIGTERM is force-killed
+    within a couple of seconds, not after the full wait (20 s per winetricks
+    verb, for a winedevice.exe that never left by itself)."""
+    fake_server = tmp_path / "wineserver"
+    fake_server.write_text("#!/bin/sh\nexit 0\n")
+    fake_server.chmod(0o755)
+    env = {**os.environ, "WINEPREFIX": str(tmp_path)}
+    straggler = subprocess.Popen(
+        ["bash", "-c", "trap '' TERM; sleep 60"], env=env, start_new_session=True
+    )
+    try:
+        time.sleep(0.3)
+        started = time.monotonic()
+        assert harness.stop_prefix_wine_processes(
+            {"WINESERVER": str(fake_server)}, wait_seconds=20) is True
+        assert time.monotonic() - started < 6
+        assert wait_dead(straggler)
+    finally:
+        kill_quietly(straggler)
+
+
+# --------------------------------------------------------------------------- #
+# fonts installed without winetricks
+# --------------------------------------------------------------------------- #
+
+
+def test_direct_font_verbs_match_winetricks(ali):
+    """Every file, checksum and registered name is the one winetricks uses."""
+    winetricks = shutil.which("winetricks")
+    if not winetricks:
+        pytest.skip("winetricks not installed")
+    text = Path(winetricks).read_text(errors="replace")
+    for verb, (_, packages) in ali.DIRECT_FONT_VERBS.items():
+        for _, name, url, sha256, _, fonts in packages:
+            assert sha256 in text, f"{verb}: {name}'s checksum is not winetricks'"
+            assert name in text
+            for file_name, font_name in fonts:
+                assert f'w_register_font {file_name} "{font_name}"' in text, (verb, file_name)
+
+
+def _fake_font_env(tmp_path, monkeypatch, ali):
+    """A one-package verb, a fake cabextract and a fake wine that keeps a copy
+    of the .reg file it is given."""
+    import hashlib
+    cache = tmp_path / "cache"
+    (cache / "winetricks" / "fakefonts").mkdir(parents=True)
+    package = cache / "winetricks" / "fakefonts" / "fake32.exe"
+    package.write_bytes(b"not really a cab")
+    sha = hashlib.sha256(package.read_bytes()).hexdigest()
+    monkeypatch.setenv("XDG_CACHE_HOME", str(cache))
+    monkeypatch.setitem(ali.DIRECT_FONT_VERBS, "fakefonts", (
+        ["fakefonts"],
+        [("fakefonts", "fake32.exe", "https://example.invalid/fake32.exe", sha,
+          "Fake*.TTF", [("fake.ttf", "Fake Sans"), ("fakebd.ttf", "Fake Sans Bold")])],
+    ))
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    cab = bin_dir / "cabextract"
+    cab.write_text('#!/bin/sh\n# -q -d DIR FILE\nprintf x > "$3/Fake.TTF"; printf y > "$3/FakeBd.TTF"; printf z > "$3/Other.TTF"\n')
+    cab.chmod(0o755)
+    seen = tmp_path / "seen.reg"
+    wine = bin_dir / "wine"
+    wine.write_text(f'#!/bin/sh\necho "$@" >> "{tmp_path}/wine-args"\n'
+                    f'cp "$WINEPREFIX/drive_c/windows/Temp/$(basename "$(echo "$3" | tr "\\\\\\\\" /)")" "{seen}"\n')
+    wine.chmod(0o755)
+    prefix = tmp_path / "prefix"
+    prefix.mkdir()
+    return prefix, wine, cab, seen
+
+
+def test_install_font_verb_copies_registers_and_logs(ali, tmp_path, monkeypatch):
+    prefix, wine, cab, seen = _fake_font_env(tmp_path, monkeypatch, ali)
+    fetched = []
+    assert ali.install_font_verb(prefix, wine, "fakefonts",
+                                 lambda url, path: fetched.append(url) or False,
+                                 cabextract=str(cab)) is True
+    assert not fetched, "a cached file with the right checksum is not downloaded"
+    fonts = prefix / "drive_c" / "windows" / "Fonts"
+    assert (fonts / "fake.ttf").read_text() == "x"
+    assert (fonts / "fakebd.ttf").read_text() == "y"
+    assert not (fonts / "other.ttf").exists(), "only the verb's glob is copied"
+    reg = seen.read_text(encoding="utf-16")
+    for key in (r"[HKEY_LOCAL_MACHINE\Software\Microsoft\Windows NT\CurrentVersion\Fonts]",
+                r"[HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion\Fonts]",
+                r"[HKEY_LOCAL_MACHINE\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Fonts]"):
+        assert key in reg
+    assert reg.count('"Fake Sans Bold (TrueType)"="fakebd.ttf"') == 3
+    assert (tmp_path / "wine-args").read_text().count("regedit") == 1, "one Wine start"
+    assert (prefix / "winetricks.log").read_text().splitlines() == ["fakefonts"]
+    assert not list((prefix / "drive_c" / "windows" / "Temp").glob("*.reg"))
+
+
+def test_install_font_verb_refuses_a_bad_download(ali, tmp_path, monkeypatch):
+    prefix, wine, cab, _ = _fake_font_env(tmp_path, monkeypatch, ali)
+    cached = tmp_path / "cache" / "winetricks" / "fakefonts" / "fake32.exe"
+    cached.unlink()
+
+    def fetch(url, path):
+        Path(path).write_bytes(b"tampered")
+        return True
+
+    assert ali.install_font_verb(prefix, wine, "fakefonts", fetch, cabextract=str(cab)) is False
+    assert not cached.exists(), "a file with the wrong checksum is not kept"
+    assert not (prefix / "winetricks.log").exists()
+
+
+def test_install_font_verb_falls_back_without_cabextract(ali, tmp_path, monkeypatch):
+    prefix, wine, _, _ = _fake_font_env(tmp_path, monkeypatch, ali)
+    monkeypatch.setattr(ali.shutil, "which", lambda name: None)
+    assert ali.install_font_verb(prefix, wine, "fakefonts", lambda u, p: False) is False

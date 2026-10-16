@@ -719,6 +719,168 @@ def font_registry_patch(add, remove):
     return "\r\n".join(lines) + "\r\n"
 
 
+# The font verbs installed without winetricks: the same files, checksums and
+# registrations as winetricks' corefonts and tahoma, in one pass. winetricks
+# waits for Wine to shut down after each font family and starts it again for
+# every registry value (two regedit runs per name), about 90 s for corefonts
+# and 15 s for tahoma; here it is two regedit runs in all.
+# {verb: (winetricks.log lines, [(cache subdir, file, url, sha256, glob,
+#         [(file in Fonts, registered name)])])}
+_COREFONTS_URL = "https://github.com/pushcx/corefonts/raw/master/"
+DIRECT_FONT_VERBS = {
+    "corefonts": (
+        ["andale", "arial", "comicsans", "courier", "georgia", "impact", "times",
+         "trebuchet", "verdana", "webdings", "corefonts"],
+        [
+            ("corefonts", "andale32.exe", _COREFONTS_URL + "andale32.exe",
+             "0524fe42951adc3a7eb870e32f0920313c71f170c859b5f770d82b4ee111e970",
+             "AndaleMo.TTF", [("andalemo.ttf", "Andale Mono")]),
+            ("corefonts", "arial32.exe", _COREFONTS_URL + "arial32.exe",
+             "85297a4d146e9c87ac6f74822734bdee5f4b2a722d7eaa584b7f2cbf76f478f6",
+             "Arial*.TTF", [("arialbd.ttf", "Arial Bold"), ("arialbi.ttf", "Arial Bold Italic"),
+                            ("ariali.ttf", "Arial Italic"), ("arial.ttf", "Arial")]),
+            ("corefonts", "arialb32.exe", _COREFONTS_URL + "arialb32.exe",
+             "a425f0ffb6a1a5ede5b979ed6177f4f4f4fdef6ae7c302a7b7720ef332fec0a8",
+             "AriBlk.TTF", [("ariblk.ttf", "Arial Black")]),
+            ("corefonts", "comic32.exe", _COREFONTS_URL + "comic32.exe",
+             "9c6df3feefde26d4e41d4a4fe5db2a89f9123a772594d7f59afd062625cd204e",
+             "Comic*.TTF", [("comicbd.ttf", "Comic Sans MS Bold"), ("comic.ttf", "Comic Sans MS")]),
+            ("corefonts", "courie32.exe", _COREFONTS_URL + "courie32.exe",
+             "bb511d861655dde879ae552eb86b134d6fae67cb58502e6ff73ec5d9151f3384",
+             "cour*.ttf", [("courbd.ttf", "Courier New Bold"), ("courbi.ttf", "Courier New Bold Italic"),
+                           ("couri.ttf", "Courier New Italic"), ("cour.ttf", "Courier New")]),
+            ("corefonts", "georgi32.exe", _COREFONTS_URL + "georgi32.exe",
+             "2c2c7dcda6606ea5cf08918fb7cd3f3359e9e84338dc690013f20cd42e930301",
+             "Georgia*.TTF", [("georgiab.ttf", "Georgia Bold"), ("georgiai.ttf", "Georgia Italic"),
+                              ("georgia.ttf", "Georgia"), ("georgiaz.ttf", "Georgia Bold Italic")]),
+            ("corefonts", "impact32.exe", _COREFONTS_URL + "impact32.exe",
+             "6061ef3b7401d9642f5dfdb5f2b376aa14663f6275e60a51207ad4facf2fccfb",
+             "Impact.TTF", [("impact.ttf", "Impact")]),
+            ("corefonts", "times32.exe", _COREFONTS_URL + "times32.exe",
+             "db56595ec6ef5d3de5c24994f001f03b2a13e37cee27bc25c58f6f43e8f807ab",
+             "Times*.TTF", [("timesbd.ttf", "Times New Roman Bold"),
+                            ("timesbi.ttf", "Times New Roman Bold Italic"),
+                            ("timesi.ttf", "Times New Roman Italic"), ("times.ttf", "Times New Roman")]),
+            ("corefonts", "trebuc32.exe", _COREFONTS_URL + "trebuc32.exe",
+             "5a690d9bb8510be1b8b4fe49f1f2319651fe51bbe54775ddddd8ef0bd07fdac9",
+             "trebuc*.ttf", [("trebucbd.ttf", "Trebuchet MS Bold"), ("trebucbi.ttf", "Trebuchet MS Bold Italic"),
+                             ("trebucit.ttf", "Trebuchet MS Italic"), ("trebuc.ttf", "Trebuchet MS")]),
+            ("corefonts", "verdan32.exe", _COREFONTS_URL + "verdan32.exe",
+             "c1cb61255e363166794e47664e2f21af8e3a26cb6346eb8d2ae2fa85dd5aad96",
+             "Verdana*.TTF", [("verdanab.ttf", "Verdana Bold"), ("verdanai.ttf", "Verdana Italic"),
+                              ("verdana.ttf", "Verdana"), ("verdanaz.ttf", "Verdana Bold Italic")]),
+            ("corefonts", "webdin32.exe", _COREFONTS_URL + "webdin32.exe",
+             "64595b5abc1080fba8610c5c34fab5863408e806aafe84653ca8575bed17d75a",
+             "Webdings.TTF", [("webdings.ttf", "Webdings")]),
+        ],
+    ),
+    "tahoma": (
+        ["tahoma"],
+        [
+            ("tahoma", "IELPKTH.CAB", "https://downloads.sourceforge.net/corefonts/OldFiles/IELPKTH.CAB",
+             "c1be3fb8f0042570be76ec6daa03a99142c88367c1bc810240b85827c715961a",
+             "*.TTF", [("tahoma.ttf", "Tahoma"), ("tahomabd.ttf", "Tahoma Bold")]),
+        ],
+    ),
+}
+
+
+def winetricks_cache_dir():
+    """Where winetricks keeps its downloads, so both share one copy."""
+    return Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "winetricks"
+
+
+def install_font_verb(prefix, wine, verb, fetch, log=None, cabextract=None, env=None):
+    """Install one of DIRECT_FONT_VERBS into the prefix without winetricks.
+
+    `fetch(url, path)` downloads a missing file. Returns True when the fonts
+    are copied, registered in both registry views and logged in
+    winetricks.log; False (having changed nothing in the registry) otherwise,
+    so the caller can fall back to winetricks. Never raises."""
+    import fnmatch
+    log = log or (lambda message, level="info": None)
+    prefix, wine = Path(prefix), Path(wine)
+    log_lines, packages = DIRECT_FONT_VERBS[verb]
+    cabextract = cabextract or shutil.which("cabextract")
+    if not cabextract:
+        log("cabextract not found; installing the fonts through winetricks", "info")
+        return False
+    fonts_dir = prefix / "drive_c" / "windows" / "Fonts"
+    temp_root = prefix / "drive_c" / "windows" / "Temp"
+    try:
+        fonts_dir.mkdir(parents=True, exist_ok=True)
+        temp_root.mkdir(parents=True, exist_ok=True)
+        registrations = {}
+        with tempfile.TemporaryDirectory(dir=temp_root) as work:
+            for subdir, name, url, sha256, pattern, fonts in packages:
+                cached = winetricks_cache_dir() / subdir / name
+                if not cached.is_file() or hashlib.sha256(cached.read_bytes()).hexdigest() != sha256:
+                    cached.parent.mkdir(parents=True, exist_ok=True)
+                    if not fetch(url, str(cached)) or not cached.is_file():
+                        log(f"Could not download {name}", "warning")
+                        return False
+                    if hashlib.sha256(cached.read_bytes()).hexdigest() != sha256:
+                        log(f"{name} does not match its checksum", "warning")
+                        cached.unlink(missing_ok=True)
+                        return False
+                out = Path(work) / name
+                out.mkdir()
+                result = subprocess.run([cabextract, "-q", "-d", str(out), str(cached)],
+                                        capture_output=True, timeout=120)
+                if result.returncode != 0:
+                    log(f"cabextract failed on {name}", "warning")
+                    return False
+                for src in out.iterdir():
+                    if not (src.is_file() and fnmatch.fnmatch(src.name.lower(), pattern.lower())):
+                        continue
+                    dest_name = src.name.lower()
+                    for old in fonts_dir.iterdir():
+                        if old.name.lower() == dest_name and old.name != dest_name:
+                            old.unlink()
+                    shutil.copyfile(src, fonts_dir / dest_name)
+                for file_name, font_name in fonts:
+                    if not (fonts_dir / file_name).is_file():
+                        log(f"{file_name} was not in {name}", "warning")
+                        return False
+                    registrations[f"{font_name} (TrueType)"] = file_name
+
+        # The keys winetricks fills by running regedit in both views: Wine
+        # shares the Windows NT key between them and keeps a 32-bit copy of
+        # the other under Wow6432Node. One 64-bit regedit run writes all three.
+        def esc(text):
+            return text.replace("\\", "\\\\").replace('"', '\\"')
+        lines = ["Windows Registry Editor Version 5.00", ""]
+        for key in FONT_KEYS_64 + (r"HKLM\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Fonts",):
+            lines.append("[" + key.replace("HKLM\\", "HKEY_LOCAL_MACHINE\\") + "]")
+            lines += [f'"{esc(n)}"="{esc(f)}"' for n, f in sorted(registrations.items())]
+            lines.append("")
+        patch = temp_root / f"font-{verb}.reg"
+        patch.write_text("\r\n".join(lines) + "\r\n", encoding="utf-16")
+        env = dict(env) if env else os.environ.copy()
+        env["WINEPREFIX"] = str(prefix)
+        env["WINEDEBUG"] = "-all"
+        try:
+            result = subprocess.run([str(wine), "regedit", "/S", f"C:\\windows\\Temp\\{patch.name}"],
+                                    env=env, capture_output=True, timeout=180)
+            if result.returncode != 0:
+                log(f"Could not register the fonts (regedit exit {result.returncode})", "warning")
+                return False
+        finally:
+            patch.unlink(missing_ok=True)
+
+        # So winetricks, and anything reading its log, sees them installed.
+        with open(prefix / "winetricks.log", "a", encoding="utf-8") as handle:
+            for line in log_lines:
+                handle.write(line + "\n")
+        if verb == "corefonts":
+            (fonts_dir / "corefonts.installed").touch()
+        log(f"Installed {len(registrations)} {verb} fonts directly", "success")
+        return True
+    except Exception as e:                    # noqa: BLE001 -- see docstring
+        log(f"Could not install {verb} directly: {e}", "warning")
+        return False
+
+
 def repair_font_registrations(prefix, wine, log=None):
     """Check the prefix's font registrations and put them right, through the
     prefix's own Wine. Returns one line per change; empty when nothing was
@@ -6532,6 +6694,7 @@ class AffinityInstallerGUI(QMainWindow):
             if candidate and Path(candidate).exists():
                 wineserver = candidate
                 break
+        server_killed = False
         if wineserver:
             try:
                 subprocess.run(
@@ -6542,16 +6705,22 @@ class AffinityInstallerGUI(QMainWindow):
                     timeout=min(30, max(3, wait_seconds)),
                     check=False,
                 )
+                server_killed = True
             except Exception:
                 pass
 
-        # 3. Wait for them to leave, then force whatever is left
+        # 3. Wait for them to leave, then force whatever is left. Once
+        # `wineserver -k` has returned, everything connected to the prefix is
+        # gone; what remains is a straggler that never leaves by itself (a
+        # winedevice.exe after each winetricks verb), and the full wait cost
+        # 20 s per verb for nothing.
         remaining = list(pids)
-        deadline = time.monotonic() + max(1, wait_seconds)
+        grace = min(wait_seconds, 2) if server_killed else wait_seconds
+        deadline = time.monotonic() + max(1, grace)
         while remaining and time.monotonic() < deadline:
             if not force and self.cancel_event.is_set():
                 return False
-            time.sleep(0.5)
+            time.sleep(0.1)
             remaining = [
                 pid for pid in remaining if Path(f"/proc/{pid}").exists()
             ]
@@ -12819,6 +12988,16 @@ class AffinityInstallerGUI(QMainWindow):
             "needs the new checksum.", "error")
         return False
 
+    def install_font_verb_directly(self, verb, env=None):
+        """Install a DIRECT_FONT_VERBS verb without winetricks; False means
+        use winetricks instead."""
+        if self.check_cancelled():
+            return False
+        return install_font_verb(
+            self.directory, self.get_wine_path("wine"), verb,
+            lambda url, path: self.download_file(url, path, Path(path).name),
+            log=self.log, env=env)
+
     def repair_fonts(self):
         """Put the prefix's font registrations right; log what changed."""
         wine = self.get_wine_path("wine")
@@ -14092,15 +14271,19 @@ class AffinityInstallerGUI(QMainWindow):
                 overall_progress = base_progress + (percent * component_progress_range)
                 self.update_progress(overall_progress)
 
+            # The fonts go in directly; winetricks only if that fails.
+            component_ok = (component in DIRECT_FONT_VERBS
+                            and self.install_font_verb_directly(component, env))
             # Use streaming to show progress
-            component_ok = self.run_command_streaming(
-                self.build_winetricks_command(component),
-                env=env,
-                progress_callback=update_component_progress,
-                stall_timeout=600,
-                activity_probe=self._prefix_activity,
-                hard_limit=2700,
-            )
+            if not component_ok:
+                component_ok = self.run_command_streaming(
+                    self.build_winetricks_command(component),
+                    env=env,
+                    progress_callback=update_component_progress,
+                    stall_timeout=600,
+                    activity_probe=self._prefix_activity,
+                    hard_limit=2700,
+                )
             # The .NET installers' 32-bit setups crash intermittently under
             # Wine 11's new WoW64 (an unhandled page fault high in the 32-bit
             # address space); clean runs of the same verb succeed. Once more,
@@ -15031,14 +15214,18 @@ Would you like to continue with {distro_name} anyway?"""
                 self.log("  (This may take several minutes - progress will be shown below)", "info")
 
                 command = self.build_winetricks_command(component)
-                success = self.run_command_streaming(
-                    command,
-                    env=env,
-                    progress_callback=progress_callback,
-                    stall_timeout=600,
-                    activity_probe=self._prefix_activity,
-                    hard_limit=2700,
-                )
+                # The fonts go in directly; winetricks only if that fails.
+                success = (component in DIRECT_FONT_VERBS
+                           and self.install_font_verb_directly(component, env))
+                if not success:
+                    success = self.run_command_streaming(
+                        command,
+                        env=env,
+                        progress_callback=progress_callback,
+                        stall_timeout=600,
+                        activity_probe=self._prefix_activity,
+                        hard_limit=2700,
+                    )
 
                 stalled = self._last_command_stalled
                 if not success and not self.check_cancelled():
