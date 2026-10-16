@@ -482,3 +482,71 @@ def test_the_closing_message_survives_an_unreadable_default(hosting, monkeypatch
         raise OSError("unreadable")
     monkeypatch.setattr(defaultentry, "current", broken)
     assert "Make Default" in page_for(hosting).installer.launch_instructions()
+
+
+# -- the offer after an install -----------------------------------------------
+
+class FakeBox:
+    """QMessageBox stand-in: records the text and clicks the named button."""
+    click = "Make Default"
+    shown = []
+    from PyQt6.QtWidgets import QMessageBox as _Real
+    Icon, ButtonRole = _Real.Icon, _Real.ButtonRole
+
+    def __init__(self, parent=None):
+        self.buttons = {}
+        self.clicked = None
+
+    def setIcon(self, *_): pass
+    def setWindowTitle(self, *_): pass
+    def setDefaultButton(self, *_): pass
+
+    def setText(self, text):
+        FakeBox.shown.append(text)
+
+    def addButton(self, label, role):
+        self.buttons[label] = object()
+        return self.buttons[label]
+
+    def exec(self):
+        self.clicked = self.buttons.get(FakeBox.click)
+
+    def clickedButton(self):
+        return self.clicked
+
+
+def _offer(hosting, qapp, monkeypatch, default, click):
+    from affinity_manager import defaultentry
+    monkeypatch.setattr(defaultentry, "current", lambda: default)
+    monkeypatch.setattr(defaultentry, "plan", lambda name, path: ("plan", name))
+    monkeypatch.setattr(hosted, "QMessageBox", FakeBox)
+    FakeBox.click, FakeBox.shown = click, []
+    applied = []
+    hosting.manager._apply_default = lambda plan, quiet=False: applied.append(plan)
+    page = page_for(hosting)
+    page.installer.offer_after_install()
+    qapp.processEvents()
+    _offer.logged = [line for line, _ in page.installer.logged if "failed" in line]
+    return applied
+
+
+def test_an_install_offers_to_make_the_prefix_the_default(hosting, qapp, monkeypatch):
+    """The closing message said how, as its last paragraph, and a new install
+    went unused: the menu entry kept starting the old Default prefix."""
+    applied = _offer(hosting, qapp, monkeypatch, "Everyday", "Make Default")
+    assert applied == [("plan", "Scratch")], _offer.logged
+    assert '"Everyday"' in FakeBox.shown[0] and '"Scratch"' in FakeBox.shown[0]
+
+
+def test_not_now_leaves_the_default_alone(hosting, qapp, monkeypatch):
+    assert _offer(hosting, qapp, monkeypatch, "Everyday", "Not now") == []
+
+
+def test_no_offer_when_the_prefix_is_the_default_already(hosting, qapp, monkeypatch):
+    assert _offer(hosting, qapp, monkeypatch, "Scratch", "Make Default") == []
+    assert FakeBox.shown == []
+
+
+def test_the_offer_says_when_there_is_no_default():
+    text = hosted.default_offer_text("Scratch", None)
+    assert "No prefix is the Default yet" in text and '"Scratch"' in text
