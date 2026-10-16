@@ -79,6 +79,7 @@ from affinity_manager import (
     prefixstate,
     probe,
     release,
+    renderer,
     singleinstance,
     registry,
     ui,
@@ -115,6 +116,12 @@ class ProbeThread(QThread):
                 info = probe.describe(entry["path"])
                 info["size"] = (probe.disk_usage(entry["path"])
                                 if info["exists"] else 0)
+                # A prefix that lost renderer=vulkan stays on OpenGL however
+                # it is started; put it back while nothing runs in it.
+                try:
+                    info["renderer_restored"] = renderer.restore_vulkan(entry["path"])
+                except OSError:
+                    info["renderer_restored"] = False
             except Exception as exc:
                 info = {"path": entry["path"], "exists": False,
                         "is_prefix": False, "has_affinity": False,
@@ -4060,6 +4067,13 @@ class ManagerWindow(QMainWindow):
     def _probed(self, rows):
         self.refresh_button.setEnabled(True)
         by_name = {entry["name"]: info for entry, info in rows}
+        restored = [name for name, info in by_name.items() if info.get("renderer_restored")]
+        for name in restored:
+            prefixlog.write(name, "Wine's renderer setting was missing (OpenGL); set it to Vulkan again")
+        if restored:
+            self.status.setText(
+                "Wine's renderer was set back to Vulkan in " + ", ".join(restored)
+                + ": the setting was missing, so Affinity drew with OpenGL.")
         for i in range(self.tree.topLevelItemCount()):
             item = self.tree.topLevelItem(i)
             info = by_name.get(item.data(0, Qt.ItemDataRole.UserRole))
