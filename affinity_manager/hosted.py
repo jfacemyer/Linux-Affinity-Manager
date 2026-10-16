@@ -55,8 +55,10 @@ from pathlib import Path
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
+    QApplication,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QVBoxLayout,
@@ -193,6 +195,13 @@ def hosted_class():
                 default = None
             return launch_instructions_text(name, default)
 
+        def offer_after_install(self):
+            """After an install: offer to make this prefix the Default. Called
+            from the installer's worker thread; the page asks on the GUI thread."""
+            page = getattr(self, "_page", None)
+            if page is not None:
+                page.install_finished.emit()
+
         # -- deferred tasks that belong to entering, not to building ---------
 
         def _check_and_update_dxvk_vkd3d(self):
@@ -288,6 +297,20 @@ def launch_instructions_text(name, default):
         "prefix. Double-clicked documents always open in the Default prefix.")
 
 
+def default_offer_text(name, default):
+    """The question after an install in prefix `name`, when `default` is the
+    Default prefix (None when there is none)."""
+    if default:
+        now = (f'The Affinity entry in your application menu, double-clicked '
+               f'Affinity documents and the Canva sign-in still start "{default}".')
+    else:
+        now = ("No prefix is the Default yet, so your application menu has no "
+               "Affinity entry and double-clicked Affinity documents do not open.")
+    return (f'Affinity is installed in "{name}".\n\n{now}\n\n'
+            f'Make "{name}" the Default, so they start it instead? You can change '
+            "this later with Make Default in the prefix list.")
+
+
 class SetupPage(QWidget):
     """Setup for one prefix: a header, and the installer under it."""
 
@@ -299,6 +322,8 @@ class SetupPage(QWidget):
     # first start from a nested one.
     operation_began = pyqtSignal(str, bool)
     operation_ended = pyqtSignal()
+    # An Affinity install finished (emitted from the installer's thread).
+    install_finished = pyqtSignal()
 
     # How long to wait after an end_operation before giving up the lock. Long
     # enough to cover the gap between a nested step finishing and the next one
@@ -317,6 +342,7 @@ class SetupPage(QWidget):
         self._disabled_state = None
         self.operation_began.connect(self._operation_began)
         self.operation_ended.connect(self._operation_ended)
+        self.install_finished.connect(self._offer_default)
         self._settle = QTimer(self)
         self._settle.setSingleShot(True)
         self._settle.setInterval(self.SETTLE_MS)
@@ -455,6 +481,39 @@ class SetupPage(QWidget):
         self.operation_ended.emit()
 
     # -- the GUI-thread halves ------------------------------------------------
+
+    @never_escapes
+    def _offer_default(self):
+        """Ask whether the prefix just installed should be the Default.
+
+        The closing message says how, but it is the last paragraph of a long
+        box, and a new install then went unused: the menu entry, which belongs
+        to the Default, kept starting the old prefix. Asked after that box has
+        been closed, and only when this prefix is not the Default already."""
+        if QApplication.activeModalWidget() is not None:
+            QTimer.singleShot(500, self._offer_default)
+            return
+        from . import defaultentry
+        try:
+            default = defaultentry.current()
+        except Exception:  # noqa: BLE001 -- then there is just nothing to offer
+            return
+        if default == self.name:
+            return
+        try:
+            plan = defaultentry.plan(self.name, str(self.path))
+        except (FileNotFoundError, OSError):
+            return
+        box = QMessageBox(self.window())
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle(f"Make {self.name} the Default?")
+        box.setText(default_offer_text(self.name, default))
+        make = box.addButton("Make Default", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Not now", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(make)
+        box.exec()
+        if box.clickedButton() is make:
+            self.manager._apply_default(plan)
 
     @never_escapes
     def _operation_began(self, label, fresh=True):
