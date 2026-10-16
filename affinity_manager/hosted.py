@@ -182,6 +182,17 @@ def hosted_class():
             belong to whichever prefix is the Default."""
             return False
 
+        def launch_instructions(self):
+            """Where to start this prefix: the manager writes the menu entry
+            and the document handlers only for the Default."""
+            from . import defaultentry
+            name = self._page.name
+            try:
+                default = defaultentry.current()
+            except Exception:  # noqa: BLE001 -- only the wording depends on it
+                default = None
+            return launch_instructions_text(name, default)
+
         # -- deferred tasks that belong to entering, not to building ---------
 
         def _check_and_update_dxvk_vkd3d(self):
@@ -259,6 +270,24 @@ def hosted_class():
 
 # ── the page ─────────────────────────────────────────────────────────────────
 
+def launch_instructions_text(name, default):
+    """The closing message of an install in prefix `name`, when `default` is
+    the Default prefix (None when there is none)."""
+    if default == name:
+        return (f'"{name}" is the Default prefix: the Affinity entry in your '
+                "application menu starts it, and double-clicked Affinity documents "
+                "open in it. In the manager, Launch starts it too.")
+    instead = f' instead of "{default}"' if default else ""
+    return (
+        f'Start it from the manager: select "{name}" in the prefix list and '
+        "click Launch.\n\n"
+        "To start it from your application menu, select it and click Make "
+        "Default. The menu's Affinity entry, double-clicked Affinity documents "
+        f"and the Canva sign-in then all go to this prefix{instead}.\n\n"
+        "Or click Add to menu for a menu entry of its own, named after the "
+        "prefix. Double-clicked documents always open in the Default prefix.")
+
+
 class SetupPage(QWidget):
     """Setup for one prefix: a header, and the installer under it."""
 
@@ -317,7 +346,7 @@ class SetupPage(QWidget):
         header_layout = QHBoxLayout(header)
         header_layout.setContentsMargins(20, 12, 20, 12)
         header_layout.setSpacing(12)
-        self.back_button = QPushButton("← Prefixes")
+        self.back_button = QPushButton("← Affinity on Linux Prefix Manager")
         self.back_button.setToolTip("Back to the prefix list")
         self.back_button.clicked.connect(manager.show_list)
         header_layout.addWidget(self.back_button, 0)
