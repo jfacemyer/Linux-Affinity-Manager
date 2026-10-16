@@ -6806,16 +6806,39 @@ class AffinityInstallerGUI(QMainWindow):
         # gone; what remains is a straggler that never leaves by itself (a
         # winedevice.exe after each winetricks verb), and the full wait cost
         # 20 s per verb for nothing.
+        # The wineserver itself is the exception: SIGTERM makes it write the
+        # registry to disk (system.reg alone is ~11 MB), and killing it
+        # mid-write loses what the last verb set (renderer=vulkan was lost
+        # this way). It always gets the full wait.
+        def is_wineserver(pid):
+            try:
+                comm = Path(f"/proc/{pid}/comm").read_text().strip()
+            except Exception:
+                return False
+            return comm.startswith("wineserver")
+
+        def is_alive(pid):
+            # A zombie has exited; only its parent's wait is missing.
+            try:
+                stat = Path(f"/proc/{pid}/stat").read_text()
+            except Exception:
+                return False
+            return stat.rsplit(")", 1)[-1].split()[0] != "Z"
+
         remaining = list(pids)
+        servers = {pid for pid in remaining if is_wineserver(pid)}
         grace = min(wait_seconds, 2) if server_killed else wait_seconds
-        deadline = time.monotonic() + max(1, grace)
-        while remaining and time.monotonic() < deadline:
+        start = time.monotonic()
+        while remaining:
+            elapsed = time.monotonic() - start
+            if elapsed >= max(1, wait_seconds):
+                break
+            if elapsed >= max(1, grace) and not servers.intersection(remaining):
+                break
             if not force and self.cancel_event.is_set():
                 return False
             time.sleep(0.1)
-            remaining = [
-                pid for pid in remaining if Path(f"/proc/{pid}").exists()
-            ]
+            remaining = [pid for pid in remaining if is_alive(pid)]
         for pid in remaining:
             try:
                 os.kill(pid, signal.SIGKILL)

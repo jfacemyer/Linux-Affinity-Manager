@@ -772,6 +772,34 @@ def test_stop_prefix_wine_processes_does_not_wait_out_a_straggler(harness, tmp_p
         kill_quietly(straggler)
 
 
+def test_stop_prefix_wine_processes_lets_the_wineserver_save(harness, tmp_path):
+    """A wineserver writing the registry after SIGTERM is waited for, not
+    force-killed after the straggler grace: killing it lost renderer=vulkan."""
+    fake_server = tmp_path / "wineserver"
+    fake_server.write_text("#!/bin/sh\nexit 0\n")
+    fake_server.chmod(0o755)
+    saved = tmp_path / "saved"
+    server = tmp_path / "bin" / "wineserver"
+    server.parent.mkdir()
+    server.write_text(
+        "#!/bin/bash\n"
+        f"trap 'sleep 3; touch {saved}; exit 0' TERM\n"
+        "while :; do sleep 0.1; done\n"
+    )
+    server.chmod(0o755)
+    env = {**os.environ, "WINEPREFIX": str(tmp_path)}
+    proc = subprocess.Popen([str(server)], env=env, start_new_session=True)
+    try:
+        time.sleep(0.3)
+        started = time.monotonic()
+        assert harness.stop_prefix_wine_processes(
+            {"WINESERVER": str(fake_server)}, wait_seconds=20) is True
+        assert saved.exists()
+        assert time.monotonic() - started < 10
+    finally:
+        kill_quietly(proc)
+
+
 # --------------------------------------------------------------------------- #
 # fonts installed without winetricks
 # --------------------------------------------------------------------------- #
