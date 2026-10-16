@@ -1,18 +1,9 @@
 # Affinity on Linux Manager
 
 Keep several Affinity installs on one Linux machine, and decide which one your
-desktop uses.
-
-The [Affinity on Linux installer](../README.md) sets up Affinity under Wine in
-one place and points your application menu at it. That is all most people
-need. The manager is for when one is not enough: a working install you cannot
-afford to break, plus a copy to try a new Wine build or Affinity release in;
-backups before an upgrade; or a test copy of a client's setup.
-
-The manager does not install anything by its own means. Each install is done by
-the installer itself, running as a page inside the manager's window, so both
-always agree about how Affinity is set up. What the manager adds is everything
-around it: which installs exist, which one is the Default, and keeping them safe.
+desktop uses: a working install you cannot afford to break, plus a copy to try
+a new Wine build or Affinity release in; backups before an upgrade; a test copy
+of a client's setup.
 
 Each install lives in its own Wine *prefix*: a folder holding a complete
 Windows environment with Affinity in it. The manager calls them prefixes.
@@ -51,10 +42,11 @@ time, never remembered, so it cannot go stale.
 ### A new install
 
 **New prefix** asks for a name (it suggests `AffinityLinux YYYY-MM-DD 01`) and
-opens **Setup**: the installer, inside the manager. Install Wine, the Windows
-components and Affinity there exactly as you would with the installer alone.
-When the install finishes, the manager offers to make the new prefix the
-Default.
+opens **Setup**. Setup is the [Affinity on Linux installer](../README.md): the
+manager loads it from the same repository and runs it as a page of its own
+window, pointed at the new prefix, so the install is exactly what the installer
+does on its own. When the install finishes, the manager offers to make the new
+prefix the Default.
 
 **Adopt existing** takes over prefixes already on the machine, such as an
 installer's `~/.AffinityLinux`, wherever they are. It can move them into the
