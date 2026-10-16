@@ -8,6 +8,8 @@ of a client's setup.
 Each install lives in its own Wine *prefix*: a folder holding a complete
 Windows environment with Affinity in it. The manager calls them prefixes.
 
+![The manager's window: two prefixes, one of them the Default](docs/manager-window.png)
+
 ## Running it
 
 ```sh
