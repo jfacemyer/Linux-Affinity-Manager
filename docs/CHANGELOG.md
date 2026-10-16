@@ -1,5 +1,12 @@
 # Changelog
 
+## [2026-10-16] - Wine 11.19-r10, no architecture warning
+
+### Changed
+- **The 11.19 choice installs [`11.19-r10`](https://github.com/jfacemyer/Affinity-Wine-Builder/releases/tag/11.19-r10)**, pinned by SHA-256 like r9. Affinity's own installer no longer warns that installing is "not recommended" for this processor: it asks Windows' management service (WMI) for the processor type from its window, Wine gave it no answer, and it took that for an ARM machine. Four Wine fixes make that query answer; they also help other .NET programs that query WMI or use COM objects from their window.
+
+---
+
 ## [2026-10-16] - Wine 11.19-r9, OpenGL
 
 ### Changed
