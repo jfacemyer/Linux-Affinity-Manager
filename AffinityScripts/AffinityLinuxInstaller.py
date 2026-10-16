@@ -479,14 +479,15 @@ WINE_11_19_SHA256 = "0f93d1b397d43ba034cb351c54d67b80e264cafff56f6f94449b41cac98
 # which sit unreleased on its dev branch. This build is that dev branch plus
 # fixes -- libplugins.dll kept loaded (random crashes), launch arguments quoted
 # (paths with spaces), the color picker under Wine, the empty Leading dropdown in
-# the text context toolbar (Affinity 3.3) -- released on a fork until
+# the text context toolbar (Affinity 3.3), the sub-tool panel's columns after
+# a studio switch -- released on a fork until
 # upstream publishes one. Each asset is pinned, like the Wine build.
 # POC SOURCE -- repoint at an upstream release that carries these.
 APL_RELEASE_REPO = "jfacemyer/AffinityPluginLoader"
-APL_RELEASE_TAG = "wine-fixes-3"
+APL_RELEASE_TAG = "wine-fixes-4"
 APL_ASSET_SHA256 = {
-    "affinitypluginloader-v0.3.0.zip": "11acc82afdd47463c20e914c6c57fbf41bd1bf7810f8b58b44b4346462d6fb9c",
-    "winefix-v0.3.0.zip": "f426187ea3872f066f5caa84348a0c949c898e453ce169d3605c8757ef8efe65",
+    "affinitypluginloader-v0.3.0.zip": "5f254cda839a589ff8f17347c693bd4296e8e06079dc76a7d64f6a3b1ba1ca4a",
+    "winefix-v0.3.0.zip": "40297d01f5b15f39dea9872563293989058285a8ac9aa6eca2e0f2a65f960d02",
 }
 
 

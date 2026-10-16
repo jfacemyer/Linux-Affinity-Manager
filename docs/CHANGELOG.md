@@ -1,5 +1,18 @@
 # Changelog
 
+## [2026-10-16] - Faster setup, WineFix wine-fixes-4
+
+### Changed
+- **The plugin loader and WineFix come from [`wine-fixes-4`](https://github.com/jfacemyer/AffinityPluginLoader/releases/tag/wine-fixes-4)**, pinned by SHA-256 like wine-fixes-3. New in it: the sub-tool panel (the shape tools, for example) keeps two columns after a studio switch, instead of coming back as one column running the height of the window.
+- **Faster setup:** the core fonts and Tahoma are copied and registered directly (about 6 s each, from 94 s and 16 s), and stopping Wine between steps no longer waits 20 s for a process that never leaves by itself.
+- **The WebView2 step no longer stalls:** its setup leaves Edge Update running, which held the step for up to an hour. Edge Update is stopped once the runtime is in place.
+- The progress line shows when the current operation started and how long it has taken, and the log records the total.
+- The installer's dialogs stay above its window.
+
+### Fixed
+- A fresh install could come up on Wine's OpenGL renderer instead of Vulkan: stopping Wine right after a setting was written could cut off Wine's registry save. Wine's server now always gets time to finish saving.
+
+---
 ## [2026-10-15] - Wine 11.19-r8, Help works
 
 ### Changed
