@@ -1165,6 +1165,7 @@ class AffinityInstallerGUI(QMainWindow):
     log_signal = pyqtSignal(str, str)
     progress_signal = pyqtSignal(float)
     progress_text_signal = pyqtSignal(str)
+    operation_clock_signal = pyqtSignal(bool)
     show_message_signal = pyqtSignal(str, str, str)
     sudo_password_dialog_signal = pyqtSignal()
     interactive_prompt_signal = pyqtSignal(str, str)
@@ -1269,6 +1270,7 @@ class AffinityInstallerGUI(QMainWindow):
         self.log_signal.connect(self._log_safe)
         self.progress_signal.connect(self._update_progress_safe)
         self.progress_text_signal.connect(self._update_progress_text_safe)
+        self.operation_clock_signal.connect(self._operation_clock_safe)
         self.show_message_signal.connect(self._show_message_safe)
         self.sudo_password_dialog_signal.connect(self._request_sudo_password_safe)
         self.interactive_prompt_signal.connect(self._request_interactive_response_safe)
@@ -2480,6 +2482,13 @@ class AffinityInstallerGUI(QMainWindow):
                 border-radius: 8px;
                 padding: 12px;
             }
+            QLabel#progressTimerLabel {
+                font-size: 11px;
+                color: #b0b0b0;
+                padding: 0px 12px;
+                background-color: transparent;
+                border: none;
+            }
             QLabel#progressLabel {
                 font-size: 12px;
                 font-weight: 500;
@@ -2753,6 +2762,13 @@ class AffinityInstallerGUI(QMainWindow):
                 border: 1px solid #e5e5e7;
                 border-radius: 8px;
                 padding: 12px;
+            }
+            QLabel#progressTimerLabel {
+                font-size: 11px;
+                color: #515154;
+                padding: 0px 12px;
+                background-color: transparent;
+                border: none;
             }
             QLabel#progressLabel {
                 font-size: 12px;
@@ -3031,6 +3047,13 @@ class AffinityInstallerGUI(QMainWindow):
                 border: 1px solid #2a1c3f;
                 border-radius: 8px;
                 padding: 12px;
+            }
+            QLabel#progressTimerLabel {
+                font-size: 11px;
+                color: #B8A9C9;
+                padding: 0px 12px;
+                background-color: transparent;
+                border: none;
             }
             QLabel#progressLabel {
                 font-size: 12px;
@@ -3602,6 +3625,22 @@ class AffinityInstallerGUI(QMainWindow):
         # it; wrapping keeps the log column's footprint stable.
         self.progress_label.setWordWrap(True)
         progress_layout.addWidget(self.progress_label)
+
+        # When the current operation started and how long it has taken; the
+        # last finished one stays shown until the next starts.
+        self.timer_label = QLabel("")
+        self.timer_label.setObjectName("progressTimerLabel")
+        self.timer_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.timer_label.hide()
+        progress_layout.addWidget(self.timer_label)
+        self._clock_started = None      # (wall-clock time, monotonic) of the start
+        self._clock_tick = QTimer(self)
+        self._clock_tick.setInterval(1000)
+        self._clock_tick.timeout.connect(self._show_clock)
+        self._clock_settle = QTimer(self)
+        self._clock_settle.setSingleShot(True)
+        self._clock_settle.setInterval(3000)
+        self._clock_settle.timeout.connect(self._stop_clock)
 
         progress_container = QHBoxLayout()
         progress_container.setSpacing(12)
@@ -4567,6 +4606,7 @@ class AffinityInstallerGUI(QMainWindow):
         self.cancel_event.clear()
         self.current_operation = operation_name
         self.operation_in_progress = True
+        self.operation_clock_signal.emit(True)
         if self._last_clicked_button is not None:
             self._operation_button = self._last_clicked_button
             self.show_spinner_signal.emit(self._operation_button)
@@ -4576,6 +4616,7 @@ class AffinityInstallerGUI(QMainWindow):
         """Mark the end of an operation: restore UI, reset progress, toggle cancel."""
         self.operation_in_progress = False
         self.current_operation = None
+        self.operation_clock_signal.emit(False)
         self.cancel_button_signal.emit(False)
         if self._operation_button is not None:
             self.hide_spinner_signal.emit(self._operation_button)
@@ -4583,6 +4624,49 @@ class AffinityInstallerGUI(QMainWindow):
             self._last_clicked_button = None
         self.update_progress(0.0)
         self.update_progress_text("Ready")
+
+    @staticmethod
+    def format_elapsed(seconds):
+        """1:05, 12:34, 1:02:03"""
+        seconds = int(seconds)
+        h, rest = divmod(seconds, 3600)
+        m, s = divmod(rest, 60)
+        return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+    def _operation_clock_safe(self, running):
+        """Start the clock with an operation, stop it a moment after the last
+        one ends. The installer's ends do not pair with its starts: One-Click
+        Full Setup ends the Wine setup's own operation and goes on, so an end
+        followed by a start within the settle is one run, timed as one."""
+        if getattr(self, "timer_label", None) is None:
+            return
+        if running:
+            self._clock_settle.stop()
+            if self._clock_started is None:
+                self._clock_started = (time.strftime("%H:%M:%S"), time.monotonic())
+                self.timer_label.show()
+                self._clock_tick.start()
+            self._show_clock()
+        elif self._clock_started is not None:
+            self._clock_settle.start()
+
+    def _show_clock(self):
+        if self._clock_started is None:
+            return
+        started, t0 = self._clock_started
+        self.timer_label.setText(
+            f"Started {started} · Elapsed {self.format_elapsed(time.monotonic() - t0)}")
+
+    def _stop_clock(self):
+        if self._clock_started is None:
+            return
+        started, t0 = self._clock_started
+        # Ended when the last operation ended, not when the settle ran out.
+        took = self.format_elapsed(max(0, time.monotonic() - t0 - self._clock_settle.interval() / 1000))
+        self._clock_tick.stop()
+        self._clock_started = None
+        self.timer_label.setText(f"Started {started} · Finished in {took}")
+        self.log(f"Finished in {took} (started {started})", "info")
 
     def check_cancelled(self):
         """Check if operation was cancelled"""

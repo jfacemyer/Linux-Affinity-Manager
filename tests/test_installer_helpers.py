@@ -929,3 +929,68 @@ def test_release_webview2_wait_needs_the_runtime(harness, tmp_path):
         stop.set()
         thread.join(5)
         kill_quietly(updater)
+
+
+# --------------------------------------------------------------------------- #
+# operation clock
+# --------------------------------------------------------------------------- #
+
+
+def test_format_elapsed(ali):
+    f = ali.AffinityInstallerGUI.format_elapsed
+    assert f(5) == "0:05" and f(754) == "12:34" and f(3723) == "1:02:03"
+
+
+@pytest.fixture
+def clock(ali):
+    from PyQt6.QtCore import QTimer
+    from PyQt6.QtWidgets import QApplication, QLabel
+    app = QApplication.instance() or QApplication([])
+
+    class StandIn:
+        pass
+
+    for name in ("_operation_clock_safe", "_show_clock", "_stop_clock", "format_elapsed"):
+        setattr(StandIn, name, inspect.getattr_static(ali.AffinityInstallerGUI, name))
+    obj = StandIn()
+    obj.timer_label = QLabel("")
+    obj._clock_started = None
+    obj._clock_tick = QTimer()
+    obj._clock_tick.setInterval(1000)
+    obj._clock_settle = QTimer()
+    obj._clock_settle.setSingleShot(True)
+    obj._clock_settle.setInterval(100)
+    obj._clock_settle.timeout.connect(obj._stop_clock)
+    obj.logged = []
+    obj.log = lambda message, level="info": obj.logged.append(message)
+    obj.app = app
+    return obj
+
+
+def _spin(app, seconds):
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        app.processEvents()
+        time.sleep(0.01)
+
+
+def test_the_clock_runs_through_a_nested_end(clock):
+    clock._operation_clock_safe(True)
+    started = clock._clock_started
+    assert clock.timer_label.text().startswith("Started ") and "Elapsed 0:0" in clock.timer_label.text()
+    clock._operation_clock_safe(False)          # One-Click: the Wine step ends...
+    _spin(clock.app, 0.03)
+    clock._operation_clock_safe(True)           # ...and the next step starts
+    assert clock._clock_started == started, "one run, one clock"
+    assert not clock.logged
+
+
+def test_the_clock_stops_after_the_last_end(clock):
+    clock._operation_clock_safe(True)
+    clock._operation_clock_safe(False)
+    _spin(clock.app, 0.4)
+    assert clock._clock_started is None
+    assert "Finished in 0:00" in clock.timer_label.text()
+    assert clock.logged and clock.logged[0].startswith("Finished in 0:00 (started ")
+    clock._operation_clock_safe(False)          # a stray end changes nothing
+    assert len(clock.logged) == 1
