@@ -7390,6 +7390,52 @@ class AffinityInstallerGUI(QMainWindow):
             win = p
         return win.replace("/", "\\")
 
+    # Wine's own background processes, which never count as an installer.
+    WINE_SERVICE_EXES = {"services.exe", "winedevice.exe", "svchost.exe", "plugplay.exe",
+                         "rpcss.exe", "lsass.exe", "explorer.exe", "start.exe",
+                         "conhost.exe", "wineboot.exe"}
+
+    def _release_webview2_wait(self, stop, settle_seconds=10, interval=2):
+        """End the wait on the WebView2 setup once the runtime is installed.
+
+        The setup leaves MicrosoftEdgeUpdate.exe /c behind, which never exits,
+        so `wine start /wait` waited out the whole 1-hour stall timeout. Once
+        msedgewebview2.exe is in place and Edge's updater is all that is left
+        (Wine's services aside) for `settle_seconds`, stop the updater; Edge
+        Update is disabled right after anyway."""
+        app_dir = (Path(self.directory) / "drive_c" / "Program Files (x86)" / "Microsoft"
+                   / "EdgeWebView" / "Application")
+        quiet_since = None
+        while not stop.wait(interval):
+            try:
+                installed = any(app_dir.glob("*/msedgewebview2.exe"))
+            except OSError:
+                installed = False
+            updaters, others = [], []
+            for pid in self._prefix_wine_pids():
+                try:
+                    exe = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")[0]
+                except OSError:
+                    continue
+                name = exe.decode("utf-8", "replace").replace("\\", "/").rsplit("/", 1)[-1].lower()
+                if name.startswith("microsoftedgeupdate"):
+                    updaters.append(pid)
+                elif name not in self.WINE_SERVICE_EXES and name not in ("wine", "wine64", "wineserver", "wine-preloader", "wine64-preloader"):
+                    others.append(pid)
+            if not (installed and updaters and not others):
+                quiet_since = None
+                continue
+            quiet_since = quiet_since or time.monotonic()
+            if time.monotonic() - quiet_since < settle_seconds:
+                continue
+            self.log("WebView2 Runtime installed; stopping Edge Update, which the setup leaves running", "info")
+            for pid in updaters:
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                except OSError:
+                    pass
+            return
+
     def _has_installer_activity(self, installer_file: Path) -> bool:
         """Heuristics to detect installer activity:
         - Check for Wine processes referencing installer/common names
@@ -7525,9 +7571,16 @@ class AffinityInstallerGUI(QMainWindow):
                 cmd_str = " ".join(shlex.quote(c) for c in cmd)
                 self.log(f"Running ({label}) attempt {idx}: {cmd_str}", "info")
                 t0 = time.time()
+                watcher_stop = threading.Event()
+                if is_webview2:
+                    threading.Thread(target=self._release_webview2_wait,
+                                     args=(watcher_stop,), daemon=True).start()
                 # Affinity/WebView2 installers print nothing while they work
                 # (WINEDEBUG is silenced), so give them a long leash.
-                ok = self.run_command_streaming(cmd, env=env, stall_timeout=3600)
+                try:
+                    ok = self.run_command_streaming(cmd, env=env, stall_timeout=3600)
+                finally:
+                    watcher_stop.set()
                 dt = time.time() - t0
 
                 # For Affinity installers, check if installer is actually running despite exceptions

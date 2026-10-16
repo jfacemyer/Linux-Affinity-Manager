@@ -49,6 +49,7 @@ HELPER_METHODS = (
     "_terminate_process",
     "has_dotnet48_runtime",
     "verify_required_wine_runtimes",
+    "_release_webview2_wait",
 )
 
 
@@ -79,6 +80,7 @@ def harness(ali, tmp_path):
         # stall timeout (1800s). The real class was never affected.
         setattr(StandIn, name, inspect.getattr_static(ali.AffinityInstallerGUI, name))
 
+    StandIn.WINE_SERVICE_EXES = ali.AffinityInstallerGUI.WINE_SERVICE_EXES
     obj = StandIn()
     obj.directory = str(tmp_path)
     obj.cancel_event = threading.Event()
@@ -859,3 +861,71 @@ def test_install_font_verb_falls_back_without_cabextract(ali, tmp_path, monkeypa
     prefix, wine, _, _ = _fake_font_env(tmp_path, monkeypatch, ali)
     monkeypatch.setattr(ali.shutil, "which", lambda name: None)
     assert ali.install_font_verb(prefix, wine, "fakefonts", lambda u, p: False) is False
+
+
+# --------------------------------------------------------------------------- #
+# WebView2 setup: Edge Update left behind
+# --------------------------------------------------------------------------- #
+
+
+def spawn_named(prefix, argv0, seconds=60):
+    """A process in the prefix whose argv[0] reads like a Windows program's."""
+    env = {**os.environ, "WINEPREFIX": str(prefix)}
+    return subprocess.Popen(["bash", "-c", f'exec -a "{argv0}" sleep {seconds}'],
+                            env=env, start_new_session=True)
+
+
+def _webview2_installed(tmp_path):
+    app = tmp_path / "drive_c" / "Program Files (x86)" / "Microsoft" / "EdgeWebView" / "Application" / "142.0"
+    app.mkdir(parents=True)
+    (app / "msedgewebview2.exe").write_bytes(b"MZ")
+
+
+def test_release_webview2_wait_stops_the_leftover_updater(harness, tmp_path):
+    _webview2_installed(tmp_path)
+    updater = spawn_named(tmp_path, r"C:\\Program Files (x86)\\Microsoft\\EdgeUpdate\\MicrosoftEdgeUpdate.exe")
+    service = spawn_named(tmp_path, r"C:\\windows\\system32\\services.exe")
+    try:
+        stop = threading.Event()
+        thread = threading.Thread(target=harness._release_webview2_wait, args=(stop,),
+                                  kwargs={"settle_seconds": 0.3, "interval": 0.1})
+        thread.start()
+        assert wait_dead(updater), "the updater should be stopped"
+        thread.join(5)
+        assert not thread.is_alive()
+        assert service.poll() is None, "Wine's services are left alone"
+    finally:
+        stop.set()
+        kill_quietly(updater, service)
+
+
+def test_release_webview2_wait_waits_for_the_setup(harness, tmp_path):
+    _webview2_installed(tmp_path)
+    updater = spawn_named(tmp_path, r"C:\\Program Files (x86)\\Microsoft\\EdgeUpdate\\MicrosoftEdgeUpdate.exe")
+    setup = spawn_named(tmp_path, r"C:\\users\\me\\Temp\\setup.exe")
+    stop = threading.Event()
+    thread = threading.Thread(target=harness._release_webview2_wait, args=(stop,),
+                              kwargs={"settle_seconds": 0.3, "interval": 0.1})
+    try:
+        thread.start()
+        time.sleep(1.5)
+        assert updater.poll() is None, "not while the setup still runs"
+    finally:
+        stop.set()
+        thread.join(5)
+        kill_quietly(updater, setup)
+
+
+def test_release_webview2_wait_needs_the_runtime(harness, tmp_path):
+    updater = spawn_named(tmp_path, r"C:\\Program Files (x86)\\Microsoft\\EdgeUpdate\\MicrosoftEdgeUpdate.exe")
+    stop = threading.Event()
+    thread = threading.Thread(target=harness._release_webview2_wait, args=(stop,),
+                              kwargs={"settle_seconds": 0.3, "interval": 0.1})
+    try:
+        thread.start()
+        time.sleep(1.5)
+        assert updater.poll() is None, "not before msedgewebview2.exe exists"
+    finally:
+        stop.set()
+        thread.join(5)
+        kill_quietly(updater)
