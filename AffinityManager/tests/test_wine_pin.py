@@ -19,8 +19,9 @@ try:
     inst = aol.module()
     HAVE = hasattr(inst, "WINE_11_19_SHA256")
     HAVE_1118 = hasattr(inst, "WINE_11_18_SHA256")
+    HAVE_1120 = hasattr(inst, "WINE_11_20_SHA256")
 except aol.NotAvailable:
-    inst, HAVE, HAVE_1118 = None, False, False
+    inst, HAVE, HAVE_1118, HAVE_1120 = None, False, False, False
 
 pytestmark = pytest.mark.skipif(not HAVE, reason="installer without the Wine pin")
 
@@ -73,3 +74,15 @@ def test_the_11_18_download_carries_its_own_pin():
     assert config["wine_sha256"] == inst.WINE_11_18_SHA256
     assert config["wine_url"].endswith("/ElementalWarrior-wine-11.18.tar.xz")
     assert config["wine_dir_pattern"] == "ElementalWarrior-wine-11.18*"
+
+
+@pytest.mark.skipif(not HAVE_1120, reason="installer without Wine 11.20")
+def test_the_11_20_download_carries_its_own_pin():
+    assert re.fullmatch(r"[0-9a-f]{64}", inst.WINE_11_20_SHA256), \
+        "the placeholder was never replaced with the release's checksum"
+    assert inst.WINE_11_20_SHA256 != inst.WINE_11_19_SHA256
+    config = inst.AffinityInstallerGUI._get_wine_version_config(None, "11.20")
+    assert config["wine_sha256"] == inst.WINE_11_20_SHA256
+    assert "/releases/download/11.20-r" in config["wine_url"]
+    assert config["wine_url"].endswith("/ElementalWarrior-wine-11.20.tar.xz")
+    assert config["wine_dir_pattern"] == "ElementalWarrior-wine-11.20*"
