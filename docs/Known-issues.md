@@ -10,7 +10,7 @@ This document lists known issues and their workarounds. For the latest updates, 
 **Status:** Open ([#89](https://github.com/ryzendew/AffinityOnLinux/issues/89))
 
 **Workaround:**
-- Try the other Wine version (11.18 / 11.19)
+- Try the other Wine version (11.19 / 11.20)
 - Check GPU drivers are up to date
 - Use vkd3d-proton or DXVK instead of OpenCL (see [Hardware Acceleration](HARDWARE-ACCELERATION.md))
 
@@ -182,7 +182,7 @@ For the Canva sign-in, see [Login/Authentication Issues](#loginauthentication-is
 
 **Cause:** Affinity handles the callback in `ProcessCommandLineArguments`, which the .NET runtime cannot compile without WinMetadata and `System.Runtime.WindowsRuntime`. `winetricks dotnet48` does not install the second one. Wine's generated `affinity://` handler also uses `wine start`, which crashes on URLs longer than about 300 characters (seen on older stock Wine builds).
 
-**Fix:** For Affinity v3 the installer copies the WinRT facades from the .NET 4.8 offline installer into the prefix, then registers `affinity-url-handler.desktop` as the `affinity://` handler. It needs `7z` and about 350 MB of temporary space in the prefix. It downloads the .NET installer (about 70 MB) if the winetricks cache no longer has it. The handler is only registered when the prefix also has WinMetadata. Both Wine 11.18 and 11.19 carry the login metadata, so the fix applies on either. For an existing install, use **Troubleshooting → Fix Canva Sign-in (v3)**.
+**Fix:** For Affinity v3 the installer copies the WinRT facades from the .NET 4.8 offline installer into the prefix, then registers `affinity-url-handler.desktop` as the `affinity://` handler. It needs `7z` and about 350 MB of temporary space in the prefix. It downloads the .NET installer (about 70 MB) if the winetricks cache no longer has it. The handler is only registered when the prefix also has WinMetadata. The patched Wine builds from 11.18 on carry the login metadata, so the fix applies on any of them. For an existing install, use **Troubleshooting → Fix Canva Sign-in (v3)**.
 
 **Notes:**
 - WineFix 0.3.0 patches out the Canva sign-in dialog. With WineFix 0.3.0, a forwarded `affinity://` URL no longer crashes the running Affinity. Sign-in was not tested with it.
@@ -194,7 +194,7 @@ For the Canva sign-in, see [Login/Authentication Issues](#loginauthentication-is
 ### Wine 10.17 Bugs
 **Issue:** Wine 10.17 has major bugs and issues.
 
-**Workaround:** The installer does not use Wine 10.17. Use Wine 11.19 (recommended) or 11.18 (fallback). See [Wine Versions](WINE-VERSIONS.md) for details.
+**Workaround:** The installer does not use Wine 10.17. Use Wine 11.20 (recommended) or 11.19 (fallback). See [Wine Versions](WINE-VERSIONS.md) for details.
 
 ### Publisher Crashes on Stock Wine (BadImageFormatException / StoreLicense Error)
 

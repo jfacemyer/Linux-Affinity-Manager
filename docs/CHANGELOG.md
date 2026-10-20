@@ -1,5 +1,15 @@
 # Changelog
 
+## [2026-10-20] - Wine 11.20
+
+### Changed
+- **Wine 11.20 is the recommended version**, installed from [`11.20-r1`](https://github.com/jfacemyer/Affinity-Wine-Builder/releases/tag/11.20-r1) and pinned by SHA-256. It carries the whole Affinity patch set from 11.19-r10. The choices are now Wine 11.20 (recommended) and Wine 11.19 (fallback); 11.18 is no longer offered. From Wine 11.20 itself: a fresh prefix no longer stalls on a large `/etc/hosts`, and pen tablets get a larger event queue.
+
+### Fixed
+- **Affinity's setup window no longer stays white** until you move the mouse over it. Its first frame was drawn from another thread after the window had gone idle, and Wine never put it on screen. The fix is in 11.20-r1; the 11.19 patch set has it too, but no 11.19 release does yet.
+
+---
+
 ## [2026-10-16] - Wine 11.19-r10, no architecture warning
 
 ### Changed
