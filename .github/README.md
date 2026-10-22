@@ -44,13 +44,5 @@ curl -sSL https://github.com/jfacemyer/Linux-Affinity-Manager/raw/main/AffinityS
 See the [installer's README](/README.md) for what it sets up, supported
 distributions, dependencies and known issues.
 
-## About this repository
-
-This is a fork of
-[ryzendew/Linux-Affinity-Installer](https://github.com/ryzendew/Linux-Affinity-Installer)
-with the Affinity 3.3 work: Wine builds with the Affinity patches, opening
-documents from the file manager, the plugin loader with its newest fixes, and
-the manager. The installer's README is the one at the top of the repository.
-
 Affinity is a commercial product of Serif (Europe) Ltd; you need your own
 license to install it. This project is not affiliated with Serif or Canva.
