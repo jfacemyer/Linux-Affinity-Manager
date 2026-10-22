@@ -10,7 +10,7 @@ This document lists known issues and their workarounds. For the latest updates, 
 **Status:** Open ([#89](https://github.com/ryzendew/AffinityOnLinux/issues/89))
 
 **Workaround:**
-- Try the other Wine version (11.18 / 11.19)
+- Try the other Wine version (11.19 / 11.20)
 - Check GPU drivers are up to date
 - Use vkd3d-proton or DXVK instead of OpenCL (see [Hardware Acceleration](HARDWARE-ACCELERATION.md))
 
@@ -162,12 +162,27 @@ unzip -q "$HOME/Downloads/Affinity x64.msix" 'App/*' && cp -a App/. . && rm -rf 
 WINEPREFIX="$HOME/.AffinityLinux" wine reg add 'HKCU\Control Panel\Desktop' /v LogPixels /t REG_DWORD /d 192 /f
 ```
 
+### Microsoft Edge WebView2: Help Window Is Empty
+**Issue:** In Affinity v3 the Help window opens but stays empty. Affinity shows the Help with the Microsoft Edge WebView2 Runtime.
+
+**Cause:** With `msedgewebview2.exe` set to Windows 11 compatibility, the WebView2 GPU process fails at startup and WebView2 stops with `GPU process isn't usable. Goodbye.`
+
+**Fix:** The runtime is installed as Windows 11, and `msedgewebview2.exe` is then set to Windows 7 compatibility. Troubleshooting → "WebView2 Runtime (v3)" installs the runtime if it is missing and applies the WebView2 settings again if it is already installed. To set it by hand with the prefix's Wine:
+```bash
+WINEPREFIX="$HOME/.AffinityLinux" "$HOME/.AffinityLinux/ElementalWarriorWine/bin/wine" reg add 'HKCU\Software\Wine\AppDefaults\msedgewebview2.exe' /v Version /d win7 /f
+```
+Restart Affinity afterwards.
+
+Tested with ElementalWarrior Wine 10.10, WebView2 Runtime 142.0.3595.94 and Affinity 3.3.0.4850 on Ubuntu 26.04. On Wine 11.19 with the same runtime, all WebView2 processes stay up as Windows 7 while its GPU processes die as Windows 11. Other WebView2 dialogs were not tested.
+
+For the Canva sign-in, see [Login/Authentication Issues](#loginauthentication-issues).
+
 ### Login/Authentication Issues
 **Issue:** After signing in to Canva in the browser, the `affinity://` callback never reaches Affinity v3, or Affinity crashes when it arrives.
 
 **Cause:** Affinity handles the callback in `ProcessCommandLineArguments`, which the .NET runtime cannot compile without WinMetadata and `System.Runtime.WindowsRuntime`. `winetricks dotnet48` does not install the second one. Wine's generated `affinity://` handler also uses `wine start`, which crashes on URLs longer than about 300 characters (seen on older stock Wine builds).
 
-**Fix:** For Affinity v3 the installer copies the WinRT facades from the .NET 4.8 offline installer into the prefix, then registers `affinity-url-handler.desktop` as the `affinity://` handler. It needs `7z` and about 350 MB of temporary space in the prefix. It downloads the .NET installer (about 70 MB) if the winetricks cache no longer has it. The handler is only registered when the prefix also has WinMetadata. Both Wine 11.18 and 11.19 carry the login metadata, so the fix applies on either. For an existing install, use **Troubleshooting → Fix Canva Sign-in (v3)**.
+**Fix:** For Affinity v3 the installer copies the WinRT facades from the .NET 4.8 offline installer into the prefix, then registers `affinity-url-handler.desktop` as the `affinity://` handler. It needs `7z` and about 350 MB of temporary space in the prefix. It downloads the .NET installer (about 70 MB) if the winetricks cache no longer has it. The handler is only registered when the prefix also has WinMetadata. The patched Wine builds from 11.18 on carry the login metadata, so the fix applies on any of them. For an existing install, use **Troubleshooting → Fix Canva Sign-in (v3)**.
 
 **Notes:**
 - WineFix 0.3.0 patches out the Canva sign-in dialog. With WineFix 0.3.0, a forwarded `affinity://` URL no longer crashes the running Affinity. Sign-in was not tested with it.
@@ -179,7 +194,7 @@ WINEPREFIX="$HOME/.AffinityLinux" wine reg add 'HKCU\Control Panel\Desktop' /v L
 ### Wine 10.17 Bugs
 **Issue:** Wine 10.17 has major bugs and issues.
 
-**Workaround:** The installer does not use Wine 10.17. Use Wine 11.19 (recommended) or 11.18 (fallback). See [Wine Versions](WINE-VERSIONS.md) for details.
+**Workaround:** The installer does not use Wine 10.17. Use Wine 11.20 (recommended) or 11.19 (fallback). See [Wine Versions](WINE-VERSIONS.md) for details.
 
 ### Publisher Crashes on Stock Wine (BadImageFormatException / StoreLicense Error)
 
