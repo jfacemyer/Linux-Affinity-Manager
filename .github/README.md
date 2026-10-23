@@ -5,6 +5,37 @@ install you cannot afford to break, plus a copy to try a new Wine build or
 Affinity release in, backups before an upgrade, or a test copy of a client's
 setup.
 
+<details>
+<summary><strong>Python GUI Dependencies</strong></summary>
+
+The installer will attempt to install PyQt6 automatically if missing. If automatic installation fails, install it manually:
+
+**Arch/Artix/CachyOS/EndeavourOS/XeroLinux:**
+```bash
+sudo pacman -S python-pyqt6
+```
+
+**Fedora/Nobara:**
+```bash
+sudo dnf install python3-pyqt6 python3-pyqt6-svg
+```
+
+**openSUSE (Tumbleweed/Leap):**
+```bash
+sudo zypper install python313-PyQt6
+```
+
+**PikaOS:** 
+```bash
+sudo apt install python3-pyqt6.qtsvg
+```
+
+**Ubuntu 25.10:** If you encounter GUI issues, also install:
+```bash
+sudo apt install python3-pyqt6.qtsvg
+```
+
+</details>
 
 ## Linux Affinity Installer
 The installer you are used to.
