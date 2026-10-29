@@ -15,7 +15,7 @@ The packages below are the system dependencies the Affinity installer needs. The
 ```bash
 sudo dnf install wine winetricks wget curl p7zip p7zip-plugins tar jq zstd \
   dotnet-sdk-8.0 dotnet-sdk-10.0 \
-  python3-pyqt6 python3-pyqt6-svg
+  python3-pyqt6
 ```
 
 What these packages do:
@@ -27,7 +27,7 @@ What these packages do:
 | `p7zip`, `p7zip-plugins`, `tar`, `zstd` | Extract the Wine archive |
 | `jq` | Read configuration files |
 | `dotnet-sdk-8.0`, `dotnet-sdk-10.0` | Build the patcher the installer uses |
-| `python3-pyqt6`, `python3-pyqt6-svg` | The graphical interface of the installer |
+| `python3-pyqt6` | The graphical interface of the installer |
 
 ## Step 2: Verify the Installation
 
@@ -47,4 +47,4 @@ dotnet --list-sdks
 
 ## Notes
 
-- `python3-pyqt6-svg` is required for the installer's icons. Do not skip it.
+- Fedora has no `python3-pyqt6-svg` package. The SVG support the installer's icons need is part of `python3-pyqt6`.
