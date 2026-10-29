@@ -477,6 +477,13 @@ WINE_11_19_SHA256 = "637a0ec5ed8f225dd96c30796f9227f6f5a68ccc8e394a549391be7a6e9
 # this hash together.
 WINE_11_20_SHA256 = "ce47d3f9350629cb67c0e5a3091a171e26d500eed98a8f422e6f0905867ffd31"
 
+# vkd3d-proton (Affinity's D3D12), pinned the same way. The installer used to
+# take whatever release was newest on GitHub, so new installs got each one the
+# day it came out, untested. 3.1 was compared with 3.0.1 on Wine 11.20 and
+# behaves the same. Test a new release first, then update both together.
+VKD3D_PROTON_VERSION = "3.1"
+VKD3D_PROTON_SHA256 = "b85ea8219b71093a3924913dd7aae6172333dc0c069983ed510816d67f02120b"
+
 # The plugin loader. Upstream's latest release (v0.3.0, April) predates Canva
 # sign-in, the command-line open fix and the runtime Direct2D patches, all of
 # which sit unreleased on its dev branch. This build is that dev branch plus
@@ -13706,39 +13713,30 @@ class AffinityInstallerGUI(QMainWindow):
         self.log("\n✓ WinMetadata reinstallation completed!", "success")
 
     def get_latest_vkd3d_version(self):
-        """Get the latest vkd3d-proton version from GitHub releases API
+        """The vkd3d-proton version this installer installs: the pinned one.
 
         Returns:
-            str: Latest version tag (e.g., "3.0a") or None if check fails
+            str: Version (e.g., "3.1")
         """
+        self.log(f"vkd3d-proton version: {VKD3D_PROTON_VERSION} (pinned)", "info")
+        return VKD3D_PROTON_VERSION
+
+    def vkd3d_archive_matches(self, archive):
+        """True when a downloaded vkd3d-proton archive is the pinned release."""
         try:
-            api_url = "https://api.github.com/repos/HansKristian-Work/vkd3d-proton/releases/latest"
-            self.log("Checking for latest vkd3d-proton version...", "info")
-
-            request = urllib.request.Request(api_url)
-            request.add_header("User-Agent", "AffinityLinuxInstaller")
-
-            with urllib.request.urlopen(request, timeout=10) as response:
-                data = json.loads(response.read().decode())
-                latest_version = data.get("tag_name", "").lstrip(
-                    "v"
-                )  # Remove 'v' prefix if present
-
-                if latest_version:
-                    self.log(f"Latest vkd3d-proton version: {latest_version}", "info")
-                    return latest_version
-                else:
-                    self.log("Could not determine latest version from API", "warning")
-                    return None
-        except urllib.error.URLError as e:
-            self.log(f"Failed to check for latest vkd3d-proton version: {e}", "warning")
-            return None
-        except json.JSONDecodeError as e:
-            self.log(f"Failed to parse GitHub API response: {e}", "warning")
-            return None
-        except Exception as e:
-            self.log(f"Error checking for latest vkd3d-proton version: {e}", "warning")
-            return None
+            got = _sha256_of(archive)
+        except OSError as e:
+            self.log(f"Could not check the vkd3d-proton download: {e}", "error")
+            return False
+        if got == VKD3D_PROTON_SHA256:
+            self.log(f"vkd3d-proton {VKD3D_PROTON_VERSION}: checksum matches", "success")
+            return True
+        self.log(
+            f"The downloaded vkd3d-proton is not the release this installer expects "
+            f"(got {got[:16]}..., wanted {VKD3D_PROTON_SHA256[:16]}...). Not installing it.",
+            "error",
+        )
+        return False
 
     def get_installed_vkd3d_version(self):
         """Get the currently installed vkd3d-proton version from cache
@@ -14047,6 +14045,9 @@ class AffinityInstallerGUI(QMainWindow):
             vkd3d_file = Path(self.directory) / vkd3d_file_name
             if not self.download_file(vkd3d_url, str(vkd3d_file), "vkd3d-proton"):
                 self.log("Failed to download vkd3d-proton", "error")
+                return
+            if not self.vkd3d_archive_matches(vkd3d_file):
+                vkd3d_file.unlink(missing_ok=True)
                 return
 
             # Cache the downloaded file
@@ -14394,6 +14395,9 @@ class AffinityInstallerGUI(QMainWindow):
         self.log(f"Downloading vkd3d-proton {vkd3d_version}...", "info")
         if not self.download_file(vkd3d_url, str(vkd3d_file), "vkd3d-proton"):
             self.log("Failed to download vkd3d-proton", "error")
+            return
+        if not self.vkd3d_archive_matches(vkd3d_file):
+            vkd3d_file.unlink(missing_ok=True)
             return
 
         # Extract vkd3d-proton
