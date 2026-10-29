@@ -1,18 +1,60 @@
-# Affinity on Linux Manager
+# Affinity on Linux Manager and Affinity Installer
 
 Run Affinity on Linux, and keep several installs side by side: a working
 install you cannot afford to break, plus a copy to try a new Wine build or
 Affinity release in, backups before an upgrade, or a test copy of a client's
 setup.
 
+<details>
+<summary><strong>Python GUI Dependencies</strong></summary>
+
+The installer will attempt to install PyQt6 automatically if missing. If automatic installation fails, install it manually:
+
+**Arch/Artix/CachyOS/EndeavourOS/XeroLinux:**
 ```bash
-curl -sSL https://github.com/jfacemyer/Linux-Affinity-Manager/raw/main/AffinityManager/run.py | python3
+sudo pacman -S python-pyqt6
 ```
+
+**Fedora/Nobara:**
+```bash
+sudo dnf install python3-pyqt6
+```
+
+**openSUSE (Tumbleweed/Leap):**
+```bash
+sudo zypper install python313-PyQt6
+```
+
+**PikaOS:** 
+```bash
+sudo apt install python3-pyqt6.qtsvg
+```
+
+**Ubuntu 25.10:** If you encounter GUI issues, also install:
+```bash
+sudo apt install python3-pyqt6.qtsvg
+```
+
+</details>
+
+## Linux Affinity Installer
+The installer you are used to.
+```bash
+curl -sSL https://raw.githubusercontent.com/ryzendew/AffinityOnLinux/refs/heads/main/AffinityScripts/AffinityLinuxInstaller.py | python3
+```
+<img width="1283" height="1383" alt="image" src="https://github.com/user-attachments/assets/d75fe880-42fe-43da-b8e8-14b467c7c405" />
+
+## Affinity Manager Installer 
+The new Kid on the block with Advanced Features but same Goal!
 
 That starts the manager straight from this repository. It needs Python 3.10 or
 newer and PyQt6, and installs nothing on your system.
 
 ![The manager's window: two prefixes, one of them the Default](/AffinityManager/docs/manager-window.png)
+
+```bash
+curl -sSL https://github.com/jfacemyer/Linux-Affinity-Manager/raw/main/AffinityManager/run.py | python3
+```
 
 ## What it does
 
@@ -32,25 +74,8 @@ newer and PyQt6, and installs nothing on your system.
 
 The full guide is the [manager's README](/AffinityManager/README.md).
 
-## Just one Affinity?
-
-The installer also runs on its own. It sets up one Affinity, with the menu
-entry, document double-click and Canva sign-in pointing at it:
-
-```bash
-curl -sSL https://github.com/jfacemyer/Linux-Affinity-Manager/raw/main/AffinityScripts/AffinityLinuxInstaller.py | python3
-```
-
 See the [installer's README](/README.md) for what it sets up, supported
 distributions, dependencies and known issues.
-
-## About this repository
-
-This is a fork of
-[ryzendew/Linux-Affinity-Installer](https://github.com/ryzendew/Linux-Affinity-Installer)
-with the Affinity 3.3 work: Wine builds with the Affinity patches, opening
-documents from the file manager, the plugin loader with its newest fixes, and
-the manager. The installer's README is the one at the top of the repository.
 
 Affinity is a commercial product of Serif (Europe) Ltd; you need your own
 license to install it. This project is not affiliated with Serif or Canva.
