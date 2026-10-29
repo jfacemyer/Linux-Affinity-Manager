@@ -8120,6 +8120,7 @@ class AffinityInstallerGUI(QMainWindow):
 
             raw_distro = None
             distro_like = ""
+            ubuntu_codename = ""
             for line in content.split("\n"):
                 if line.startswith("ID="):
                     raw_distro = line.split("=", 1)[1].strip().strip('"')
@@ -8127,6 +8128,8 @@ class AffinityInstallerGUI(QMainWindow):
                     self.distro_version = line.split("=", 1)[1].strip().strip('"')
                 elif line.startswith("ID_LIKE="):
                     distro_like = line.split("=", 1)[1].strip().strip('"')
+                elif line.startswith("UBUNTU_CODENAME="):
+                    ubuntu_codename = line.split("=", 1)[1].strip().strip('"')
 
             self.raw_distro = raw_distro
             self.distro_like = distro_like
@@ -8141,9 +8144,14 @@ class AffinityInstallerGUI(QMainWindow):
                 self.distro = "pop"
 
             distro_like_tokens = {token.strip().lower() for token in distro_like.replace(",", " ").split() if token.strip()}
+            # Some Ubuntu respins (AnduinOS) say only ID_LIKE=debian, but still
+            # name the Ubuntu release they are built on. PikaOS has its own path.
             if (
                 self.distro not in {"ubuntu", "linuxmint", "zorin", "pop"}
-                and "ubuntu" in distro_like_tokens
+                and (
+                    "ubuntu" in distro_like_tokens
+                    or (ubuntu_codename and self.distro != "pikaos")
+                )
             ):
                 detected_name = self.format_distro_name(self.distro)
                 self.log(
