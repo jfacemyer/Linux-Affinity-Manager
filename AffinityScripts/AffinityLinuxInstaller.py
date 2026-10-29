@@ -16652,7 +16652,7 @@ Would you like to continue with {distro_name} anyway?"""
                     )
 
             # If it's an Affinity app, automatically create desktop entry and configure OpenCL
-            if app_name in ["Photo", "Designer", "Publisher"]:
+            if app_name in ["Photo", "Designer", "Publisher", "Add"]:
                 self.log(f"Detected Affinity app: {app_name}, configuring...", "info")
 
                 # Wait a bit more to ensure installation is fully complete
@@ -16667,6 +16667,7 @@ Would you like to continue with {distro_name} anyway?"""
                     "Photo": ("Photo", "Photo.exe", "Photo 2"),
                     "Designer": ("Designer", "Designer.exe", "Designer 2"),
                     "Publisher": ("Publisher", "Publisher.exe", "Publisher 2"),
+                    "Add": ("Affinity", "Affinity.exe", "Affinity"),
                 }
                 name, exe, dir_name = app_names.get(app_name, ("", "", ""))
                 app_path = (
@@ -16680,7 +16681,13 @@ Would you like to continue with {distro_name} anyway?"""
 
                 if app_path.exists():
                     self.log(f"Found application at: {app_path}", "success")
-                    self.precompile_affinity(app_path)
+                    if app_name == "Add":
+                        # Already precompiled above. The desktop entry only
+                        # claims the document types once the handler is in place.
+                        self.install_winrt_interop_facade()
+                        self.install_file_manager_handler()
+                    else:
+                        self.precompile_affinity(app_path)
                     # Automatically create desktop entry
                     # Call directly - create_desktop_entry uses signals so it's thread-safe
                     try:
@@ -16696,6 +16703,23 @@ Would you like to continue with {distro_name} anyway?"""
                     self.log(
                         "Desktop entry will not be created automatically.", "warning"
                     )
+
+                # Run AffinityPluginLoader + WineFix automatically after Affinity (Unified) installs
+                if app_name == "Add":
+                    if app_path.parent.exists():
+                        self.log(
+                            "\nRunning AffinityPluginLoader + WineFix install...",
+                            "info",
+                        )
+                        self._install_affinity_plugin_loader_thread(standalone=False)
+                    else:
+                        self.log(
+                            "\n⚠ Affinity directory not found — skipping AffinityPluginLoader install.",
+                            "warning",
+                        )
+                    # Last, after everything that can boot the prefix -- see
+                    # clear_shadowing_winmds().
+                    self.clear_shadowing_winmds()
 
                 display_name = {
                     "Add": "Affinity (Unified)",
@@ -16718,27 +16742,6 @@ Would you like to continue with {distro_name} anyway?"""
                 # For non-Affinity apps, just complete without desktop entry
                 display_name = app_name if app_name else "Application"
                 self.log(f"\n✓ {display_name} installation completed!", "success")
-
-                # Run AffinityPluginLoader + WineFix automatically after Affinity (Unified) installs
-                if app_name == "Add":
-                    install_dir = (
-                        Path(self.directory)
-                        / "drive_c"
-                        / "Program Files"
-                        / "Affinity"
-                        / "Affinity"
-                    )
-                    if install_dir.exists():
-                        self.log(
-                            "\nRunning AffinityPluginLoader + WineFix install...",
-                            "info",
-                        )
-                        self._install_affinity_plugin_loader_thread(standalone=False)
-                    else:
-                        self.log(
-                            "\n⚠ Affinity directory not found — skipping AffinityPluginLoader install.",
-                            "warning",
-                        )
 
                 self.show_message(
                     "Installation Complete",
