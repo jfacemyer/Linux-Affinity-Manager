@@ -7145,9 +7145,6 @@ class AffinityInstallerGUI(QMainWindow):
                         proc.stdin = None
                     except Exception:
                         pass
-                    # communicate() flushes stdin if it is still set, and
-                    # flushing a closed pipe raises ValueError.
-                    proc.stdin = None
 
                     stdout_acc = ""
                     stderr_acc = ""
