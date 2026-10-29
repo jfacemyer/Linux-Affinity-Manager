@@ -7142,6 +7142,7 @@ class AffinityInstallerGUI(QMainWindow):
                     try:
                         proc.stdin.write(password_input)
                         proc.stdin.close()
+                        proc.stdin = None
                     except Exception:
                         pass
                     # communicate() flushes stdin if it is still set, and
