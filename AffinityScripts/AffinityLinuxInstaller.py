@@ -12761,7 +12761,7 @@ class AffinityInstallerGUI(QMainWindow):
 
             # Find and link Wine directory
             self.update_progress(0.55)
-            wine_dir = next(Path(self.directory).glob(wine_dir_pattern), None)
+            wine_dir = next((p for p in Path(self.directory).glob(wine_dir_pattern) if p.is_dir()), None)
             if wine_dir and wine_dir != Path(self.directory) / wine_dir_name:
                 target = Path(self.directory) / wine_dir_name
                 if target.exists() or target.is_symlink():
@@ -14932,7 +14932,7 @@ class AffinityInstallerGUI(QMainWindow):
                 self.log("Copying Wine from cache...", "info")
 
                 # Find and link Wine directory
-                wine_dir = next(Path(self.directory).glob(wine_dir_pattern), None)
+                wine_dir = next((p for p in Path(self.directory).glob(wine_dir_pattern) if p.is_dir()), None)
                 if wine_dir and wine_dir != Path(self.directory) / wine_dir_name:
                     target = Path(self.directory) / wine_dir_name
                     if target.exists() or target.is_symlink():
@@ -15026,7 +15026,7 @@ class AffinityInstallerGUI(QMainWindow):
 
                 # Cache this version for future use
                 cache_dir.mkdir(parents=True, exist_ok=True)
-                extracted_dir = next(Path(self.directory).glob(wine_dir_pattern), None)
+                extracted_dir = next((p for p in Path(self.directory).glob(wine_dir_pattern) if p.is_dir()), None)
                 if extracted_dir:
                     cached_wine_dir = cache_dir / wine_version
                     if cached_wine_dir.exists():
@@ -15039,7 +15039,7 @@ class AffinityInstallerGUI(QMainWindow):
 
                 # Find and link Wine directory
                 self.update_progress(0.8)
-                wine_dir = next(Path(self.directory).glob(wine_dir_pattern), None)
+                wine_dir = next((p for p in Path(self.directory).glob(wine_dir_pattern) if p.is_dir()), None)
                 if wine_dir and wine_dir != Path(self.directory) / wine_dir_name:
                     target = Path(self.directory) / wine_dir_name
                     if target.exists() or target.is_symlink():
