@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import os
 import re
-import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -64,14 +63,32 @@ def exec_line(command) -> str:
     """Exec= for a command that needs environment.
 
     Desktop entries have no syntax for VAR=value before the program, so this
-    goes through env(1). Everything is quoted with shlex, because a prefix path
-    with a space in it otherwise produces an entry that fails silently."""
+    goes through env(1). Every argument is quoted the way the Desktop Entry
+    spec wants, because a prefix path with a space in it otherwise produces an
+    entry that fails silently."""
     parts = []
     if command.env:
         parts.append("env")
-        parts += [f"{k}={shlex.quote(v)}" for k, v in sorted(command.env.items())]
-    parts += [shlex.quote(a) for a in command.argv]
+        parts += [exec_quote(f"{k}={v}") for k, v in sorted(command.env.items())]
+    parts += [exec_quote(a) for a in command.argv]
     return " ".join(parts)
+
+
+# Characters the Desktop Entry spec reserves in Exec; an argument holding one
+# has to be quoted. The spec has only double quotes: single quotes (shlex) are
+# read by KDE and GLib, but not by stricter launchers, and desktop-file-validate
+# rejects them.
+EXEC_RESERVED = set(" \t\n\"'\\><~|&;$*?#()`")
+
+
+def exec_quote(arg: str) -> str:
+    """One Exec argument: double-quoted if it needs it, with ", `, $ and \\
+    escaped inside the quotes, then backslashes doubled for the string escape
+    that the spec applies first, and % doubled so it is not a field code."""
+    if arg and not any(c in EXEC_RESERVED for c in arg):
+        return arg.replace("%", "%%")
+    inner = re.sub(r'(["`$\\])', r"\\\1", arg)
+    return ('"' + inner + '"').replace("\\", "\\\\").replace("%", "%%")
 
 
 def build(prefix_name: str, command, *, name=None, comment=None, categories=None) -> str:

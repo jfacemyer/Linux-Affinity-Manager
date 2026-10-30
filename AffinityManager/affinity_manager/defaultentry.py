@@ -66,7 +66,8 @@ def current() -> str | None:
 def launched_prefix(path: Path) -> str | None:
     """The WINEPREFIX a desktop entry runs, as written, or None."""
     exec_line = _marker(path, "Exec") or ""
-    match = re.search(r"""WINEPREFIX=(?:"([^"]+)"|'([^']+)'|(\S+))""", exec_line)
+    match = re.search(r"""(?:"WINEPREFIX=([^"]+)"|WINEPREFIX=(?:"([^"]+)"|'([^']+)'|(\S+)))""",
+                      exec_line)
     return next((g for g in match.groups() if g), None) if match else None
 
 
@@ -103,7 +104,7 @@ def launch_command(prefix) -> tuple[commands.Command, bool]:
         label=MENU_LABEL,
         detail=f"Affinity in {prefix.name}",
         argv=[wine, exe],
-        env={"WINEPREFIX": str(prefix), **commands.affinity_env(build)},
+        env=commands.launch_env(prefix, build),
     )
     return command, exe.name == "affinity-on-linux.exe"
 

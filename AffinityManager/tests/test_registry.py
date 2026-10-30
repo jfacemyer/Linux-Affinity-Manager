@@ -220,8 +220,8 @@ class DesktopEntryTests(unittest.TestCase):
 
     def test_exec_line_quotes_paths_with_spaces(self):
         line = self.desktopentry.exec_line(self.command)
-        self.assertIn("'/prefix with space'", line)
-        self.assertIn("'/opt/wine bin/wine'", line)
+        self.assertIn('"WINEPREFIX=/prefix with space"', line)
+        self.assertIn('"/opt/wine bin/wine"', line)
         self.assertTrue(line.startswith("env "))
 
     def test_write_read_remove(self):

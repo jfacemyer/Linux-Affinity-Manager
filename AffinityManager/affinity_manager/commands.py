@@ -46,6 +46,60 @@ def affinity_env(build: str) -> dict:
     return {}
 
 
+# What the installer launches Affinity with on the Vulkan renderer (its
+# get_vulkan_runtime_env_vars and launch environment). A menu entry the manager
+# writes has to carry the same, or Affinity started from the menu runs
+# differently from Affinity started by the installer: on KWin/Xwayland, with
+# present_wait left on, its menus did not draw at all (discussion #216).
+VULKAN_ENV = {
+    "WINEDEBUG": "-all",
+    "DXVK_ASYNC": "0",
+    "DXVK_CONFIG": "d3d9.deferSurfaceCreation = True; d3d9.shaderModel = 1",
+    "DXVK_LOG_LEVEL": "none",
+    "VKD3D_DEBUG": "none",
+    "VKD3D_FEATURE_LEVEL": "12_1",
+    "VKD3D_SHADER_DEBUG": "none",
+    "VKD3D_SHADER_MODEL": "6_5",
+}
+D3D12_OVERRIDES = "d3d12=n,b;d3d12core=n,b"
+
+
+def runtime_env(prefix, session_type=None, nvidia=None) -> dict:
+    """The installer's Vulkan runtime environment, for a prefix on the Vulkan
+    renderer (or with none set, which the installer treats as Vulkan). Empty
+    for a prefix set to gl or gdi. The session type is read when the entry is
+    written, as the installer does."""
+    from . import renderer
+    chosen = (renderer.renderer_setting(prefix) or "vulkan").lower()
+    if chosen != "vulkan":
+        return {}
+    if session_type is None:
+        session_type = os.environ.get("XDG_SESSION_TYPE", "")
+    if nvidia is None:
+        nvidia = Path("/proc/driver/nvidia").exists()
+    env = dict(VULKAN_ENV)
+    env["WINEDLLOVERRIDES"] = D3D12_OVERRIDES
+    if session_type.lower() == "wayland":
+        env["VKD3D_DISABLE_EXTENSIONS"] = "VK_KHR_present_id,VK_KHR_present_wait"
+        if nvidia:
+            env["VKD3D_CONFIG"] = "swapchain_legacy"
+    else:
+        env["VKD3D_DISABLE_EXTENSIONS"] = "VK_KHR_present_id"
+    return env
+
+
+def launch_env(prefix, build: str, **kwargs) -> dict:
+    """Everything Affinity in this prefix is launched with on this build:
+    WINEPREFIX, the Vulkan runtime environment and the OpenCL guard, with the
+    DLL overrides of both joined rather than one replacing the other."""
+    env = {"WINEPREFIX": str(prefix), **runtime_env(prefix, **kwargs)}
+    for key, value in affinity_env(build).items():
+        if key == "WINEDLLOVERRIDES" and env.get(key):
+            value = f"{env[key]};{value}"
+        env[key] = value
+    return env
+
+
 class Command:
     __slots__ = ("group", "label", "detail", "argv", "env", "risky")
 
@@ -133,7 +187,7 @@ def for_prefix(prefix) -> list[Command]:
                     label=label,
                     detail=detail,
                     argv=[wine, exe],
-                    env={**base_env, **affinity_env(wine_label)},
+                    env=launch_env(prefix, wine_label),
                 )
             )
 
