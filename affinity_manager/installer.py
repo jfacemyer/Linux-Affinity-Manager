@@ -174,10 +174,9 @@ def launch_affinity(prefix, *, wine_build: str | None = None) -> subprocess.Pope
         raise FileNotFoundError(f"No Wine build {build} in {prefix}")
 
     env = dict(os.environ)
-    env["WINEPREFIX"] = str(prefix)
-    from .commands import affinity_env
+    from .commands import launch_env
 
-    env.update(affinity_env(build))
+    env.update(launch_env(prefix, build))
     return subprocess.Popen(
         [str(wine), str(exe)],
         env=env,
