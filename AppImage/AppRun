@@ -1,0 +1,255 @@
+#!/bin/bash
+# Affinity AppImage: start Affinity, and look after the install it runs.
+#
+#   Affinity.AppImage [document...]          start Affinity
+#   Affinity.AppImage --manage <command>     look after the install: status,
+#                                            upgrade, switch, snapshot... (--help)
+#   Affinity.AppImage --wine <tool> [args]   run a tool with this AppImage's Wine
+#                                            against the install (winecfg, regedit,
+#                                            wineserver -k, ...)
+#   Affinity.AppImage --update <setup.exe>   install a newer Affinity into it
+#   Affinity.AppImage --dpi                  choose the interface scaling again
+#
+# The install lives in ~/.affinity-appimage-wineprefix, or wherever
+# AFFINITY_APPIMAGE_PREFIX says. Beside it:
+#   <install>.previous   the install before the last upgrade, to go back to
+#   <install>.backups    settings snapshots, taken before every upgrade
+#
+# Installing, upgrading and going back are done by the same code the Affinity
+# on Linux Manager uses (usr/share/affinity-manager), so either can look after
+# an install the other made. That code needs python3. Without it, the AppImage
+# still installs and starts Affinity, and says that upgrades need python3.
+
+if [ -z "${APPDIR}" ]; then
+    APPDIR="$(dirname "$(readlink -f "${0}")")"
+fi
+export APPDIR
+
+PREFIX="${AFFINITY_APPIMAGE_PREFIX:-${HOME}/.affinity-appimage-wineprefix}"
+CLI="${APPDIR}/usr/share/affinity-manager/appimage-cli.py"
+
+# ── python3 for the install and upgrade code ────────────────────────────────
+
+have_python() {
+    command -v python3 >/dev/null 2>&1 &&
+        python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' 2>/dev/null
+}
+
+cli() {
+    # -I: ignore the user's PYTHONPATH and site packages; the code is all here.
+    python3 -I "${CLI}" --image-root "${APPDIR}" --image-path "${APPIMAGE:-}" \
+        --prefix "${PREFIX}" "$@"
+}
+
+say() {
+    # A message the user sees, wherever the AppImage was started from.
+    if command -v zenity >/dev/null 2>&1 && [ -n "${DISPLAY}${WAYLAND_DISPLAY}" ]; then
+        zenity --info --no-wrap --title="Affinity" --text="$1" 2>/dev/null
+    elif command -v kdialog >/dev/null 2>&1 && [ -n "${DISPLAY}${WAYLAND_DISPLAY}" ]; then
+        kdialog --title "Affinity" --msgbox "$1" 2>/dev/null
+    fi
+    echo "$1" >&2
+}
+
+# ── Wine's environment ───────────────────────────────────────────────────────
+
+wine_env() {
+    export WINEPREFIX="${PREFIX}"
+    export WINEARCH=win64
+    export PATH="${APPDIR}/usr/bin:${PATH}"
+    export LD_LIBRARY_PATH="${APPDIR}/usr/lib/wine/x86_64-unix:${APPDIR}/usr/lib:${LD_LIBRARY_PATH}"
+    export WINEDLLPATH="${APPDIR}/usr/lib/wine/x86_64-windows:${APPDIR}/usr/lib/wine/i386-windows"
+    export WINESERVER="${APPDIR}/usr/bin/wineserver"
+    export WINELOADER="${APPDIR}/usr/bin/wine"
+    # Affinity draws with Direct3D 12 through vkd3d-proton, which is in its
+    # folder; these are what the Affinity on Linux installer starts it with.
+    export DXVK_ASYNC=0
+    export DXVK_CONFIG="d3d9.deferSurfaceCreation = True; d3d9.shaderModel = 1"
+    export DXVK_LOG_LEVEL="${DXVK_LOG_LEVEL:-none}"
+    export VKD3D_DEBUG="${VKD3D_DEBUG:-none}"
+    export VKD3D_SHADER_DEBUG="${VKD3D_SHADER_DEBUG:-none}"
+    export VKD3D_FEATURE_LEVEL=12_1
+    export VKD3D_SHADER_MODEL=6_5
+    if [ "${XDG_SESSION_TYPE}" = "wayland" ]; then
+        # Under Xwayland, present_wait leaves Affinity's menus undrawn.
+        export VKD3D_DISABLE_EXTENSIONS=VK_KHR_present_id,VK_KHR_present_wait
+        [ -e /proc/driver/nvidia ] && export VKD3D_CONFIG=swapchain_legacy
+    else
+        export VKD3D_DISABLE_EXTENSIONS=VK_KHR_present_id
+    fi
+    export WINEDLLOVERRIDES="d3d12=n,b;d3d12core=n,b${WINEDLLOVERRIDES:+;${WINEDLLOVERRIDES}}"
+    [ -z "${WINEDEBUG}" ] && export WINEDEBUG=-all
+}
+
+affinity_dir() {
+    # Serif's own place, which this AppImage uses; AppImages up to 3.3.1 put
+    # Affinity one level up.
+    local nested="${PREFIX}/drive_c/Program Files/Affinity/Affinity"
+    local flat="${PREFIX}/drive_c/Program Files/Affinity"
+    if [ -f "${nested}/Affinity.exe" ]; then echo "${nested}"
+    elif [ -f "${flat}/Affinity.exe" ]; then echo "${flat}"
+    fi
+}
+
+# ── commands that are not "start Affinity" ───────────────────────────────────
+
+case "$1" in
+    --manage)
+        shift
+        if ! have_python; then
+            echo "--manage needs python3 (3.10 or newer)." >&2
+            exit 1
+        fi
+        cli "$@"
+        exit $?
+        ;;
+    --wine)
+        shift
+        tool="${1:-winecfg}"
+        shift
+        wine_env
+        if [ -x "${APPDIR}/usr/bin/${tool}" ]; then
+            exec "${APPDIR}/usr/bin/${tool}" "$@"
+        fi
+        exec "${APPDIR}/usr/bin/wine" "${tool}" "$@"
+        ;;
+    --update|--updater)
+        installer="$2"
+        if [ -z "${installer}" ] || [ ! -f "${installer}" ]; then
+            echo "Usage: $0 --update /path/to/Affinity-installer.exe" >&2
+            exit 1
+        fi
+        if [ -z "$(affinity_dir)" ]; then
+            echo "There is no Affinity install at ${PREFIX} to update. Start the AppImage once first." >&2
+            exit 1
+        fi
+        # Settings first, as before an upgrade. The installer updates Affinity
+        # in place: nothing is deleted beforehand, so a failed update leaves
+        # the Affinity that was there.
+        if have_python; then
+            cli snapshot --label "before-update" >/dev/null || {
+                say "Could not save your settings before updating, so nothing was changed."
+                exit 1
+            }
+        fi
+        wine_env
+        cd "${PREFIX}/drive_c" 2>/dev/null || true
+        "${APPDIR}/usr/bin/wine" "${installer}"
+        status=$?
+        "${APPDIR}/usr/bin/wineserver" -w
+        exit ${status}
+        ;;
+esac
+
+# ── first install, upgrade, interrupted upgrade ──────────────────────────────
+
+if have_python; then
+    cli prepare
+    status=$?
+    [ ${status} -ne 0 ] && exit ${status}
+elif [ ! -f "${PREFIX}/.affinity-appimage.json" ] && [ ! -f "${PREFIX}/.appimage-setup-complete" ]; then
+    # No python3: copy the prefix out the plain way, once.
+    if [ -e "${PREFIX}" ] && [ -n "$(ls -A "${PREFIX}" 2>/dev/null)" ]; then
+        say "${PREFIX} exists but was not made by an Affinity AppImage, so it is left alone."
+        exit 1
+    fi
+    echo "Setting up Affinity in ${PREFIX} (a few minutes, once)..." >&2
+    mkdir -p "$(dirname "${PREFIX}")"
+    rm -rf "${PREFIX}.installing"
+    if cp -a "${APPDIR}/wineprefix" "${PREFIX}.installing" &&
+            mv "${PREFIX}.installing" "${PREFIX}"; then
+        touch "${PREFIX}/.appimage-setup-complete"
+    else
+        rm -rf "${PREFIX}.installing"
+        say "Setting up ${PREFIX} failed. Is there enough free space?"
+        exit 1
+    fi
+else
+    echo "python3 3.10 or newer is not installed: this AppImage cannot offer upgrades." >&2
+fi
+
+APP="$(affinity_dir)"
+if [ -z "${APP}" ]; then
+    say "Affinity is not installed in ${PREFIX}."
+    exit 1
+fi
+
+# ── interface scaling ────────────────────────────────────────────────────────
+#
+# Asked once (or every time, if chosen), as the AppImage always has.
+
+DPI_CONFIG_FILE="${HOME}/.affinity-appimage-dpi.conf"
+DPI_PREFERENCE_FILE="${HOME}/.affinity-appimage-dpi-preference.conf"
+DPI_DEFAULT=96
+
+ask_dpi() {
+    local current="${1:-${DPI_DEFAULT}}" value choice
+    if ! command -v zenity >/dev/null 2>&1; then
+        echo "${current}" > "${DPI_CONFIG_FILE}"
+        echo "${current}"
+        return
+    fi
+    value=$(zenity --scale --title="Affinity - interface scaling" \
+        --text="Interface DPI (96 = 100%, 144 = 150%, 192 = 200%):" \
+        --min-value=96 --max-value=480 --value="${current}" --step=1 2>/dev/null)
+    if [ -z "${value}" ]; then
+        value="${current}"
+    elif [ ! -f "${DPI_PREFERENCE_FILE}" ]; then
+        choice=$(zenity --list --radiolist --title="Affinity - interface scaling" \
+            --text="DPI set to ${value}.\n\nAsk again next time?" \
+            --column="" --column="Option" \
+            FALSE "Ask each time" TRUE "Do not ask again" \
+            --width=400 --height=180 2>/dev/null)
+        if [ "${choice}" = "Do not ask again" ]; then
+            echo dont_show > "${DPI_PREFERENCE_FILE}"
+        else
+            echo show_each_time > "${DPI_PREFERENCE_FILE}"
+        fi
+    fi
+    echo "${value}" > "${DPI_CONFIG_FILE}"
+    echo "${value}"
+}
+
+SAVED_DPI=$(cat "${DPI_CONFIG_FILE}" 2>/dev/null)
+case "${SAVED_DPI}" in ''|*[!0-9]*) SAVED_DPI="" ;; esac
+if [ "$1" = "--dpi" ] || [ "$1" = "--show-dpi" ]; then
+    shift
+    DPI=$(ask_dpi "${SAVED_DPI:-${DPI_DEFAULT}}")
+elif [ -n "${AFFINITY_SHOW_DPI_DIALOG}" ] || [ -z "${SAVED_DPI}" ] ||
+        [ "$(cat "${DPI_PREFERENCE_FILE}" 2>/dev/null)" = "show_each_time" ]; then
+    DPI=$(ask_dpi "${SAVED_DPI:-${DPI_DEFAULT}}")
+else
+    DPI="${SAVED_DPI}"
+fi
+[ "${DPI}" -ge 96 ] 2>/dev/null && [ "${DPI}" -le 480 ] 2>/dev/null || DPI=${DPI_DEFAULT}
+
+wine_env
+cd "${PREFIX}/drive_c" 2>/dev/null || true
+
+# Written only when it changed: each `wine reg` starts the prefix's Wine
+# services, which is seconds on every start for nothing.
+DPI_APPLIED_FILE="${PREFIX}/.appimage-dpi"
+if [ "$(cat "${DPI_APPLIED_FILE}" 2>/dev/null)" != "${DPI}" ]; then
+    "${APPDIR}/usr/bin/wine" reg add "HKCU\\Control Panel\\Desktop" /v LogPixels /t REG_DWORD /d "${DPI}" /f >/dev/null 2>&1
+    "${APPDIR}/usr/bin/wine" reg add "HKCU\\Software\\Wine\\Fonts" /v LogPixels /t REG_DWORD /d "${DPI}" /f >/dev/null 2>&1
+    # Affinity is per-monitor DPI aware and would otherwise ignore LogPixels.
+    "${APPDIR}/usr/bin/wine" reg add "HKCU\\Software\\Wine\\AppDefaults\\affinity.exe" /v DpiAwareness /t REG_SZ /d System /f >/dev/null 2>&1
+    "${APPDIR}/usr/bin/wineserver" -w
+    echo "${DPI}" > "${DPI_APPLIED_FILE}"
+fi
+
+# ── start Affinity ───────────────────────────────────────────────────────────
+#
+# Through the Affinity on Linux handler when it is there: it turns a document's
+# Linux path into a Windows one, hands it to an Affinity that is already
+# running rather than starting a second (which would close the first), and
+# still starts Affinity through the plugin loader. Then the plugin loader's
+# hook, then Affinity itself.
+
+for exe in affinity-on-linux.exe AffinityHook.exe Affinity.exe; do
+    if [ -f "${APP}/${exe}" ]; then
+        exec "${APPDIR}/usr/bin/wine" "${APP}/${exe}" "$@"
+    fi
+done
+say "Affinity.exe is missing from ${APP}."
+exit 1
