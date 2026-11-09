@@ -21,7 +21,8 @@ What goes in, and what is left out of the prefix:
         Windows Installer cache (a gigabyte, and the 2 GiB GitHub limit), the
         WebView2 installer's cached copies,
         temporary files, drive letters other than C: and Z:, the installer's
-        Patch folder, and font registrations naming files on the build machine.
+        Patch folder, font registrations naming files on the build machine, and
+        Wine's records of the file associations it made there.
   in    everything else, as it is.
 
 The result is <work>/out/Affinity-<version>-x86_64.AppImage, its .sha256, and
@@ -119,30 +120,45 @@ def copy_prefix(src: Path, dst: Path) -> None:
             f.unlink()
 
 
-FONTS = r"[Software\\Microsoft\\Windows NT\\CurrentVersion\\Fonts]"
+# Keys holding font registrations, whose values may name a file on the build
+# machine (Z:\\...): Wine's and Windows' own, 64- and 32-bit.
+FONT_KEYS = ("\\\\CurrentVersion\\\\Fonts]", "\\\\Wine\\\\Fonts\\\\External Fonts]")
+# Keys that only record what Wine's menu builder wrote on the build machine:
+# .desktop and .menu files, by host path. They name nothing anywhere else, and
+# Wine writes its own on the user's machine.
+HOST_RECORDS = ("[Software\\\\Wine\\\\FileOpenAssociations", "[Software\\\\Wine\\\\MenuFiles]")
 
 
 def scrub_registry(prefix: Path) -> list[str]:
     """Font registrations that name a file on the build machine (Z:\\...)
     would name nothing on anybody else's. Their own fonts are registered on
-    their machine."""
+    their machine. The same goes for Wine's records of the file associations
+    it made on the build machine."""
     notes = []
     for name in ("system.reg", "user.reg"):
         path = prefix / name
         if not path.is_file():
             continue
         lines = path.read_text(encoding="latin-1").splitlines(keepends=True)
-        out, section, dropped = [], "", 0
+        out, section, dropped, records = [], "", 0, 0
         for line in lines:
             if line.startswith("["):
                 section = line.split("]")[0] + "]"
-            if section == FONTS and line.startswith('"') and '"Z:\\\\' in line:
+                if section.startswith(HOST_RECORDS):
+                    records += 1
+            if section.startswith(HOST_RECORDS):
+                continue
+            if (section.endswith(FONT_KEYS) and line.startswith('"')
+                    and '"Z:\\\\' in line):
                 dropped += 1
                 continue
             out.append(line)
-        if dropped:
+        if dropped or records:
             path.write_text("".join(out), encoding="latin-1")
+        if dropped:
             notes.append(f"{name}: {dropped} host font registration(s) removed")
+        if records:
+            notes.append(f"{name}: {records} menu builder record(s) removed")
     return notes
 
 
