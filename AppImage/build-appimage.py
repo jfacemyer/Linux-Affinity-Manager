@@ -24,8 +24,14 @@ What goes in, and what is left out of the prefix:
         Patch folder, and font registrations naming files on the build machine.
   in    everything else, as it is.
 
-The result is <work>/out/Affinity-<version>-x86_64.AppImage and its .sha256.
-Nothing here needs root.
+The result is <work>/out/Affinity-<version>-x86_64.AppImage, its .sha256, and
+its .zsync when zsyncmake is installed (the zsync package). Nothing here needs
+root.
+
+Updates: the image carries update information (in the runtime's .upd_info
+section) naming the .zsync of the latest GitHub release, so AppImageUpdate and
+AppImageLauncher's "Update" fetch only the blocks that changed. Publish the
+.zsync beside the AppImage in the same release, or those tools find nothing.
 """
 
 from __future__ import annotations
@@ -44,6 +50,11 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 GITHUB_LIMIT = 2 * 1024 ** 3
+
+# Where AppImageUpdate looks for the next version: the .zsync asset of the
+# latest (non-prerelease) release of this repository.
+UPDATE_INFO = ("gh-releases-zsync|ryzendew|Linux-Affinity-Installer|latest|"
+               "Affinity-*-x86_64.AppImage.zsync")
 
 # Files in Affinity's folder that are not Serif's: laid over a kept newer
 # Affinity on upgrade, so keeping it does not mean keeping old fixes. Not
@@ -227,6 +238,58 @@ def build_appdir(args, appdir: Path) -> dict:
     return manifest
 
 
+def elf_section(path: Path, name: str) -> tuple[int, int] | None:
+    """(file offset, size) of a section in a 64-bit little-endian ELF, or None."""
+    import struct
+    with open(path, "rb") as f:
+        head = f.read(64)
+        if head[:4] != b"\x7fELF" or head[4] != 2 or head[5] != 1:
+            return None
+        shoff, = struct.unpack_from("<Q", head, 0x28)
+        shentsize, shnum, shstrndx = struct.unpack_from("<HHH", head, 0x3A)
+        f.seek(shoff)
+        table = f.read(shentsize * shnum)
+        sections = [struct.unpack_from("<IIQQQQ", table, i * shentsize) for i in range(shnum)]
+        _, _, _, _, str_off, str_size = sections[shstrndx]
+        f.seek(str_off)
+        names = f.read(str_size)
+    for name_at, _, _, _, offset, size in sections:
+        end = names.find(b"\0", name_at)
+        if names[name_at:end].decode() == name:
+            return offset, size
+    return None
+
+
+def embed_update_info(image: Path, runtime: Path, info: str) -> None:
+    """Write the update information into the image's copy of the runtime.
+
+    The runtime is the start of the image, so the section is at the same
+    offset in both."""
+    where = elf_section(runtime, ".upd_info")
+    if where is None:
+        sys.exit(f"{runtime} has no .upd_info section: use the type2 runtime.")
+    offset, size = where
+    data = info.encode()
+    if len(data) >= size:
+        sys.exit(f"The update information is longer than the runtime's {size} bytes.")
+    with open(image, "r+b") as f:
+        f.seek(offset)
+        f.write(data + b"\0" * (size - len(data)))
+
+
+def make_zsync(args, image: Path) -> Path | None:
+    tool = args.zsyncmake or shutil.which("zsyncmake")
+    if not tool:
+        print("    zsyncmake not found (the zsync package): no .zsync made, so "
+              "AppImageUpdate will not find this version", file=sys.stderr)
+        return None
+    target = image.with_name(image.name + ".zsync")
+    log(f"Writing {target.name}")
+    # -u: the AppImage's URL relative to the .zsync, so both sit in one release.
+    run(["nice", "-n", "10", tool, "-u", image.name, "-o", target, image])
+    return target
+
+
 def squash(args, appdir: Path, out: Path, manifest: dict) -> Path:
     out.mkdir(parents=True, exist_ok=True)
     fs = out / "image.squashfs"
@@ -244,6 +307,9 @@ def squash(args, appdir: Path, out: Path, manifest: dict) -> Path:
                 shutil.copyfileobj(src, dst, 16 * 1024 * 1024)
     os.chmod(image, 0o755)
     fs.unlink()
+    if args.update_info:
+        embed_update_info(image, Path(args.runtime), args.update_info)
+        print(f"    update information: {args.update_info}")
     digest = hashlib.sha256()
     with open(image, "rb") as f:
         for block in iter(lambda: f.read(16 * 1024 * 1024), b""):
@@ -254,6 +320,8 @@ def squash(args, appdir: Path, out: Path, manifest: dict) -> Path:
     if size > GITHUB_LIMIT:
         print("    WARNING: over GitHub's 2 GiB limit for a release asset", file=sys.stderr)
     (out / (image.name + ".json")).write_text(json.dumps(manifest, indent=2) + "\n")
+    if args.update_info:
+        make_zsync(args, image)
     return image
 
 
@@ -269,6 +337,10 @@ def main(argv=None):
     p.add_argument("--work", required=True, help="an empty or new folder to build in")
     p.add_argument("--opencl", help="an OpenCL ICD loader (libOpenCL.so.1) to include")
     p.add_argument("--level", type=int, default=19, help="zstd level (default 19)")
+    p.add_argument("--update-info", default=UPDATE_INFO,
+                   help="where AppImageUpdate looks for the next version "
+                        f"(default: {UPDATE_INFO}); '' for none")
+    p.add_argument("--zsyncmake", help="the zsyncmake to use (default: the one on PATH)")
     p.add_argument("--processors", type=int, default=max(1, (os.cpu_count() or 4) * 3 // 4))
     args = p.parse_args(argv)
 

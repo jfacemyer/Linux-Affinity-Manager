@@ -40,6 +40,11 @@ Affinity.AppImage --dpi                      # choose the interface scaling agai
 `AFFINITY_APPIMAGE_PREFIX=/some/folder` runs a different install, so several
 can sit side by side.
 
+**Getting the next version.** AppImageLauncher's *Update* and AppImageUpdate
+know where releases are published and download only the parts of the file that
+changed. Starting the new file then offers the upgrade as above. Downloading it
+by hand from the releases page works the same way.
+
 Installing, upgrading and going back need `python3` (3.10 or newer), which
 desktop Linux has. Without it the AppImage still installs and starts Affinity.
 
@@ -80,5 +85,12 @@ AppImage/build-appimage.py \
   and .NET is about 1.7 GiB.
 - `-processors` defaults to three quarters of the cores, at `nice 10`.
 
-The output is `Affinity-<version>-x86_64.AppImage`, its `.sha256`, and the
-manifest as `.json`.
+The output is `Affinity-<version>-x86_64.AppImage`, its `.sha256`, its
+`.zsync` (when `zsyncmake`, from the zsync package, is installed; or
+`--zsyncmake PATH`), and the manifest as `.json`.
+
+**Releasing.** Upload the AppImage **and its `.zsync`** to a release that is
+not marked pre-release: the image's update information points at the `.zsync`
+of the latest release of ryzendew/Linux-Affinity-Installer
+(`--update-info` changes that; `--update-info ''` leaves it out). A release
+without the `.zsync` is one that AppImageUpdate cannot see.
