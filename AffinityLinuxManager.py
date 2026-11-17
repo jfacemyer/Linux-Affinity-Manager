@@ -61,6 +61,8 @@ from PyQt6.QtWidgets import (
 from affinity_manager import (
     __version__,
     aol,
+    appimage,
+    appimagerun,
     backups,
     coldstart,
     commands as commands_mod,
@@ -117,9 +119,13 @@ class ProbeThread(QThread):
                 info["size"] = (probe.disk_usage(entry["path"])
                                 if info["exists"] else 0)
                 # A prefix that lost renderer=vulkan stays on OpenGL however
-                # it is started; put it back while nothing runs in it.
+                # it is started; put it back while nothing runs in it. Not in
+                # a linked AppImage install: its Wine and its settings are the
+                # AppImage's, which may want something else.
                 try:
-                    info["renderer_restored"] = renderer.restore_vulkan(entry["path"])
+                    info["renderer_restored"] = (
+                        info.get("appimage") != appimage.LINKED
+                        and renderer.restore_vulkan(entry["path"]))
                 except OSError:
                     info["renderer_restored"] = False
             except Exception as exc:
@@ -1309,7 +1315,7 @@ class SnapshotsDialog(SizedDialog):
 
     def _reload(self):
         self.tree.clear()
-        for snap in snapshots.listing(self.name):
+        for snap in snapshots.listing(self.name, self.path):
             item = QTreeWidgetItem([
                 snap.when,
                 snap.label or "—",
@@ -2152,7 +2158,8 @@ class FindDialog(SizedDialog):
     def _what_it_is(item) -> str:
         """The Affinity column, for a row that may have no Affinity in it."""
         if item.get("has_affinity"):
-            return item["affinity_version"] or "installed"
+            version = item["affinity_version"] or "installed"
+            return f"{version} (AppImage)" if item.get("appimage") else version
         if item.get("wine"):
             return "not installed yet"
         return "empty prefix"
@@ -2316,10 +2323,10 @@ class FindDialog(SizedDialog):
 
 COPY_KINDS = (
     ("backup", "Back up",
-     "An exact copy of the whole prefix, plus the desktop files around it: "
-     "the menu entry, what opens .afphoto/.afdesign/.afpub, Wine's file-type "
-     "definitions, and launchers that name the prefix. Kept wherever you "
-     "choose. Never launched.",
+     "A copy kept wherever you choose, never launched: the whole prefix plus "
+     "the desktop files around it (the menu entry, what opens "
+     ".afphoto/.afdesign/.afpub, launchers) -- or only Affinity and your "
+     "settings, or only your settings.",
      "Before an install or an upgrade. Restoring puts all of it back.",
      "The prefix's full size"),
     ("clone", "Clone",
@@ -2435,9 +2442,15 @@ class BackupDialog(SizedDialog):
 
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
-            self.size = maintenance._du(self.prefix)
+            self.sizes = {}
+            for level in backups.LEVELS:
+                try:
+                    self.sizes[level] = backups.level_size(self.prefix, level)
+                except OSError:
+                    self.sizes[level] = 0
         finally:
             QApplication.restoreOverrideCursor()
+        self.size = self.sizes[backups.LEVEL_FULL]
 
         layout = QVBoxLayout(self)
         layout.addWidget(kinds_legend("backup"))
@@ -2447,9 +2460,37 @@ class BackupDialog(SizedDialog):
                                      waiting_for="back it up")
         layout.addWidget(self.banner)
 
-        layout.addWidget(QLabel(
-            f"<b>Where</b> — {entry['name']} needs about "
-            f"{probe.human_size(self.size)}"))
+        # What to keep. Most of a prefix can be had again -- from the
+        # installer, or from the AppImage it came from -- and the user's own
+        # part is small, so the smaller levels are real choices, not lesser ones.
+        layout.addWidget(QLabel("<b>What</b>"))
+        self.levels = QButtonGroup(self)
+        captions = {
+            backups.LEVEL_FULL: "Everything: restores exactly this prefix, Wine and "
+                                "all, and the desktop files around it.",
+            backups.LEVEL_PROGRAM: "Affinity's folder and your settings, presets, fonts "
+                                   "and sign-in. Restores into an existing prefix -- one "
+                                   "rebuilt from the installer or an AppImage.",
+            backups.LEVEL_SETTINGS: "Just your settings, presets, fonts and sign-in.",
+        }
+        for level in backups.LEVELS:
+            radio = QRadioButton(f"{backups.LEVEL_NAMES[level]} — about "
+                                 f"{probe.human_size(self.sizes[level])}")
+            radio.setProperty("level", level)
+            self.levels.addButton(radio)
+            layout.addWidget(radio)
+            note = QLabel(captions[level])
+            note.setWordWrap(True)
+            note.setObjectName("cardCaption")
+            note.setContentsMargins(26, 0, 0, 4)
+            layout.addWidget(note)
+            if level == backups.LEVEL_PROGRAM and not probe.has_affinity(self.prefix):
+                radio.setEnabled(False)
+        self.levels.buttons()[0].setChecked(True)
+        layout.addSpacing(6)
+
+        self.where_label = QLabel("")
+        layout.addWidget(self.where_label)
         self.group = QButtonGroup(self)
         self.locations_box = QVBoxLayout()
         layout.addLayout(self.locations_box)
@@ -2492,9 +2533,22 @@ class BackupDialog(SizedDialog):
         layout.addWidget(buttons)
 
         self.group.buttonToggled.connect(lambda *_: self._check())
+        self.levels.buttonToggled.connect(lambda *_: self._level_changed())
         if self.group.buttons():
             self.group.buttons()[0].setChecked(True)
         self.banner.changed.connect(lambda *_: self._check())
+        self._level_changed()
+
+    def level(self):
+        button = self.levels.checkedButton()
+        return button.property("level") if button else backups.LEVEL_FULL
+
+    def _level_changed(self):
+        self.size = self.sizes[self.level()]
+        full = self.level() == backups.LEVEL_FULL
+        self.host.setEnabled(full)
+        self.host.setChecked(full)
+        self.where_label.setText(f"<b>Where</b> — about {probe.human_size(self.size)}")
         self._check()
 
     def _add_location(self, loc):
@@ -2549,7 +2603,7 @@ class BackupDialog(SizedDialog):
             self.plan = backups.plan_backup(
                 self.entry["name"], self.prefix, loc.path,
                 label=self.label.text(), include_host=self.host.isChecked(),
-                size=self.size)
+                size=self.size, level=self.level())
         except (backups.BackupError, maintenance.NotEnoughSpace, OSError) as exc:
             QMessageBox.warning(self, "Cannot back up there", str(exc))
             return
@@ -2597,6 +2651,9 @@ class RestoreBackupDialog(SizedDialog):
         for box in (self.do_prefix, self.do_host):
             box.toggled.connect(self._replan)
             layout.addWidget(box)
+            # A partial backup restores its parts into the prefix as it is;
+            # there is no whole prefix or desktop files to choose between.
+            box.setVisible(backup.level == backups.LEVEL_FULL)
 
         self.detail = QLabel("")
         self.detail.setWordWrap(True)
@@ -2996,6 +3053,359 @@ class SettingsDialog(SizedDialog):
             self, "Default backup location", self.backup_location.text())
         if chosen:
             self.backup_location.setText(chosen)
+
+
+class AppImageDialog(SizedDialog):
+    """An AppImage install: where it came from, and the way back.
+
+    Everything about an AppImage install that is not shared with other
+    prefixes, in one place: upgrading it from a newer AppImage, going back to
+    the install kept from the last upgrade, deleting that, and pointing at the
+    AppImage file again after it was moved. Its settings snapshots are the
+    ordinary Snapshots dialog -- they are kept beside the install, but they are
+    the same thing."""
+
+    FIT_MIN_WIDTH = 640
+
+    def __init__(self, manager, entry):
+        super().__init__(manager)
+        self.manager = manager
+        self.entry = entry
+        self.path = Path(entry["path"]).expanduser()
+        self.setWindowTitle(f"AppImage — {entry['name']}")
+        self.setModal(True)
+        ui.apply(self)
+
+        layout = QVBoxLayout(self)
+        self.info = QLabel("")
+        self.info.setWordWrap(True)
+        self.info.setTextFormat(Qt.TextFormat.RichText)
+        layout.addWidget(self.info)
+
+        self.resume_button = QPushButton("Finish or undo the interrupted upgrade")
+        self.resume_button.clicked.connect(self._resume)
+        self.upgrade_button = QPushButton("Upgrade from an AppImage…")
+        self.upgrade_button.clicked.connect(self._upgrade)
+        self.switch_button = QPushButton("Go back to the previous install")
+        self.switch_button.clicked.connect(self._switch)
+        self.remove_button = QPushButton("Delete the previous install")
+        self.remove_button.clicked.connect(self._remove_previous)
+        self.locate_button = QPushButton("Locate the AppImage…")
+        self.locate_button.clicked.connect(self._locate)
+        for b in (self.resume_button, self.upgrade_button, self.switch_button,
+                  self.remove_button, self.locate_button):
+            b.setObjectName("actionButton")
+            layout.addWidget(b)
+
+        row = QHBoxLayout()
+        row.addStretch(1)
+        close = QPushButton("Close")
+        close.clicked.connect(self.accept)
+        row.addWidget(close)
+        layout.addLayout(row)
+        self._reload()
+
+    def _reload(self):
+        inst = appimage.inspect(self.path)
+        if inst is None:
+            self.info.setText(f"{html.escape(str(self.path))} is not an AppImage install.")
+            for b in (self.upgrade_button, self.switch_button, self.remove_button,
+                      self.locate_button, self.resume_button):
+                b.setEnabled(False)
+            return
+        esc = lambda v: html.escape(str(v))  # noqa: E731
+        lines = []
+        if inst.kind == appimage.LINKED:
+            image = appimagerun.image_for(inst)
+            lines.append("<b>Runs from its AppImage</b>: Wine is inside the AppImage "
+                         "file, which starts it and offers each newer AppImage's "
+                         "upgrade.")
+            lines.append("AppImage: " + (esc(image) if image else
+                                        "<span style='color:#E5484D'>not found"
+                                        + (f" (was {esc(inst.image_path)})" if inst.image_path else "")
+                                        + "</span>"))
+        else:
+            lines.append("<b>Self-contained</b>: the AppImage's Wine was copied in, "
+                         "so it runs without the AppImage, like any managed prefix.")
+        lines.append(f"From AppImage {esc(inst.image_version)}"
+                     + (f", built {esc(inst.built[:10])}" if inst.built else "")
+                     + f" — Affinity {esc(inst.affinity or 'not installed')}, "
+                     f"Wine {esc(inst.wine)}")
+        prev = inst.previous
+        prev_size = 0
+        if prev:
+            prev_size = maintenance._du(prev.path)
+            lines.append(f"<b>Kept from the last upgrade</b>: Affinity "
+                         f"{esc(prev.affinity or '?')} ({esc(probe.human_size(prev_size))}), "
+                         f"in {esc(prev.path.name)}. Going back swaps the two, so the "
+                         "newer one is kept in its place.")
+        else:
+            lines.append("No install is kept from an earlier upgrade.")
+        snaps = appimage.list_snapshots(self.path)
+        if snaps:
+            lines.append(f"{len(snaps)} settings snapshot(s), "
+                         f"{esc(probe.human_size(sum(s.bytes for s in snaps)))}, in "
+                         f"{esc(appimage.backups_of(self.path).name)} — see Snapshots…")
+        why = appimage.interrupted(self.path)
+        if why:
+            lines.append(f"<span style='color:#E5484D'><b>Interrupted:</b> {esc(why)}</span>")
+        self.info.setText("<br><br>".join(lines))
+        self.resume_button.setVisible(bool(why))
+        self.upgrade_button.setEnabled(not why)
+        self.switch_button.setEnabled(prev is not None and not why)
+        self.remove_button.setEnabled(prev is not None and not why)
+        self.remove_button.setText(
+            f"Delete the previous install ({probe.human_size(prev_size)})" if prev
+            else "Delete the previous install")
+        self.locate_button.setVisible(inst.kind == appimage.LINKED)
+
+    def _done(self, title, notes, error):
+        self.manager.refresh()
+        self._reload()
+        if error:
+            QMessageBox.critical(self, title, error)
+        elif notes:
+            QMessageBox.information(self, title, "\n".join(notes))
+
+    def _resume(self):
+        try:
+            notes = appimage.resume(self.path)
+        except (OSError, appimage.AppImageError) as exc:
+            self._done("Could not finish it", None, str(exc))
+            return
+        self._done("Done", notes or ["Nothing was left to do."], None)
+
+    def _upgrade(self):
+        found = appimagerun.candidates()
+        start = str(found[0]) if found else str(Path.home())
+        chosen, _ = QFileDialog.getOpenFileName(
+            self, "The newer AppImage", start, "AppImages (*.AppImage *.appimage);;All files (*)")
+        if not chosen:
+            return
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            status = appimagerun.status(chosen, self.path)
+        except appimagerun.ImageFailed as exc:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.warning(self, "Cannot upgrade from this AppImage", str(exc))
+            return
+        QApplication.restoreOverrideCursor()
+        image, inst = status.get("image") or {}, status.get("install") or {}
+        relation = status.get("relation")
+        text = (f"Upgrade {self.entry['name']} to AppImage {image.get('version')}: "
+                f"Affinity {image.get('affinity')}, Wine {image.get('wine')}.\n\n"
+                f"It has Affinity {inst.get('affinity') or '?'} now.\n\n"
+                "Your settings, presets, fonts and sign-in are saved first and "
+                "carried into the upgraded install.")
+        if relation == "same":
+            text += "\n\nThis is the AppImage the install already came from."
+        elif relation == "older":
+            text += "\n\nThis AppImage is OLDER than the one the install came from."
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Upgrade")
+        ui.apply(dialog)
+        lay = QVBoxLayout(dialog)
+        label = QLabel(text)
+        label.setWordWrap(True)
+        lay.addWidget(label)
+        keep = QCheckBox("Keep the current install, so I can go back to it "
+                         "(it is renamed, not copied)")
+        keep.setChecked(True)
+        lay.addWidget(keep)
+        if inst.get("previous"):
+            note = QLabel("That replaces the install kept from the last upgrade.")
+            note.setObjectName("descriptionLabel")
+            lay.addWidget(note)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
+                                   | QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Upgrade")
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        lay.addWidget(buttons)
+        dialog.setMinimumWidth(520)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        args = [] if keep.isChecked() else ["--discard-previous"]
+        name = self.entry["name"]
+        self.accept()
+        self.manager._run_task(
+            name, "Upgrade", f"Upgrading {name}",
+            lambda progress: appimagerun.manage(
+                chosen, self.path, "upgrade", *args,
+                progress=lambda pct, _text: progress(int(pct))),
+            lambda result, error: self.manager._appimage_finished(
+                "Upgraded", (result or {}).get("notes"), error))
+
+    def _switch(self):
+        inst = appimage.inspect(self.path)
+        prev = inst.previous if inst else None
+        if prev is None:
+            return
+        if QMessageBox.question(
+                self, "Go back?",
+                f"Use the install with Affinity {prev.affinity or '?'} again?\n\n"
+                f"The one in use now (Affinity {inst.affinity or '?'}) is kept as "
+                f"{prev.path.name}, so you can switch back the same way.",
+                QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel) != QMessageBox.StandardButton.Ok:
+            return
+        try:
+            notes = appimage.switch_to_previous(self.path)
+        except (OSError, appimage.AppImageError) as exc:
+            self._done("Could not switch", None, str(exc))
+            return
+        self._done("Switched", notes, None)
+
+    def _remove_previous(self):
+        prev = appimage.previous_of(self.path)
+        if not ConfirmDialog.ask(
+                self, "Delete the previous install?",
+                f"{prev}\n\nThis is the way back to the install before the last "
+                "upgrade. Deleting it cannot be undone. Your settings snapshots "
+                "are kept."):
+            return
+        try:
+            notes = appimage.remove_previous(self.path)
+        except (OSError, appimage.AppImageError) as exc:
+            self._done("Could not delete it", None, str(exc))
+            return
+        self._done("Deleted", notes, None)
+
+    def _locate(self):
+        found = appimagerun.candidates()
+        start = str(found[0]) if found else str(Path.home())
+        chosen, _ = QFileDialog.getOpenFileName(
+            self, "The AppImage that runs this install", start,
+            "AppImages (*.AppImage *.appimage);;All files (*)")
+        if not chosen:
+            return
+        appimage.remember_image(self.path, chosen)
+        self._done("Located", [f"{self.entry['name']} now runs from {chosen}."], None)
+
+
+class InstallAppImageDialog(SizedDialog):
+    """Install Affinity from an AppImage, into a prefix with a name.
+
+    The AppImage carries a finished prefix, so this is a copy rather than an
+    installer run: a few minutes, no downloads. Two kinds, said plainly,
+    because they behave differently later."""
+
+    FIT_MIN_WIDTH = 640
+
+    def __init__(self, parent, reg):
+        super().__init__(parent)
+        self.reg = reg
+        self.setWindowTitle("Install from an AppImage")
+        self.setModal(True)
+        ui.apply(self)
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self.image = QLineEdit()
+        found = appimagerun.candidates()
+        if found:
+            self.image.setText(str(found[0]))
+        browse = QPushButton("Browse…")
+        browse.clicked.connect(self._browse_image)
+        image_row = QHBoxLayout()
+        image_row.addWidget(self.image, 1)
+        image_row.addWidget(browse)
+        form.addRow("AppImage", image_row)
+
+        self.name = QLineEdit(reg.suggest_name())
+        self.name.textChanged.connect(self._update)
+        form.addRow("Name", self.name)
+
+        self.in_base = QRadioButton()
+        self.elsewhere = QRadioButton("Somewhere else:")
+        self.in_base.setChecked(True)
+        self.where = QLineEdit(str(Path.home()))
+        pick = QPushButton("Choose…")
+        pick.clicked.connect(self._browse_folder)
+        place = QVBoxLayout()
+        place.addWidget(self.in_base)
+        other = QHBoxLayout()
+        other.addWidget(self.elsewhere)
+        other.addWidget(self.where, 1)
+        other.addWidget(pick)
+        place.addLayout(other)
+        form.addRow("Where", place)
+        for w in (self.in_base, self.elsewhere):
+            w.toggled.connect(self._update)
+        self.where.textChanged.connect(self._update)
+        layout.addLayout(form)
+
+        self.unpacked = QRadioButton("Self-contained")
+        self.linked = QRadioButton("Linked to the AppImage file")
+        self.unpacked.setChecked(True)
+        for radio, caption in (
+                (self.unpacked, "Wine is copied into the prefix (about 0.7 GB more). It "
+                                "works like every other prefix here, and the AppImage "
+                                "file is not needed again."),
+                (self.linked, "Smaller. The AppImage starts it, and starting a newer "
+                              "AppImage offers to upgrade it. The file has to stay "
+                              "where it is.")):
+            layout.addWidget(radio)
+            note = QLabel(caption)
+            note.setWordWrap(True)
+            note.setObjectName("cardCaption")
+            note.setContentsMargins(24, 0, 0, 6)
+            layout.addWidget(note)
+        self.target_label = QLabel("")
+        self.target_label.setWordWrap(True)
+        self.target_label.setObjectName("descriptionLabel")
+        layout.addWidget(self.target_label)
+
+        self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
+                                        | QDialogButtonBox.StandardButton.Cancel)
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Install")
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        layout.addWidget(self.buttons)
+        self._update()
+
+    def _browse_image(self):
+        chosen, _ = QFileDialog.getOpenFileName(
+            self, "An Affinity AppImage", self.image.text() or str(Path.home()),
+            "AppImages (*.AppImage *.appimage);;All files (*)")
+        if chosen:
+            self.image.setText(chosen)
+            self._update()
+
+    def _browse_folder(self):
+        chosen = QFileDialog.getExistingDirectory(self, "Put the prefix in", self.where.text())
+        if chosen:
+            self.where.setText(chosen)
+            self.elsewhere.setChecked(True)
+
+    def target(self) -> Path:
+        parent = registry.base_dir() if self.in_base.isChecked() else \
+            Path(self.where.text()).expanduser()
+        return parent / registry.dir_name(self.name.text())
+
+    def _update(self, *_):
+        self.in_base.setText(f"In the manager's folder: {registry.base_dir()}")
+        problem = ""
+        name = self.name.text().strip()
+        try:
+            registry.validate_name(name)
+            if self.reg.by_name(name):
+                problem = f"A prefix named {name!r} is already managed."
+        except registry.InvalidName as exc:
+            problem = str(exc)
+        target = self.target()
+        if not problem and target.exists():
+            problem = f"{target} already exists."
+        if not problem and not Path(self.image.text()).expanduser().is_file():
+            problem = "Choose the AppImage to install from."
+        self.target_label.setText(
+            f"<span style='color:#E5484D'>{html.escape(problem)}</span>" if problem
+            else f"The prefix will be {html.escape(str(target))}")
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(not problem)
+
+    def chosen(self):
+        return (Path(self.image.text()).expanduser(), self.name.text().strip(),
+                self.target(), self.unpacked.isChecked())
 
 
 class ManagerWindow(QMainWindow):
@@ -3423,6 +3833,14 @@ class ManagerWindow(QMainWindow):
         self.adopt_button = self._action(
             "Adopt existing", self.adopt,
             "Manage an install already on disk, wherever it is")
+        self.install_appimage_button = self._action(
+            "Install from AppImage…", self.install_from_appimage,
+            "A new prefix copied out of an Affinity AppImage: a finished install, "
+            "with no installer run and no downloads")
+        self.appimage_button = self._action(
+            "AppImage…", self.appimage_selected,
+            "For an install made by an AppImage, or from one: upgrade it from a "
+            "newer AppImage, go back to the install kept from the last upgrade")
 
         self.launch_button = self._action(
             "Launch", self.launch_selected, "Start Affinity in the selected prefix")
@@ -3464,8 +3882,8 @@ class ManagerWindow(QMainWindow):
             "using it changes it")
         self.backup_button = self._action(
             "Back up…", self.backup_selected,
-            "An exact copy of the whole prefix and its desktop files, kept "
-            "wherever you choose and never launched. For undoing an install")
+            "A copy kept wherever you choose and never launched: the whole prefix "
+            "and its desktop files, Affinity and your settings, or only your settings")
         self.backups_button = self._action(
             "Backups…", self.show_backups,
             "Every backup: restore, verify, delete -- including ones whose "
@@ -3488,11 +3906,11 @@ class ManagerWindow(QMainWindow):
         left_layout.setSpacing(16)
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.addWidget(self._button_card(
-            "Prefixes", [self.new_button, self.find_button, self.adopt_button,
-                         self.backups_button]))
+            "Prefixes", [self.new_button, self.install_appimage_button,
+                         self.find_button, self.adopt_button, self.backups_button]))
         left_layout.addWidget(self._button_card(
             "Selected prefix",
-            [self.launch_button, self.installer_button,
+            [self.launch_button, self.installer_button, self.appimage_button,
              self.copy_settings_button, self.commands_button,
              self.default_button, self.menu_button]))
         # The three kinds of copy together, each with a line saying what it is
@@ -3742,6 +4160,7 @@ class ManagerWindow(QMainWindow):
     # not look the same.
 
     BUSY_BUTTONS = ("new_button", "find_button", "adopt_button", "launch_button",
+                    "install_appimage_button", "appimage_button",
                     "commands_button", "installer_button", "clone_button",
                     "default_button", "menu_button",
                     "snapshots_button", "copy_settings_button",
@@ -4173,7 +4592,20 @@ class ManagerWindow(QMainWindow):
                                 "on more than one.")
         if entry is None:
             self.protect_button.setText("Protect")
+            self.appimage_button.setEnabled(False)
             return
+        inst = appimage.inspect(entry["path"])
+        self.appimage_button.setEnabled(inst is not None)
+        # Configure is the AffinityOnLinux installer, which installs its own
+        # Wine into the prefix. A linked AppImage install gets its Wine from
+        # the AppImage, and its upgrades from the next AppImage.
+        linked = inst is not None and inst.kind == appimage.LINKED
+        self.installer_button.setEnabled(not linked)
+        self.installer_button.setToolTip(
+            "This install runs from its AppImage: it is upgraded from a newer "
+            "AppImage (AppImage…), not configured here." if linked else
+            "Install, update and configure this prefix -- AffinityOnLinux, "
+            "inside this window")
         locked = registry.is_protected(entry)
         self.protect_button.setText("Unprotect" if locked else "Protect")
         self.menu_button.setText("Remove from menu"
@@ -4271,7 +4703,7 @@ class ManagerWindow(QMainWindow):
             path = Path(entry["path"]).expanduser()
             if not prefsseed.is_initialised(path):
                 reason = "waiting for Wine to set the prefix up"
-            elif not (path / probe.AFFINITY_SUBDIR / "Affinity.exe").is_file():
+            elif not probe.has_affinity(path):
                 reason = "waiting for Affinity to be installed"
             elif probe.running_pids(path):
                 reason = "waiting for Affinity to be closed there"
@@ -4350,6 +4782,53 @@ class ManagerWindow(QMainWindow):
         if not entry:
             return
         self.show_setup(entry)
+
+    def appimage_selected(self):
+        entry = self.selected_entry()
+        if not entry or not appimage.is_install(entry["path"]):
+            return
+        AppImageDialog(self, entry).exec()
+
+    def _appimage_finished(self, title, notes, error):
+        self.refresh()
+        if error:
+            QMessageBox.critical(self, f"{title.rstrip('ed')} failed" if title else "Failed",
+                                 f"{error}\n\nAn upgrade that stops part way is undone "
+                                 "before it switches installs, and finished after; "
+                                 "AppImage… says which.")
+            return
+        QMessageBox.information(self, title, "\n".join((notes or [])[:16]) or title)
+
+    def install_from_appimage(self):
+        dialog = InstallAppImageDialog(self, self.reg)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        image, name, target, unpacked = dialog.chosen()
+        args = ["--unpacked"] if unpacked else []
+
+        def work(progress):
+            result = appimagerun.manage(image, target, "install", *args,
+                                        progress=lambda pct, _t: progress(int(pct)))
+            return result
+
+        def done(result, error):
+            if not error:
+                try:
+                    self.reg.add(name, target)
+                except (registry.InvalidName, registry.DuplicateName,
+                        registry.PathInUse) as exc:
+                    error = f"Installed into {target}, but it could not be listed: {exc}"
+                else:
+                    self.reg.clear_state(name)
+            self._appimage_finished(
+                "Installed", [f"{name} is ready: {target}",
+                              "Self-contained: it no longer needs the AppImage."
+                              if unpacked else f"It runs from {image}."], error)
+            if not error:
+                self._default_if_none(name)
+
+        self._run_task(name, "Install from AppImage",
+                       f"Installing {name} from {image.name}", work, done)
 
     def backup_selected(self):
         entry = self.selected_entry()
@@ -4785,6 +5264,15 @@ class ManagerWindow(QMainWindow):
         except maintenance.NotAPrefix as exc:
             QMessageBox.warning(self, "Not a prefix", str(exc))
             return
+        # An AppImage install's previous install sits beside it, not in it,
+        # so it is offered here rather than by cleanable(). Never ticked:
+        # deleting it is deleting the way back.
+        previous = appimage.previous_of(path)
+        if appimage.is_install(path) and probe.is_prefix(previous):
+            items.append(maintenance.Item(
+                previous, "appimage-previous", maintenance._du(previous),
+                "The install kept from the last upgrade, to go back to. "
+                "Without it there is no going back"))
 
         if not items:
             QMessageBox.information(
@@ -4819,6 +5307,13 @@ class ManagerWindow(QMainWindow):
         try:
             for n, item in enumerate(chosen, 1):
                 self._busy_step(n, f"Cleaning {name} — {item.path.name}")
+                if item.kind == "appimage-previous":
+                    try:
+                        appimage.remove_previous(path)
+                        freed += item.size
+                    except (appimage.AppImageError, OSError) as exc:
+                        problems.append(str(exc))
+                    continue
                 got, trouble = maintenance.clean(path, [item])
                 freed += got
                 problems += trouble

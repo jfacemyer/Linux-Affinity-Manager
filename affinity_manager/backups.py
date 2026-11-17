@@ -28,6 +28,16 @@ A backup is a directory:
         host/                      the desktop files, at their paths under $HOME
         backup.json                the manifest, written last
 
+It is taken at one of three levels, because most of a prefix can be had again
+and the user's own part cannot:
+
+  full      the whole prefix (prefix/, host/). Restores exactly what was there.
+  program   Affinity's folder (program/) and a settings snapshot (settings/).
+            Restores into a prefix that exists -- say one rebuilt from an
+            AppImage -- putting this Affinity and these settings back. A few
+            gigabytes less than full: no Wine, .NET or WebView2.
+  settings  only the settings snapshot (settings/). Tens of megabytes.
+
 The manifest is written last and the directory is built under a .partial name
 and renamed at the end, so a backup that was interrupted can never be mistaken
 for one that finished. The marker is written first so that even a partial one
@@ -55,6 +65,12 @@ from pathlib import Path
 from . import __version__, desktopentry, hoststate, maintenance, probe, registry, settings
 
 MANIFEST = "backup.json"
+LEVEL_FULL = "full"
+LEVEL_PROGRAM = "program"
+LEVEL_SETTINGS = "settings"
+LEVELS = (LEVEL_FULL, LEVEL_PROGRAM, LEVEL_SETTINGS)
+LEVEL_NAMES = {LEVEL_FULL: "Whole prefix", LEVEL_PROGRAM: "Affinity + settings",
+               LEVEL_SETTINGS: "Settings only"}
 MARKER = ".affinity-manager-backup"
 PARTIAL = ".partial"
 FORMAT = 1
@@ -438,6 +454,8 @@ class Backup:
     machine: str = ""
     status: str = "ok"          # ok | partial | unreachable | damaged
     notes: list = field(default_factory=list)
+    level: str = LEVEL_FULL
+    affinity_rel: str = ""      # where Affinity's folder was, in the prefix
 
     @property
     def name(self) -> str:
@@ -455,7 +473,8 @@ class Backup:
         return self.path.parent
 
     def __str__(self) -> str:
-        return f"{self.prefix_name}, {self.when}" + (f" ({self.label})" if self.label else "")
+        kind = "" if self.level == LEVEL_FULL else f" [{LEVEL_NAMES[self.level]}]"
+        return f"{self.prefix_name}, {self.when}{kind}" + (f" ({self.label})" if self.label else "")
 
 
 def _slug(name: str) -> str:
@@ -494,14 +513,43 @@ class BackupPlan:
     include_host: bool
     label: str
     stamp: str
+    level: str = LEVEL_FULL
 
     @property
     def partial(self) -> Path:
         return self.dest.with_name(self.dest.name + PARTIAL)
 
 
+def settings_size(prefix) -> int:
+    """About what a settings snapshot of this prefix holds: the Affinity part
+    of the user profiles, without the downloadable models."""
+    total = 0
+    users = Path(prefix).expanduser() / "drive_c" / "users"
+    for root, dirs, files in os.walk(users, followlinks=False):
+        if "modelcache" in dirs:
+            dirs.remove("modelcache")
+        if "Affinity" not in Path(root).parts:
+            continue
+        for f in files:
+            try:
+                total += os.lstat(os.path.join(root, f)).st_size
+            except OSError:
+                pass
+    return total + 8 * 1024 * 1024          # and the Fonts folder, roughly
+
+
+def level_size(prefix, level) -> int:
+    p = Path(prefix).expanduser()
+    if level == LEVEL_FULL:
+        return maintenance._du(p)
+    size = settings_size(p)
+    if level == LEVEL_PROGRAM:
+        size += maintenance._du(probe.affinity_dir(p))
+    return size
+
+
 def plan_backup(prefix_name, prefix_path, location, *, label="",
-                include_host=True, size=None) -> BackupPlan:
+                include_host=True, size=None, level=LEVEL_FULL) -> BackupPlan:
     """What a backup would do. Writes nothing, and refuses early.
 
     `size` lets a dialog that already measured the prefix skip the walk; an
@@ -516,7 +564,13 @@ def plan_backup(prefix_name, prefix_path, location, *, label="",
         raise BackupError(f"{loc_path} is inside the prefix it would back up.")
     except ValueError:
         pass
-    size = maintenance._du(src) if size is None else size
+    if level not in LEVELS:
+        raise BackupError(f"Unknown backup level {level!r}.")
+    if level == LEVEL_PROGRAM and not probe.has_affinity(src):
+        raise BackupError(f"{src} has no Affinity in it to back up.")
+    if level != LEVEL_FULL:
+        include_host = False
+    size = level_size(src, level) if size is None else size
     loc = describe_location(loc_path, src)
     if not loc.survives_reboot:
         raise BackupError(
@@ -539,7 +593,7 @@ def plan_backup(prefix_name, prefix_path, location, *, label="",
     dest = loc_path / name
     if dest.exists() or dest.with_name(dest.name + PARTIAL).exists():
         raise BackupError(f"{dest} already exists.")
-    return BackupPlan(prefix_name, src, dest, size, loc, include_host, safe, stamp)
+    return BackupPlan(prefix_name, src, dest, size, loc, include_host, safe, stamp, level)
 
 
 def create(plan: BackupPlan, *, progress=None) -> Backup:
@@ -559,14 +613,25 @@ def create(plan: BackupPlan, *, progress=None) -> Backup:
     _index_add(partial)
     _remember_location(plan.dest.parent)
 
-    maintenance.copy_tree(plan.source, partial / "prefix", progress=progress,
-                          hard_links=True)
+    affinity_rel = ""
+    if plan.level == LEVEL_FULL:
+        maintenance.copy_tree(plan.source, partial / "prefix", progress=progress,
+                              hard_links=True)
+    else:
+        if plan.level == LEVEL_PROGRAM:
+            app = probe.affinity_dir(plan.source)
+            affinity_rel = str(app.relative_to(plan.source))
+            maintenance.copy_tree(app, partial / "program",
+                                  progress=(lambda p: progress(int(p * 0.95))) if progress else None)
+        _take_settings(plan, partial)
+        if progress:
+            progress(100)
 
     host_files, mimeapps = [], {}
     if plan.include_host:
         host_files, mimeapps = _capture_host(plan.source, partial / "host")
 
-    files, size = _measure(partial / "prefix")
+    files, size = _measure_level(partial, plan.level)
     manifest = {
         "format": FORMAT,
         "prefix_name": plan.prefix_name,
@@ -579,12 +644,39 @@ def create(plan: BackupPlan, *, progress=None) -> Backup:
         "mimeapps": mimeapps,
         "machine": socket.gethostname(),
         "manager_version": __version__,
+        "level": plan.level,
+        "affinity_rel": affinity_rel,
+        "affinity_version": probe.affinity_version(plan.source),
     }
     (partial / MANIFEST).write_text(json.dumps(manifest, indent=2) + "\n")
     partial.rename(plan.dest)
     _index_drop(partial)
     _index_add(plan.dest)
     return read(plan.dest)
+
+
+def _take_settings(plan: BackupPlan, partial: Path) -> None:
+    """A settings snapshot, as the backup's settings/ folder."""
+    from . import snapshots
+    holder = partial / ".settings-taking"
+    try:
+        snap = snapshots.take(plan.prefix_name, plan.source, plan.label, root=holder)
+    except snapshots.NoSettings:
+        holder.mkdir(parents=True, exist_ok=True)
+        return
+    snap.path.rename(partial / "settings")
+    shutil.rmtree(holder, ignore_errors=True)
+
+
+def _measure_level(path: Path, level: str) -> tuple[int, int]:
+    if level == LEVEL_FULL:
+        return _measure(path / "prefix")
+    files = size = 0
+    for part in ("program", "settings"):
+        if (path / part).is_dir():
+            f, s = _measure(path / part)
+            files, size = files + f, size + s
+    return files, size
 
 
 def _capture_host(prefix: Path, into: Path) -> tuple[list, dict]:
@@ -656,12 +748,14 @@ def read(path) -> Backup:
 
     host = data.get("host_files")
     mimeapps = data.get("mimeapps")
+    level = text("level", LEVEL_FULL)
     return Backup(
         p, text("prefix_name", _guess_name(p)), text("prefix_path"),
         text("label"), text("taken"), number("files"), number("bytes"),
         host if isinstance(host, list) else [],
         mimeapps if isinstance(mimeapps, dict) else {},
-        text("machine"))
+        text("machine"), level=level if level in LEVELS else LEVEL_FULL,
+        affinity_rel=text("affinity_rel"))
 
 
 def _guess_name(p: Path) -> str:
@@ -736,10 +830,14 @@ def verify(backup: Backup) -> list[str]:
     if backup.status != "ok":
         return backup.notes or [f"backup is {backup.status}"]
     problems = []
-    prefix = backup.path / "prefix"
-    if not probe.is_prefix(prefix):
-        return ["the copy of the prefix is missing or incomplete"]
-    files, size = _measure(prefix)
+    if backup.level == LEVEL_FULL:
+        if not probe.is_prefix(backup.path / "prefix"):
+            return ["the copy of the prefix is missing or incomplete"]
+    else:
+        if backup.level == LEVEL_PROGRAM and \
+                not (backup.path / "program" / "Affinity.exe").is_file():
+            return ["the copy of Affinity is missing"]
+    files, size = _measure_level(backup.path, backup.level)
     if files != backup.files:
         problems.append(f"{files} files, but {backup.files} were backed up")
     if size != backup.bytes:
@@ -777,9 +875,19 @@ class RestorePlan:
     host_put_back: list
     host_moved_aside: list
     mimeapps_changes: list
+    program_aside: Path | None = None
 
     def describe(self) -> list[str]:
         lines = []
+        if self.backup.level != LEVEL_FULL:
+            if self.backup.level == LEVEL_PROGRAM:
+                lines.append("Affinity's folder in " + str(self.target) + " is renamed to "
+                             + (self.program_aside.name if self.program_aside else "?")
+                             + " -- not deleted -- and the backed-up Affinity is put "
+                             "in its place.")
+            lines.append("The settings in the backup are restored; the current ones "
+                         "are snapshotted first.")
+            return lines
         if self.restore_prefix:
             if self.moved_aside_to:
                 lines.append(f"The prefix now at {self.target} is renamed to "
@@ -827,6 +935,24 @@ def plan_restore(backup: Backup, *, restore_prefix=True, restore_host=True,
     target = Path(target or backup.prefix_path).expanduser()
     if not str(target) or target == Path("."):
         raise BackupError("The backup does not say where its prefix lived.")
+    if backup.level != LEVEL_FULL:
+        # Into a prefix that is there: that is what these levels are for.
+        if not probe.is_prefix(target):
+            raise BackupError(
+                f"{target} is not a prefix. A {LEVEL_NAMES[backup.level]} backup "
+                "restores into an existing prefix -- for one that is gone, make a "
+                "new prefix first, from the installer or an AppImage.")
+        aside = None
+        if backup.level == LEVEL_PROGRAM:
+            app = probe.affinity_dir(target)
+            aside = app.with_name(f"{app.name}.before-restore-{time.strftime(STAMP)}")
+            free = shutil.disk_usage(target).free
+            if free < backup.bytes * 1.05:
+                raise maintenance.NotEnoughSpace(
+                    f"Restoring needs about {probe.human_size(backup.bytes)}; "
+                    f"{probe.human_size(free)} is free.")
+        return RestorePlan(backup, target, True, False, backup.bytes, None, [], [], [],
+                           program_aside=aside)
     moved = None
     if restore_prefix and target.exists():
         moved = target.with_name(f"{target.name}.before-restore-{time.strftime(STAMP)}")
@@ -867,6 +993,8 @@ def restore(plan: RestorePlan, *, progress=None) -> list[str]:
     dated folder under the manager's own directory, so a restore can itself be
     reversed."""
     notes = []
+    if plan.backup.level != LEVEL_FULL:
+        return _restore_level(plan, progress)
     if plan.restore_prefix:
         _require_quiet(plan.target, replacing=True)
         staging = plan.target.with_name(plan.target.name + ".restoring")
@@ -886,6 +1014,35 @@ def restore(plan: RestorePlan, *, progress=None) -> list[str]:
 
     if plan.restore_host:
         notes += _restore_host(plan)
+    return notes
+
+
+def _restore_level(plan: RestorePlan, progress=None) -> list[str]:
+    """Affinity + settings, or settings only, into an existing prefix."""
+    from . import snapshots
+    _require_quiet(plan.target, replacing=True)
+    notes = []
+    if plan.backup.level == LEVEL_PROGRAM:
+        app = probe.affinity_dir(plan.target)
+        staging = app.with_name(app.name + ".restoring")
+        if staging.exists():
+            shutil.rmtree(staging)
+        maintenance.copy_tree(plan.backup.path / "program", staging,
+                              progress=(lambda p: progress(int(p * 0.9))) if progress else None)
+        if app.exists():
+            app.rename(plan.program_aside)
+            notes.append(f"The Affinity that was there is kept as {plan.program_aside}")
+        staging.rename(app)
+        notes.append(f"Affinity {probe.affinity_version(plan.target) or ''} restored".strip())
+    settings = plan.backup.path / "settings"
+    if (settings / "Settings").is_dir():
+        snap = snapshots.read_manifest(settings)
+        name = plan.backup.prefix_name
+        notes += snapshots.restore(snapshots.plan_restore(snap, name, plan.target))
+    else:
+        notes.append("The backup holds no settings; they were left as they are")
+    if progress:
+        progress(100)
     return notes
 
 

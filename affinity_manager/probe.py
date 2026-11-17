@@ -14,10 +14,22 @@ import struct
 from pathlib import Path
 
 AFFINITY_SUBDIR = Path("drive_c/Program Files/Affinity/Affinity")
+# Where AppImages up to 3.3.1 put it: one level up, with no Affinity/ inside.
+FLAT_SUBDIR = Path("drive_c/Program Files/Affinity")
 
 
 def affinity_dir(prefix) -> Path:
-    return Path(prefix).expanduser() / AFFINITY_SUBDIR
+    """The folder Affinity.exe is in.
+
+    AffinityOnLinux installs into Program Files/Affinity/Affinity, which is
+    where Serif's installer puts it. The AppImages up to 3.3.1 shipped it one
+    level up. The nested place is the answer unless only the flat one holds
+    Affinity, so a prefix with neither still gets the usual path."""
+    p = Path(prefix).expanduser()
+    nested = p / AFFINITY_SUBDIR
+    if not (nested / "Affinity.exe").is_file() and (p / FLAT_SUBDIR / "Affinity.exe").is_file():
+        return p / FLAT_SUBDIR
+    return nested
 
 
 def is_prefix(prefix) -> bool:
@@ -160,16 +172,25 @@ def human_size(num: int) -> str:
 
 def describe(prefix) -> dict:
     """Everything the list view shows about one prefix, in one pass."""
+    from . import appimage
+
     path = Path(prefix).expanduser()
     exists = path.is_dir()
     pids = running_pids(path) if exists else []
+    inst = appimage.inspect(path) if exists else None
+    linked = inst is not None and inst.kind == appimage.LINKED
     return {
+        # A linked AppImage install has no Wine of its own: the AppImage
+        # carries it. Said here, once, so nothing downstream calls it broken.
+        "appimage": inst.kind if inst else None,
+        "appimage_interrupted": appimage.interrupted(path) if inst else None,
         "path": str(path),
         "exists": exists,
         "is_prefix": is_prefix(path) if exists else False,
         "has_affinity": has_affinity(path) if exists else False,
         "affinity_version": affinity_version(path) if exists else None,
-        "wine": active_wine(path) if exists else None,
+        "wine": (f"AppImage ({inst.wine})" if not inst.legacy else "AppImage")
+        if linked else (active_wine(path) if exists else None),
         "wine_builds": wine_builds(path) if exists else [],
         "running": bool(pids),
         "pids": pids,

@@ -27,14 +27,16 @@ import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import desktopentry, hoststate, prefixlog, probe, registry, snapshots
+from . import appimage, desktopentry, hoststate, prefixlog, probe, registry, snapshots
 
 # Ticked unless said otherwise. The order is the order they are shown in, and
 # it goes from the biggest and most obvious to the most easily overlooked.
-KINDS = ("prefix", "menu", "mime", "icon", "default-handler", "registry",
-         "log", "settings-backup")
+KINDS = ("prefix", "appimage-previous", "menu", "mime", "icon",
+         "default-handler", "registry", "log", "settings-backup")
 
 UNTICKED = ("settings-backup",)
+# Whole directories beside the prefix, removed the way the prefix is.
+DIRECTORY_KINDS = ("prefix", "appimage-previous")
 
 
 @dataclass
@@ -123,10 +125,19 @@ def plan(reg, name: str) -> Plan:
             "log", str(log), "This prefix's operation log",
             log, log.stat().st_size))
 
-    kept = snapshots.listing(name)
+    if appimage.is_install(path):
+        previous = appimage.previous_of(path)
+        if probe.is_prefix(previous):
+            out.items.append(Item(
+                "appimage-previous", str(previous),
+                "The install kept from this AppImage install's last upgrade. It "
+                "is only there to go back to, so it goes with the install",
+                previous, probe.disk_usage(previous)))
+
+    kept = snapshots.listing(name, path)
     if kept:
         total = sum(s.bytes for s in kept)
-        root = snapshots.dir_for(name)
+        root = snapshots.root_for(name, path)
         out.items.append(Item(
             "settings-backup", f"{len(kept)} settings snapshot(s) in {root}",
             "Unticked on purpose: losing the backups with the thing they back "
@@ -159,7 +170,7 @@ def apply(reg, plan_: Plan, chosen) -> list[str]:
 
     now = liveness.scan(plan_.path) if plan_.path.exists() else None
     if now is not None and now.state != liveness.QUIET and \
-            any(i.kind == "prefix" for i in chosen):
+            any(i.kind in DIRECTORY_KINDS for i in chosen):
         # Leftovers too, when the directory itself is going: they have it open.
         return [f"{now.summary()} Nothing was removed."]
     live = now.running_pids if now is not None else []
@@ -169,7 +180,12 @@ def apply(reg, plan_: Plan, chosen) -> list[str]:
                 "Nothing was removed."]
 
     for item in chosen:
-        if item.kind != "prefix" or item.path is None:
+        if item.kind not in DIRECTORY_KINDS or item.path is None:
+            continue
+        if item.kind == "appimage-previous" and not (
+                appimage.sibling_role(item.path)
+                and appimage.sibling_role(item.path)[1] == plan_.path):
+            done.append(f"Refused {item.path}: not this install's previous one")
             continue
         try:
             shutil.rmtree(item.path)
@@ -192,8 +208,8 @@ def apply(reg, plan_: Plan, chosen) -> list[str]:
             done.append(f"Could not clear {item.label}: {exc}")
 
     for item in chosen:
-        if item.kind in ("prefix", "registry", "settings-backup",
-                         "default-handler"):
+        if item.kind in DIRECTORY_KINDS + ("registry", "settings-backup",
+                                           "default-handler"):
             continue
         if item.artifact is not None:
             try:
