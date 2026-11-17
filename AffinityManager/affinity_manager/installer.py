@@ -147,7 +147,12 @@ def launch_affinity(prefix, *, wine_build: str | None = None) -> subprocess.Pope
     back to Affinity.exe when it is not. opencl is disabled on the builds where,
     on a real GPU, it deadlocks Affinity at startup (Wine 11.11 to 11.18)."""
     prefix = Path(prefix).expanduser()
-    app = prefix / "drive_c" / "Program Files" / "Affinity" / "Affinity"
+    from . import appimage, appimagerun, probe
+    inst = appimage.inspect(prefix)
+    if inst is not None and inst.kind == appimage.LINKED:
+        # Wine is inside the AppImage, which knows how to start it.
+        return appimagerun.launch_command(prefix).run()
+    app = probe.affinity_dir(prefix)
     exe = app / "AffinityHook.exe"
     if not exe.is_file():
         exe = app / "Affinity.exe"

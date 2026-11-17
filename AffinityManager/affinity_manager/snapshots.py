@@ -28,6 +28,20 @@ from pathlib import Path
 
 from . import maintenance, prefsseed, registry
 
+# Parts of a snapshot that are not in Affinity/<version>. Underscored, so they
+# can never collide with anything Affinity puts in its version folder -- and so
+# restore() knows not to copy them in there.
+PART_COMMON = "_common"     # Common/<version>: presets, styles, font history
+PART_PROFILE = "_profile"   # the Windows user's Favorites and Links
+PART_FONTS = "_fonts"       # font files and their registrations
+PARTS = (PART_COMMON, PART_PROFILE, PART_FONTS)
+
+# Left out of _common although it is configuration. The AI models are 554 MB
+# in the prefix this was written against, Affinity downloads them again when a
+# feature needs one, and a snapshot is meant to be cheap enough to take before
+# every risky change.
+COMMON_SKIP = frozenset({"modelcache"})
+
 MANIFEST = "snapshot.json"
 STAMP = "%Y%m%d-%H%M%S"
 
@@ -55,6 +69,8 @@ class Snapshot:
     files: int = 0
     bytes: int = 0
     notes: list = field(default_factory=list)
+    parts: list = field(default_factory=list)
+    auto: bool = False      # taken by an upgrade, not asked for; may be pruned
 
     @property
     def name(self) -> str:
@@ -80,6 +96,19 @@ class Snapshot:
 
 def snapshots_dir() -> Path:
     return registry.manager_dir() / "snapshots"
+
+
+def root_for(prefix_name: str, prefix_path=None) -> Path:
+    """Where a prefix's snapshots are kept.
+
+    An AppImage install keeps its own beside it, in <prefix>.backups, so the
+    AppImage can find and restore them without the manager. Every other
+    prefix keeps them in the manager's folder."""
+    if prefix_path is not None:
+        from . import appimage
+        if appimage.is_install(prefix_path):
+            return appimage.backups_of(prefix_path)
+    return dir_for(prefix_name)
 
 
 def dir_for(prefix_name: str) -> Path:
@@ -142,7 +171,8 @@ def _safe_label(label: str) -> str:
     return cleaned.strip("-.")[:60]
 
 
-def take(prefix_name, prefix_path, label="", settings=None) -> Snapshot:
+def take(prefix_name, prefix_path, label="", settings=None, *, root=None,
+         auto=False) -> Snapshot:
     """Copy a prefix's settings aside, under a dated name.
 
     `settings` names which Settings directory to take, for a prefix carried
@@ -164,7 +194,8 @@ def take(prefix_name, prefix_path, label="", settings=None) -> Snapshot:
     source = settings or _source(prefix_path)
     stamp = _stamp()
     safe = _safe_label(label)
-    dest = dir_for(prefix_name) / (f"{stamp}-{safe}" if safe else stamp)
+    base = Path(root) if root else root_for(prefix_name, prefix_path)
+    dest = base / (f"{stamp}-{safe}" if safe else stamp)
     if dest.exists():
         raise NotASnapshot(f"{dest} already exists.")
 
@@ -181,14 +212,18 @@ def take(prefix_name, prefix_path, label="", settings=None) -> Snapshot:
                 shutil.copytree(entry, target, symlinks=True)
             else:
                 shutil.copy2(entry, target, follow_symlinks=False)
+        parts = _take_parts(source, Path(prefix_path).expanduser(), staging)
 
         (staging / MANIFEST).write_text(json.dumps({
+            "format": 2,
             "prefix": prefix_name,
             "source": str(source.path),
             "version": source.version,
             "label": safe,
             "taken": stamp,
             "siblings": [e.name for e in siblings],
+            "parts": parts,
+            "auto": bool(auto),
         }, indent=2) + "\n")
         staging.rename(dest)
     except BaseException:
@@ -197,7 +232,69 @@ def take(prefix_name, prefix_path, label="", settings=None) -> Snapshot:
         raise
 
     files, size, _ = prefsseed._measure(dest)
-    return Snapshot(dest, prefix_name, safe, stamp, source.version, files, size)
+    return Snapshot(dest, prefix_name, safe, stamp, source.version, files, size,
+                    parts=parts, auto=bool(auto))
+
+
+def _copy_entry(entry: Path, target: Path) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if entry.is_dir() and not entry.is_symlink():
+        shutil.copytree(entry, target, symlinks=True)
+    else:
+        shutil.copy2(entry, target, follow_symlinks=False)
+
+
+def user_fonts_dir(profile: Path) -> Path:
+    """Where Windows 10 and later install a font for one user only."""
+    return profile / "AppData" / "Local" / "Microsoft" / "Windows" / "Fonts"
+
+
+def _files_in(folder: Path) -> list[Path]:
+    try:
+        return sorted(f for f in folder.iterdir() if f.is_file() and not f.is_symlink())
+    except OSError:
+        return []
+
+
+def _take_parts(source: prefsseed.Settings, prefix: Path, staging: Path) -> list:
+    """The parts of a snapshot outside Affinity/<version>. Returns their names.
+
+    Fonts are taken whole -- the prefix's Fonts folder is a few megabytes --
+    because there is nothing to compare against to tell which are the user's.
+    restore() only ever adds the ones the destination lacks."""
+    from . import regfile
+
+    parts = []
+    common = [e for e in source.common_extras if e.name not in COMMON_SKIP]
+    common += [e for e, kind in source.common_left_behind
+               if kind == prefsseed.UNKNOWN]
+    for entry in common:
+        _copy_entry(entry, staging / PART_COMMON / entry.name)
+    if common:
+        parts.append(PART_COMMON)
+
+    for entry in source.profile_extras:
+        _copy_entry(entry, staging / PART_PROFILE / entry.name)
+    if source.profile_extras:
+        parts.append(PART_PROFILE)
+
+    fonts = staging / PART_FONTS
+    took = False
+    for f in _files_in(prefix / "drive_c" / "windows" / "Fonts"):
+        _copy_entry(f, fonts / "windows" / f.name)
+        took = True
+    for f in _files_in(user_fonts_dir(source.profile_dir)):
+        _copy_entry(f, fonts / "user" / f.name)
+        took = True
+    regs = regfile.font_registrations(prefix)
+    if any(regs.values()):
+        fonts.mkdir(parents=True, exist_ok=True)
+        (fonts / "registrations.json").write_text(
+            json.dumps(regs, indent=1, ensure_ascii=True) + "\n")
+        took = True
+    if took:
+        parts.append(PART_FONTS)
+    return parts
 
 
 def read_manifest(path: Path) -> Snapshot:
@@ -225,15 +322,25 @@ def read_manifest(path: Path) -> Snapshot:
         value = data.get(key)
         return value if isinstance(value, str) and value else fallback
 
+    parts = data.get("parts")
+    parts = [p for p in parts if p in PARTS] if isinstance(parts, list) else []
     return Snapshot(path, text("prefix", "unknown"), text("label", ""),
                     text("taken", path.name.split("-")[0]),
-                    text("version", "unknown"), files, size, notes)
+                    text("version", "unknown"), files, size, notes,
+                    parts=parts, auto=data.get("auto") is True)
 
 
-def listing(prefix_name=None) -> list[Snapshot]:
-    """Snapshots, newest first. One prefix's, or every prefix's."""
-    roots = ([dir_for(prefix_name)] if prefix_name
-             else sorted(p for p in _existing(snapshots_dir()) if p.is_dir()))
+def listing(prefix_name=None, prefix_path=None, *, root=None) -> list[Snapshot]:
+    """Snapshots, newest first. One prefix's, or every prefix's.
+
+    Pass the prefix's path as well as its name to find an AppImage install's
+    snapshots, which are kept beside it rather than in the manager's folder."""
+    if root is not None:
+        roots = [Path(root)]
+    elif prefix_name:
+        roots = [root_for(prefix_name, prefix_path)]
+    else:
+        roots = sorted(p for p in _existing(snapshots_dir()) if p.is_dir())
     out = []
     for root in roots:
         for path in sorted(_existing(root), reverse=True):
@@ -327,7 +434,7 @@ def restore(plan: RestorePlan, *, snapshot_first=True) -> list[str]:
                                              version_dir.name, files, size,
                                              modified)
             kept = take(plan.into_prefix, plan.into_path,
-                        label="before-restore", settings=current)
+                        label="before-restore", settings=current, auto=True)
             notes.append(f"Current settings snapshotted as {kept.name}")
         except NoSettings:
             notes.append("Nothing was there to snapshot first")
@@ -351,7 +458,7 @@ def restore(plan: RestorePlan, *, snapshot_first=True) -> list[str]:
 
         restored = []
         for entry in sorted(plan.snapshot.path.iterdir()):
-            if entry.name in (MANIFEST, "Settings"):
+            if entry.name in (MANIFEST, "Settings") or entry.name in PARTS:
                 continue
             target = staging / entry.name
             if target.exists() or target.is_symlink():
@@ -379,6 +486,83 @@ def restore(plan: RestorePlan, *, snapshot_first=True) -> list[str]:
     notes.append(f"Restored into {destination}")
     if restored:
         notes.append("Also restored: " + ", ".join(restored))
+    notes += _restore_parts(plan.snapshot.path, plan.into_path, version_dir)
+    return notes
+
+
+def _fill(source: Path, target: Path) -> int:
+    """Copy what the target lacks, file by file. Never replaces. Returns the
+    number of files added."""
+    added = 0
+    for f in sorted(source.rglob("*")):
+        rel = f.relative_to(source)
+        dest = target / rel
+        if f.is_dir() and not f.is_symlink():
+            dest.mkdir(parents=True, exist_ok=True)
+            continue
+        if dest.exists() or dest.is_symlink():
+            continue
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(f, dest, follow_symlinks=False)
+        added += 1
+    return added
+
+
+def _restore_parts(snap: Path, prefix: Path, version_dir: Path) -> list[str]:
+    """Put back the parts outside Affinity/<version>.
+
+    Common/<version> entries replace what is there, which is moved -- not
+    deleted -- into Common/<version>.replaced-<stamp>. Favorites, Links and
+    fonts are only filled in: a restore must not take away a font somebody
+    installed since, and a shortcut is harmless to keep."""
+    from . import liveness, regfile
+
+    notes = []
+    common_src = snap / PART_COMMON
+    if common_src.is_dir():
+        common = version_dir.parent.parent / "Common" / version_dir.name
+        held = common.with_name(f"{common.name}.replaced-{_stamp()}")
+        names = []
+        for entry in sorted(common_src.iterdir()):
+            target = common / entry.name
+            if target.exists() or target.is_symlink():
+                held.mkdir(parents=True, exist_ok=True)
+                target.rename(held / entry.name)
+            _copy_entry(entry, target)
+            names.append(entry.name)
+        notes.append("Restored Common/" + version_dir.name + ": " + ", ".join(names))
+        if held.exists():
+            notes.append(f"What it replaced is kept in {held}")
+
+    profile = version_dir.parents[4]
+    if (snap / PART_PROFILE).is_dir():
+        n = _fill(snap / PART_PROFILE, profile)
+        if n:
+            notes.append(f"{n} Favorites/Links shortcut(s) added")
+
+    fonts = snap / PART_FONTS
+    if fonts.is_dir():
+        n = 0
+        if (fonts / "windows").is_dir():
+            n += _fill(fonts / "windows", prefix / "drive_c" / "windows" / "Fonts")
+        if (fonts / "user").is_dir():
+            n += _fill(fonts / "user", user_fonts_dir(profile))
+        if n:
+            notes.append(f"{n} font file(s) added")
+        regs_file = fonts / "registrations.json"
+        if regs_file.is_file():
+            try:
+                regs = json.loads(regs_file.read_text())
+            except (OSError, ValueError):
+                regs = None
+            if not isinstance(regs, dict):
+                notes.append("The font registrations in the snapshot cannot be read")
+            elif liveness.scan(prefix).state != liveness.QUIET:
+                notes.append("Font registrations not restored: Wine is running in "
+                             "this prefix, and would overwrite the change when "
+                             "it stops. Restore again once nothing is running.")
+            else:
+                notes += regfile.add_font_registrations(prefix, regs)
     return notes
 
 
@@ -387,10 +571,14 @@ def remove(snapshot: Snapshot) -> Path:
 
     A snapshot outside the snapshots directory is not a snapshot, whatever its
     manifest says -- and the manifest is a file on disk that nothing stops
-    somebody editing."""
+    somebody editing. An AppImage install's <prefix>.backups folder counts as
+    a snapshots directory."""
     path = Path(snapshot.path).resolve()
     root = snapshots_dir().resolve()
     if not maintenance._is_inside(path, root):
-        raise NotASnapshot(f"{path} is not inside {root}.")
+        from . import appimage
+        owner = appimage.owner_of_backups(path.parent)
+        if owner is None or not (path / "Settings").is_dir():
+            raise NotASnapshot(f"{path} is not inside {root}.")
     shutil.rmtree(path)
     return path

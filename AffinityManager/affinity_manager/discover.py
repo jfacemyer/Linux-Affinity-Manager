@@ -23,7 +23,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from . import probe, registry
+from . import appimage, probe, registry
 
 # Where AffinityOnLinux itself remembers a custom install.
 AOL_CONFIG = Path.home() / ".config" / "AffinityOnLinux" / "install_location"
@@ -49,7 +49,7 @@ def search_roots() -> list[Path]:
 
 def remembered_paths() -> list[Path]:
     """Installs that a config file names outright, so no searching is needed."""
-    found = [Path.home() / ".AffinityLinux"]
+    found = [Path.home() / ".AffinityLinux", appimage.default_prefix()]
     try:
         saved = AOL_CONFIG.read_text().strip()
         if saved:
@@ -76,6 +76,12 @@ def _scan(root: Path, depth: int, seen: set[str], out: list[Path]) -> None:
         if key in seen:
             continue
         seen.add(key)
+        # An AppImage install's own siblings: the install kept from the last
+        # upgrade, its snapshots, and the brief names of one in progress. They
+        # belong to the install beside them, and offering P.previous for
+        # adoption would invite launching the copy that exists to go back to.
+        if appimage.sibling_role(entry) and appimage.is_install(appimage.sibling_role(entry)[1]):
+            continue
         # Every Wine prefix, not only the ones with Affinity in them. A prefix
         # whose install was interrupted has drive_c and dosdevices and no
         # Affinity.exe, and it is precisely the one the manager can help with --
@@ -119,6 +125,7 @@ def find_installations(extra_roots=None) -> list[dict]:
     for path in found:
         entry = reg.by_path(path)
         info = probe.describe(path)
+        inst = appimage.inspect(path)
         try:
             mtime = path.stat().st_mtime
         except OSError:
@@ -133,6 +140,7 @@ def find_installations(extra_roots=None) -> list[dict]:
                 "running": info["running"],
                 "mtime": mtime,
                 "suggested_name": suggest_name_for(path),
+                "appimage": (inst.kind if inst else None),
             }
         )
     results.sort(key=lambda r: r["mtime"], reverse=True)
@@ -143,6 +151,8 @@ def suggest_name_for(path) -> str:
     """A name derived from where it was found, rather than a dated default --
     'AffinityLinux' from ~/.AffinityLinux says more than 'AffinityLinux
     2026-09-15 03'."""
+    if Path(path).expanduser() == appimage.default_prefix():
+        return "Affinity AppImage"
     name = Path(path).name.lstrip(".").replace("_", " ").strip()
     return name or "Affinity"
 

@@ -117,18 +117,25 @@ def classify(prefix, *, entry: dict | None = None, facts: dict | None = None) ->
     # complete because the operation got most of the way through, and saying
     # "Ready" about a prefix whose install was interrupted is the lie this
     # state exists to prevent.
-    if entry.get("state") == INCOMPLETE:
+    # An AppImage upgrade or switch keeps its own journal beside the install,
+    # since the AppImage does them without the manager.
+    if entry.get("state") == INCOMPLETE or facts.get("appimage_interrupted"):
+        appimage_cut = entry.get("state") != INCOMPLETE
         return State(INCOMPLETE, LABELS[INCOMPLETE],
-                     _interrupted_detail(operation),
-                     _interrupted_suggestion(operation, facts),
-                     last_operation=operation)
+                     facts["appimage_interrupted"] if appimage_cut
+                     else _interrupted_detail(operation),
+                     "Open AppImage… to finish or undo it. Nothing is lost either "
+                     "way: before the switch the install is as it was, and after "
+                     "it the new one is complete." if appimage_cut
+                     else _interrupted_suggestion(operation, facts),
+                     last_operation="Upgrade" if appimage_cut else operation)
 
     if entry.get("state") == WORKING:
         return State(WORKING, LABELS[WORKING],
                      f"{operation or 'An operation'} is running.",
                      None, last_operation=operation)
 
-    if not facts.get("wine_builds"):
+    if not facts.get("wine_builds") and facts.get("appimage") != "linked":
         return State(NO_WINE, LABELS[NO_WINE],
                      "The prefix has no Wine build in it.",
                      "Run setup: it installs a Wine build into the prefix.")

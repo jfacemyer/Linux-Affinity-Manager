@@ -149,9 +149,29 @@ def _wine_binaries(prefix: Path) -> list[tuple[str, Path]]:
     return out
 
 
+def _appimage_commands(prefix: Path) -> list[Command]:
+    from . import appimagerun
+    out = []
+    try:
+        out.append(appimagerun.launch_command(prefix))
+    except FileNotFoundError as exc:
+        out.append(Command("Affinity (AppImage)", "Affinity -- cannot start",
+                           str(exc), ["true"]))
+    out += appimagerun.tool_commands(prefix)
+    out.append(Command(
+        group="Other", label="Open the prefix directory",
+        detail="The prefix itself, in your file manager.",
+        argv=[shutil.which("xdg-open") or "xdg-open", str(prefix)], env={}))
+    return out
+
+
 def for_prefix(prefix) -> list[Command]:
     prefix = Path(prefix).expanduser()
-    app = prefix / probe.AFFINITY_SUBDIR
+    from . import appimage
+    inst = appimage.inspect(prefix)
+    if inst is not None and inst.kind == appimage.LINKED:
+        return _appimage_commands(prefix)
+    app = probe.affinity_dir(prefix)
     base_env = {"WINEPREFIX": str(prefix)}
     commands: list[Command] = []
 

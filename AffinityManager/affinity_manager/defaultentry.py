@@ -83,7 +83,13 @@ def launch_command(prefix) -> tuple[commands.Command, bool]:
     the prefix's ElementalWarriorWine link, so switching the prefix's Wine build
     does not leave the entry on the old one."""
     prefix = Path(prefix).expanduser()
-    app = prefix / probe.AFFINITY_SUBDIR
+    from . import appimage, appimagerun
+    inst = appimage.inspect(prefix)
+    if inst is not None and inst.kind == appimage.LINKED:
+        command = appimagerun.launch_command(prefix)
+        command.group, command.label = "Menu", MENU_LABEL
+        return command, appimagerun.takes_documents(prefix)
+    app = probe.affinity_dir(prefix)
     link = prefix / "ElementalWarriorWine"
     wine = link / "bin" / "wine"
     build = link.resolve().name if link.exists() else ""
@@ -115,6 +121,12 @@ def sign_in_supported(prefix) -> bool:
     Wine 9 and 10 can; on 11.x only a build that resolves WinRT namespaces --
     the builds with the Affinity patches, and upstream from 11.19. Elsewhere the
     callback crashes the running Affinity, so no handler is better."""
+    from . import appimage
+    inst = appimage.inspect(prefix)
+    if inst is not None and inst.kind == appimage.LINKED:
+        # The AppImages after 3.3.1 carry the Affinity patch set; 3.3.1 carries
+        # upstream 11.19, which resolves WinRT namespaces too.
+        return True
     command, _ = launch_command(prefix)
     wine = Path(command.argv[0])
     wintypes = wine.parent.parent / "lib" / "wine" / "x86_64-windows" / "wintypes.dll"
