@@ -65,6 +65,16 @@ OVERLAY = ("affinity-on-linux.exe", "AffinityHook.exe", "AffinityPluginLoader.dl
            "AffinityBootstrap.dll", "0Harmony.dll", "apl", "d3d12.dll",
            "d3d12core.dll", "LICENSE", "README.md")
 
+# The Windows user every install of the image runs under, whoever runs it:
+# AppRun sets USER to it (the name is written in the prefix, .windows-user).
+# Wine names the profile after USER and stores paths under it in the registry
+# (TEMP, the shell folders); a prefix built under one name and run under
+# another points at folders that do not exist, and with no temporary folder
+# Wine adds no printers. The source prefix has to be installed under this name
+# (USER=affinityonlinux for the installer), or the build stops.
+WINDOWS_USER = "affinityonlinux"
+NOT_A_PERSON = {"public", "default", "all users", "default user"}
+
 PREFIX_EXCLUDES = (
     "/ElementalWarriorWine", "/drive_c/users/", "/drive_c/windows/Installer/",
     "/drive_c/windows/temp/*", "/Patch/", "/*.log", "/.gpu_config",
@@ -118,6 +128,22 @@ def copy_prefix(src: Path, dst: Path) -> None:
     for f in (dst / ".appimage-setup-complete", dst / ".affinity-appimage.json"):
         if f.exists():
             f.unlink()
+
+
+def check_windows_user(prefix: Path, user: str) -> None:
+    """Stop unless every profile path in the prefix's registry is `user`'s."""
+    names = set()
+    for reg in ("user.reg", "system.reg", "userdef.reg"):
+        try:
+            text = (prefix / reg).read_text(errors="replace")
+        except OSError:
+            continue
+        names |= {m.lower() for m in re.findall(r'C:\\\\users\\\\([^\\"]+)', text, re.I)}
+    others = sorted(names - NOT_A_PERSON - {user.lower()})
+    if others:
+        sys.exit(f"{prefix} was made under the Windows user {', '.join(others)}, not "
+                 f"{user}: its registry would name folders that do not exist on "
+                 f"anybody else's machine. Install it with USER={user}.")
 
 
 # Keys holding font registrations, whose values may name a file on the build
@@ -199,7 +225,9 @@ def build_appdir(args, appdir: Path) -> dict:
         sys.exit(f"{app}/Affinity.exe is missing: the prefix must be one the Affinity "
                  "on Linux installer made.")
 
+    check_windows_user(prefix_src, args.windows_user)
     copy_prefix(prefix_src, appdir / "wineprefix")
+    (appdir / "wineprefix" / ".windows-user").write_text(args.windows_user + "\n")
     for note in scrub_registry(appdir / "wineprefix"):
         print("    " + note)
     build = place_wine(Path(args.wine).expanduser(), appdir / "usr")
@@ -249,6 +277,7 @@ def build_appdir(args, appdir: Path) -> dict:
         "wine_dir": "usr",
         "overlay": [n for n in OVERLAY if (app / n).exists()],
         "manager": manager_rev,
+        "windows_user": args.windows_user,
     }
     (appdir / "affinity-appimage.json").write_text(json.dumps(manifest, indent=2) + "\n")
     return manifest
@@ -351,6 +380,9 @@ def main(argv=None):
     p.add_argument("--runtime", required=True)
     p.add_argument("--version", required=True, help="the image's version, e.g. 3.3.2-1")
     p.add_argument("--work", required=True, help="an empty or new folder to build in")
+    p.add_argument("--windows-user", default=WINDOWS_USER,
+                   help=f"the Windows user the image runs under (default {WINDOWS_USER}); "
+                        "the prefix must have been installed under it")
     p.add_argument("--opencl", help="an OpenCL ICD loader (libOpenCL.so.1) to include")
     p.add_argument("--level", type=int, default=19, help="zstd level (default 19)")
     p.add_argument("--update-info", default=UPDATE_INFO,

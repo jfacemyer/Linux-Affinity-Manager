@@ -55,6 +55,14 @@ say() {
 
 wine_env() {
     export WINEPREFIX="${PREFIX}"
+    # The Windows user. Images from 3.3.3-1 on are built under one fixed name,
+    # written in the prefix, so the paths Wine keeps in it (the temporary
+    # folder, the shell folders) are the same on every machine; Wine names the
+    # user after USER. Installs from older images run under the login name,
+    # as they were made.
+    local user
+    user="$(head -n 1 "${PREFIX}/.windows-user" 2>/dev/null)"
+    [[ "${user}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] && export USER="${user}"
     export WINEARCH=win64
     export PATH="${APPDIR}/usr/bin:${PATH}"
     export LD_LIBRARY_PATH="${APPDIR}/usr/lib/wine/x86_64-unix:${APPDIR}/usr/lib:${LD_LIBRARY_PATH}"
