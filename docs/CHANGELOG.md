@@ -1,5 +1,17 @@
 # Changelog
 
+## [2026-11-19] - Wine 11.22, printing everywhere
+
+### Changed
+- **Wine 11.22 is the recommended version**, installed from [`11.22-r1`](https://github.com/jfacemyer/Affinity-Wine-Builder/releases/tag/11.22-r1) and pinned by SHA-256. It carries the whole Affinity patch set, rebased onto Wine 11.22. Wine 11.21 ([`11.21-r6`](https://github.com/jfacemyer/Affinity-Wine-Builder/releases/tag/11.21-r6)) is the fallback; 11.20 stays installable but is no longer offered.
+
+### Fixed
+- **Printers show up in a Wine prefix made by another user**, such as the one an AppImage ships. Wine kept the builder's temporary folder, which does not exist on anyone else's machine, and without one it adds no printers: Affinity said "No printers installed". Wine now repairs a temporary folder that points nowhere and stores new ones per user.
+- **A crash when a window is closed while it is being drawn** with the OpenGL renderer.
+- **A rare crash in font enumeration** when several threads list the system fonts at once.
+
+---
+
 ## [2026-11-06] - Startup crash fix
 
 ### Changed

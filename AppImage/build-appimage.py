@@ -375,7 +375,7 @@ def main(argv=None):
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--prefix", required=True)
     p.add_argument("--wine", required=True)
-    p.add_argument("--wine-version", help="what to call the Wine, e.g. 11.21-r6")
+    p.add_argument("--wine-version", help="what to call the Wine, e.g. 11.22-r1")
     p.add_argument("--manager", required=True)
     p.add_argument("--runtime", required=True)
     p.add_argument("--version", required=True, help="the image's version, e.g. 3.3.2-1")

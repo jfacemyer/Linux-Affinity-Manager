@@ -4,10 +4,10 @@ The installer supports two Wine versions, both built from [Affinity-Wine-Builder
 
 | Version | Best For | Description |
 |---------|----------|-------------|
-| **11.21** (Recommended) | Most users | Latest build with the full Affinity patch set on Wine 11.21: Direct2D throughput and brush-latency fixes, Vulkan and OpenGL presentation fixes, OpenCL event dispatcher, pen pressure, plus color, printing, login and installer fixes |
-| **11.20** | Fallback | Previous build: the same Affinity patch set on Wine 11.20. Use if 11.21 has issues |
+| **11.22** (Recommended) | Most users | Latest build with the full Affinity patch set on Wine 11.22: Direct2D throughput and brush-latency fixes, Vulkan and OpenGL presentation fixes, OpenCL event dispatcher, pen pressure, plus color, printing, login and installer fixes |
+| **11.21** | Fallback | Previous build: the same Affinity patch set on Wine 11.21. Use if 11.22 has issues |
 
-Wine 11.18 (`11.18-r1`, with the Affinity login fix and performance patches) is still installable but no longer offered.
+Wine 11.20 (`11.20-r8`) and 11.18 (`11.18-r1`, with the Affinity login fix and performance patches) are still installable but no longer offered.
 
 ## Features
 
@@ -17,12 +17,13 @@ Wine 11.18 (`11.18-r1`, with the Affinity login fix and performance patches) is 
 - Affinity-specific optimizations (WinRT/WinMetadata, window management, Direct2D)
 - Canva sign-in (login metadata) support
 
-The installer defaults to Wine 11.21. You can switch between versions anytime using the GUI installer.
+The installer defaults to Wine 11.22. You can switch between versions anytime using the GUI installer.
 
 ## Download Links
 
 The installer downloads these releases and checks each against a SHA-256 pinned in `AffinityLinuxInstaller.py`; a tarball that does not match is refused:
 
+- 11.22: [`11.22-r1`](https://github.com/jfacemyer/Affinity-Wine-Builder/releases/tag/11.22-r1), `ElementalWarrior-wine-11.22.tar.xz`
 - 11.21: [`11.21-r6`](https://github.com/jfacemyer/Affinity-Wine-Builder/releases/tag/11.21-r6), `ElementalWarrior-wine-11.21.tar.xz`
 - 11.20: [`11.20-r8`](https://github.com/jfacemyer/Affinity-Wine-Builder/releases/tag/11.20-r8), `ElementalWarrior-wine-11.20.tar.xz`
 - 11.19: [`11.19-r10`](https://github.com/jfacemyer/Affinity-Wine-Builder/releases/tag/11.19-r10), `ElementalWarrior-wine-11.19.tar.xz`

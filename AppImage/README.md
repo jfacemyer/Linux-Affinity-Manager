@@ -65,7 +65,7 @@ The two share one implementation: the AppImage carries the manager's
 ```sh
 AppImage/build-appimage.py \
     --prefix  ~/.AffinityLinuxManager/<a fresh install> \
-    --wine    ElementalWarrior-wine-11.21.tar.xz --wine-version 11.21-r6 \
+    --wine    ElementalWarrior-wine-11.22.tar.xz --wine-version 11.22-r1 \
     --manager <Affinity on Linux Manager checkout> \
     --runtime runtime-x86_64 \
     --opencl  libOpenCL.so.1 \

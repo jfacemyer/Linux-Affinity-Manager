@@ -263,8 +263,22 @@ def test_release_downloads_default_to_github(ali, monkeypatch):
     )
 
 
-def test_the_default_wine_is_11_21_and_follows_the_override(ali, monkeypatch):
-    assert ali.AffinityInstallerGUI.get_recommended_wine_version(None) == "11.21"
+def test_the_default_wine_is_11_22_and_follows_the_override(ali, monkeypatch):
+    assert ali.AffinityInstallerGUI.get_recommended_wine_version(None) == "11.22"
+    monkeypatch.delenv("AFFINITY_RELEASES_FROM", raising=False)
+    config = ali.AffinityInstallerGUI._get_wine_version_config(None, "11.22")
+    assert config["wine_url"] == (
+        "https://github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.22-r1/"
+        "ElementalWarrior-wine-11.22.tar.xz"
+    )
+    assert config["wine_sha256"] == ali.WINE_11_22_SHA256
+    monkeypatch.setenv("AFFINITY_RELEASES_FROM", "https://git.example.org/someone/")
+    moved = ali.AffinityInstallerGUI._get_wine_version_config(None, "11.22")
+    assert moved["wine_url"].startswith("https://git.example.org/someone/Affinity-Wine-Builder/")
+    assert moved["wine_sha256"] == ali.WINE_11_22_SHA256
+
+
+def test_the_fallback_wine_is_11_21_r6(ali, monkeypatch):
     monkeypatch.delenv("AFFINITY_RELEASES_FROM", raising=False)
     config = ali.AffinityInstallerGUI._get_wine_version_config(None, "11.21")
     assert config["wine_url"] == (
@@ -272,13 +286,12 @@ def test_the_default_wine_is_11_21_and_follows_the_override(ali, monkeypatch):
         "ElementalWarrior-wine-11.21.tar.xz"
     )
     assert config["wine_sha256"] == ali.WINE_11_21_SHA256
-    monkeypatch.setenv("AFFINITY_RELEASES_FROM", "https://git.example.org/someone/")
-    moved = ali.AffinityInstallerGUI._get_wine_version_config(None, "11.21")
-    assert moved["wine_url"].startswith("https://git.example.org/someone/Affinity-Wine-Builder/")
-    assert moved["wine_sha256"] == ali.WINE_11_21_SHA256
+    assert ali.AffinityInstallerGUI.map_wine_dialog_choice_to_version(None, "Wine 11.21") == "11.21"
+    assert ali.AffinityInstallerGUI.map_wine_dialog_choice_to_version(
+        None, "Wine 11.22 (Recommended)") == "11.22"
 
 
-def test_the_fallback_wine_is_11_20_r4(ali, monkeypatch):
+def test_wine_11_20_r8_is_still_installable(ali, monkeypatch):
     monkeypatch.delenv("AFFINITY_RELEASES_FROM", raising=False)
     config = ali.AffinityInstallerGUI._get_wine_version_config(None, "11.20")
     assert config["wine_url"] == (
