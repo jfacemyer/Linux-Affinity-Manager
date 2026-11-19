@@ -46,6 +46,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import probe
+
 FILL = "fill"
 REPLACE = "replace"
 
@@ -353,10 +355,10 @@ def destination_for(prefix, version=None) -> Path:
     if users.is_dir():
         names = [d for d in sorted(users.iterdir())
                  if d.is_dir() and d.name not in NOT_A_PERSON]
-        me = getpass.getuser()
+        me = probe.windows_user(p) or getpass.getuser()
         user = next((d for d in names if d.name == me), names[0] if names else None)
     if user is None:
-        user = users / getpass.getuser()
+        user = users / (probe.windows_user(p) or getpass.getuser())
     return user.joinpath(*APPDATA_TAIL) / (version or "3.0") / "Settings"
 
 

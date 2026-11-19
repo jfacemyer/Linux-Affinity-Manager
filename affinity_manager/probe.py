@@ -32,6 +32,24 @@ def affinity_dir(prefix) -> Path:
     return nested
 
 
+# A prefix made to run under one fixed Windows user name, whatever the login
+# name of whoever runs it: AppImage installs. Wine names the profile after
+# $USER and stores paths under C:\users\<name> in the registry (TEMP, the
+# shell folders), so a prefix built under one name and run under another
+# points at folders that do not exist: no temporary folder, so no printers.
+WINDOWS_USER_FILE = ".windows-user"
+_WINDOWS_USER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+def windows_user(prefix) -> str | None:
+    """The Windows user name this prefix runs under, when it has a fixed one."""
+    try:
+        name = (Path(prefix).expanduser() / WINDOWS_USER_FILE).read_text().strip()
+    except (OSError, UnicodeDecodeError):
+        return None
+    return name if _WINDOWS_USER_RE.match(name) else None
+
+
 def is_prefix(prefix) -> bool:
     """A Wine prefix, whether or not Affinity is in it yet."""
     p = Path(prefix).expanduser()

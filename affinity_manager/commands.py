@@ -97,7 +97,15 @@ def launch_env(prefix, build: str, **kwargs) -> dict:
         if key == "WINEDLLOVERRIDES" and env.get(key):
             value = f"{env[key]};{value}"
         env[key] = value
+    env.update(user_env(prefix))
     return env
+
+
+def user_env(prefix) -> dict:
+    """USER for a prefix that runs under a fixed Windows user name (an AppImage
+    install): Wine names the Windows user after it."""
+    name = probe.windows_user(prefix)
+    return {"USER": name} if name else {}
 
 
 class Command:
@@ -172,7 +180,7 @@ def for_prefix(prefix) -> list[Command]:
     if inst is not None and inst.kind == appimage.LINKED:
         return _appimage_commands(prefix)
     app = probe.affinity_dir(prefix)
-    base_env = {"WINEPREFIX": str(prefix)}
+    base_env = {"WINEPREFIX": str(prefix), **user_env(prefix)}
     commands: list[Command] = []
 
     launchers = [
