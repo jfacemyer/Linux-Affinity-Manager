@@ -51,9 +51,11 @@ def make_prefix(root: Path, *, affinity="3.3.2.100", nested=True, fonts=(("Arial
 
 
 def make_image(tmp: Path, name="img", *, version="3.3.2-1", built="2026-11-07T00:00:00+00:00",
-               affinity="3.3.2.100", wine="11.21-r6") -> appimage.Image:
+               affinity="3.3.2.100", wine="11.21-r6", windows_user=None) -> appimage.Image:
     root = tmp / name
     make_prefix(root / "wineprefix", affinity=affinity)
+    if windows_user:
+        (root / "wineprefix" / probe.WINDOWS_USER_FILE).write_text(windows_user + "\n")
     app = root / "wineprefix" / "drive_c" / "Program Files" / "Affinity" / "Affinity"
     (app / "AffinityPluginLoader.dll").write_text("apl " + version)
     (app / "apl").mkdir()
@@ -266,6 +268,92 @@ def test_upgrade_keeps_the_old_install_and_carries_the_users_files(env):
     # Nothing transient is left.
     assert sorted(p.name for p in P.parent.iterdir() if p.name.startswith(P.name)) == \
         [P.name, P.name + ".backups", P.name + ".previous"]
+
+
+def _fixed(tmp, home, monkeypatch, login="joe"):
+    """An install from an image up to 3.3.3, used by joe, and an image that
+    runs under the fixed name."""
+    monkeypatch.setenv("USER", login)
+    old = make_image(tmp, "old", version="3.3.1-1", built="2026-10-01T00:00:00+00:00",
+                     affinity="3.3.1.50", wine="11.19")
+    new = make_image(tmp, "new", version="3.3.3-1", built="2026-11-18T00:00:00+00:00",
+                     wine="11.22-r1", windows_user="affinityonlinux")
+    P = installed(tmp, home, old)
+    add_user_data(P, home)
+    return new, P
+
+
+def test_upgrade_to_a_fixed_user_image_moves_the_login_profile(env, monkeypatch):
+    tmp, home = env
+    new, P = _fixed(tmp, home, monkeypatch)
+    notes = appimage.upgrade(appimage.plan_upgrade(new, P))
+
+    assert probe.windows_user(P) == "affinityonlinux"
+    users = P / "drive_c" / "users"
+    assert not (users / "joe").exists()
+    roaming = users / "affinityonlinux" / "AppData" / "Roaming" / "Affinity"
+    assert (roaming / "Affinity" / "3.0" / "sess.db").read_text() == "signed in"
+    assert (users / "affinityonlinux" / "Documents").is_symlink()
+    assert any("C:\\users\\affinityonlinux" in n and "joe" in n for n in notes)
+    # The kept install is as it was, under the login name.
+    prev = appimage.previous_of(P)
+    assert (prev / "drive_c" / "users" / "joe" / "AppData").is_dir()
+    assert probe.windows_user(prev) is None
+
+
+def test_a_profile_made_under_another_login_is_found_by_its_settings(env, monkeypatch):
+    tmp, home = env
+    new, P = _fixed(tmp, home, monkeypatch, login="mary")
+    appimage.upgrade(appimage.plan_upgrade(new, P))
+    users = P / "drive_c" / "users"
+    assert (users / "affinityonlinux" / "AppData" / "Roaming" / "Affinity" / "Affinity").is_dir()
+    assert not (users / "joe").exists()
+
+
+def test_two_profiles_with_settings_are_left_alone(env, monkeypatch):
+    tmp, home = env
+    new, P = _fixed(tmp, home, monkeypatch, login="mary")
+    (P / "drive_c" / "users" / "sam" / "AppData" / "Roaming" / "Affinity" / "Affinity" / "3.0"
+     / "Settings").mkdir(parents=True)
+    notes = appimage.upgrade(appimage.plan_upgrade(new, P))
+    users = P / "drive_c" / "users"
+    assert (users / "joe").is_dir() and (users / "sam").is_dir()
+    assert not (users / "affinityonlinux").exists()
+    assert not any("affinityonlinux" in n for n in notes)
+
+
+def test_upgrade_between_fixed_user_images_renames_nothing(env, monkeypatch):
+    tmp, home = env
+    monkeypatch.setenv("USER", "joe")
+    a = make_image(tmp, "a", version="3.3.3-1", built="2026-11-18T00:00:00+00:00",
+                   windows_user="affinityonlinux")
+    b = make_image(tmp, "b", version="3.3.4-1", built="2026-12-01T00:00:00+00:00",
+                   windows_user="affinityonlinux")
+    P = installed(tmp, home, a)
+    add_user_data(P, home, user="affinityonlinux")
+    notes = appimage.upgrade(appimage.plan_upgrade(b, P))
+    assert (P / "drive_c" / "users" / "affinityonlinux" / "AppData").is_dir()
+    assert not any("is now C:" in n for n in notes)
+
+
+def test_windows_user_file_is_validated(tmp_path):
+    (tmp_path / probe.WINDOWS_USER_FILE).write_text("affinityonlinux\n")
+    assert probe.windows_user(tmp_path) == "affinityonlinux"
+    for bad in ("../etc", "a b", "", "x" * 65, "-x"):
+        (tmp_path / probe.WINDOWS_USER_FILE).write_text(bad)
+        assert probe.windows_user(tmp_path) is None
+    (tmp_path / probe.WINDOWS_USER_FILE).unlink()
+    assert probe.windows_user(tmp_path) is None
+
+
+def test_a_fixed_user_prefix_is_launched_under_that_name(tmp_path):
+    from affinity_manager import commands, prefsseed
+    P = make_prefix(tmp_path / "P")
+    assert "USER" not in commands.launch_env(P, "ElementalWarrior-wine-11.22")
+    (P / probe.WINDOWS_USER_FILE).write_text("affinityonlinux\n")
+    assert commands.launch_env(P, "ElementalWarrior-wine-11.22")["USER"] == "affinityonlinux"
+    # Settings for a prefix that has none yet go to that profile.
+    assert "affinityonlinux" in prefsseed.destination_for(P).parts
 
 
 def test_upgrade_without_keeping(env):
@@ -701,3 +789,20 @@ def test_only_font_registrations_naming_a_real_file_are_carried(tmp_path):
     have = set(regfile.read_values(P / "system.reg", FONTS))
     assert {'"Mine (TrueType)"', '"Host (TrueType)"'} <= have
     assert not have & {'"Gone (TrueType)"', '"Builder (TrueType)"', '"Yahei (TrueType)"'}
+
+
+def test_switch_names_the_appimage_and_wine(env):
+    tmp, home = env
+    old, new, P, _ = _two(tmp, home)
+    appimage.upgrade(appimage.plan_upgrade(new, P))
+    note = appimage.switch_to_previous(P)[0]
+    assert f"AppImage {old.version}" in note and f"AppImage {new.version}" in note
+    assert f"Wine {new.wine}" in note
+
+
+def test_upgrade_dialog_bold_is_markup_and_the_rest_is_escaped():
+    from affinity_manager import appimage_cli as cli
+    line = cli._bold("Keep the old install") + " so you can go back to it: 5.0G on disk & <more>."
+    assert cli._rich(line) == ("<b>Keep the old install</b> so you can go back to it: "
+                               "5.0G on disk &amp; &lt;more&gt;.")
+    assert cli._rich("<b>not ours</b>") == "&lt;b&gt;not ours&lt;/b&gt;"

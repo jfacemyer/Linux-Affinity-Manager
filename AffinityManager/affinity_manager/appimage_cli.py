@@ -173,6 +173,20 @@ def _markup(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+# Bold, anywhere in a line: marked with characters no path or version holds,
+# escaped with the rest, then turned into tags.
+_B, _NB = "\x01", "\x02"
+
+
+def _bold(text: str) -> str:
+    return f"{_B}{text}{_NB}"
+
+
+def _rich(text: str) -> str:
+    """Escape for markup, keeping what _bold() marked as bold."""
+    return _markup(text).replace(_B, "<b>").replace(_NB, "</b>")
+
+
 # ── prepare: what the AppImage runs on every start ───────────────────────────
 
 
@@ -250,7 +264,7 @@ def _offer_upgrade(image, inst, ui) -> int:
         ui.info(_markup(f"{exc}\n\nAffinity starts as it is."))
         return EXIT_LAUNCH
 
-    lines = [f"<b>This AppImage has Affinity {image.affinity} and Wine {image.wine}.</b>",
+    lines = [_bold(f"This AppImage has Affinity {image.affinity} and Wine {image.wine}."),
              f"Your install has Affinity {inst.affinity or '?'}, from AppImage "
              f"{inst.image_version}.", "",
              "Your settings, presets, fonts and sign-in are saved first, and carried "
@@ -258,7 +272,7 @@ def _offer_upgrade(image, inst, ui) -> int:
     if plan.program == appimage.PROGRAM_KEEP:
         lines.append(f"Your Affinity is newer than this AppImage's, so it is kept and "
                      "everything around it is updated.")
-    lines += ["", f"<b>Keep the old install</b> so you can go back to it: "
+    lines += ["", _bold("Keep the old install") + " so you can go back to it: "
               f"{probe.human_size(plan.previous_size)} on disk."]
     if plan.replaces_previous:
         lines.append("It replaces the install kept from the last upgrade.")
@@ -267,8 +281,7 @@ def _offer_upgrade(image, inst, ui) -> int:
                      + ", ".join(plan.extras[:5]) + ("…" if len(plan.extras) > 5 else ""))
     for note in plan.notes:
         lines.append(note)
-    text = "\n".join(_markup(l) if not l.startswith("<b>") else
-                     "<b>" + _markup(l[3:-4]) + "</b>" for l in lines)
+    text = "\n".join(_rich(l) for l in lines)
     pick = ui.choose(text, ["Upgrade and keep the old install",
                             "Upgrade, don't keep it", "Not now"], default=0)
     if pick == 2 or pick is None:

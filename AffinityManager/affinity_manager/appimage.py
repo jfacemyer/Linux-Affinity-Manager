@@ -570,6 +570,49 @@ def _copy_users(src: Path, dst: Path) -> int:
     return count
 
 
+def _login_name() -> str:
+    """The name Wine gives the Windows user when nothing fixes it: $USER, as
+    Wine reads it, or the login name."""
+    name = os.environ.get("USER", "").strip()
+    if name:
+        return name.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+    import pwd
+    return pwd.getpwuid(os.getuid()).pw_name
+
+
+def _adopt_profile(old: Path, new: Path) -> list[str]:
+    """The old install's Windows profile, under the new install's user name.
+
+    An image that runs under a fixed Windows user name (probe.windows_user),
+    upgrading an install that ran under the login name (AppImages up to 3.3.1):
+    the settings, the sign-in and the presets are in the old name's profile,
+    and Affinity would otherwise start as a new user. Affinity keeps almost no
+    paths with the profile's name in them (its download cache, which it
+    rebuilds), so the folder is renamed and nothing inside is rewritten."""
+    target = probe.windows_user(new)
+    if not target:
+        return []
+    users = new / "drive_c" / "users"
+    if (users / target).exists():
+        return []
+    source = probe.windows_user(old) or _login_name()
+    if source == target:
+        return []
+    src = users / source
+    if not src.is_dir() or src.is_symlink():
+        # Not the login name (made under another account, or on another
+        # machine): the one profile with Affinity settings in it, if only one.
+        found = [d for d in users.iterdir()
+                 if d.is_dir() and not d.is_symlink()
+                 and d.name not in prefsseed.NOT_A_PERSON
+                 and d.joinpath(*prefsseed.APPDATA_TAIL).is_dir()]
+        if len(found) != 1:
+            return []
+        src, source = found[0], found[0].name
+    src.rename(users / target)
+    return [f"Your Windows profile is now C:\\users\\{target} (it was {source})"]
+
+
 def _replace_link(src: Path, dst: Path) -> None:
     if dst.is_symlink() or dst.is_file():
         dst.unlink()
@@ -848,7 +891,7 @@ def upgrade(plan: UpgradePlan, progress=None) -> list[str]:
         snap = take_snapshot(P, label=f"before-upgrade-{old.affinity or 'unknown'}", auto=True)
         notes.append(f"Settings saved in {snap.path}")
     except snapshots.NoSettings:
-        notes.append("No settings to save yet: Affinity had not been started in it")
+        notes.append("No saved settings to carry over yet: Affinity writes them when it closes")
 
     _journal(P, phase="build")
     new = _sibling(P, UPGRADING)
@@ -861,6 +904,7 @@ def upgrade(plan: UpgradePlan, progress=None) -> list[str]:
     users = P / "drive_c" / "users"
     if users.is_dir():
         _copy_users(users, new / "drive_c" / "users")
+        notes += _adopt_profile(P, new)
     notes += _carry_fonts(P, new)
     letters = prefsseed.drive_letters(P)
     if letters and prefsseed.is_initialised(new):
@@ -934,8 +978,21 @@ def switch_to_previous(prefix) -> list[str]:
     mid.rename(prev)
     _journal_done(P)
     now, then = inspect(P), inspect(prev)
-    return [f"Now using the install with Affinity {now.affinity if now else '?'}; "
-            f"the other (Affinity {then.affinity if then else '?'}) is kept as {prev.name}."]
+    return [f"Now using the install with {_what(now)}; "
+            f"the other ({_what(then)}) is kept as {prev.name}."]
+
+
+def _what(inst) -> str:
+    """An install as the switch message names it: Affinity, and the AppImage
+    and Wine where known, so two installs of the same Affinity can be told
+    apart."""
+    if inst is None:
+        return "Affinity ?"
+    text = f"Affinity {inst.affinity or '?'}"
+    extra = [f"AppImage {inst.image_version}" if inst.image_version else "",
+             f"Wine {inst.image.get('wine')}" if inst.image.get("wine") else ""]
+    extra = [e for e in extra if e]
+    return text + (f" ({', '.join(extra)})" if extra else "")
 
 
 def remove_previous(prefix) -> list[str]:
