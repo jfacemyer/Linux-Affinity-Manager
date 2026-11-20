@@ -9,6 +9,7 @@
 - **Printers show up in a Wine prefix made by another user**, such as the one an AppImage ships. Wine kept the builder's temporary folder, which does not exist on anyone else's machine, and without one it adds no printers: Affinity said "No printers installed". Wine now repairs a temporary folder that points nowhere and stores new ones per user.
 - **A crash when a window is closed while it is being drawn** with the OpenGL renderer.
 - **A rare crash in font enumeration** when several threads list the system fonts at once.
+- **The installer downloads Tahoma again.** SourceForge, which hosts it, now refuses the browser identity the installer sends with "403 Forbidden", so the installer fell back to winetricks for it. It now retries a refused download under its own name.
 
 ---
 

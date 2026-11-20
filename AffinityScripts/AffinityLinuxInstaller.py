@@ -861,6 +861,31 @@ DIRECT_FONT_VERBS = {
 }
 
 
+BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/91.0.4472.124 Safari/537.36"
+)
+
+
+def _open_download(url):
+    """Open a download, as a browser first, then as ourselves.
+
+    Some hosts want a browser's User-Agent; SourceForge, which serves Tahoma,
+    now answers a browser-like agent that is not a browser with 403 and
+    serves the plain one.
+    """
+    last = None
+    for agent in (BROWSER_USER_AGENT, "AffinityLinuxInstaller"):
+        req = urllib.request.Request(url, headers={"User-Agent": agent, "Accept": "*/*"})
+        try:
+            return urllib.request.urlopen(req)
+        except urllib.error.HTTPError as e:
+            if e.code != 403:
+                raise
+            last = e
+    raise last
+
+
 def winetricks_cache_dir():
     """Where winetricks keeps its downloads, so both share one copy."""
     return Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "winetricks"
@@ -10257,16 +10282,8 @@ class AffinityInstallerGUI(QMainWindow):
 
             self.log(f"Downloading {description}...", "info")
 
-            # Create request with proper headers
-            req = urllib.request.Request(url)
-            req.add_header(
-                "User-Agent",
-                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-            )
-            req.add_header("Accept", "*/*")
-
             # Use urlopen for better header support and manual progress tracking
-            with urllib.request.urlopen(req) as response:
+            with _open_download(url) as response:
                 total_size = int(response.headers.get("Content-Length", 0))
                 downloaded = 0
                 block_size = 8192

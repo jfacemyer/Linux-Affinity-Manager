@@ -1482,3 +1482,35 @@ def test_winefix_guard_off_added_when_the_key_is_missing(ali, tmp_path):
     config.write_text("[crash-fixes]\npin_plugin_host = true\n")
     ali.winefix_disable_bezier_split_guard(tmp_path)
     assert config.read_text() == "[crash-fixes]\npin_plugin_host = true\n[patches]\nbezier_split_guard = false\n"
+
+
+def test_download_retries_a_403_with_the_installers_own_agent(ali, monkeypatch):
+    """SourceForge refuses the browser agent with 403 and serves the plain one."""
+    import io
+    import urllib.error
+    agents = []
+
+    def urlopen(req):
+        agent = req.get_header("User-agent")
+        agents.append(agent)
+        if agent == ali.BROWSER_USER_AGENT:
+            raise urllib.error.HTTPError(req.full_url, 403, "Forbidden", {}, None)
+        return io.BytesIO(b"cab")
+
+    monkeypatch.setattr(ali.urllib.request, "urlopen", urlopen)
+    assert ali._open_download("https://example.invalid/IELPKTH.CAB").read() == b"cab"
+    assert agents == [ali.BROWSER_USER_AGENT, "AffinityLinuxInstaller"]
+
+
+def test_download_does_not_retry_other_errors(ali, monkeypatch):
+    import urllib.error
+    calls = []
+
+    def urlopen(req):
+        calls.append(req)
+        raise urllib.error.HTTPError(req.full_url, 404, "Not Found", {}, None)
+
+    monkeypatch.setattr(ali.urllib.request, "urlopen", urlopen)
+    with pytest.raises(urllib.error.HTTPError):
+        ali._open_download("https://example.invalid/missing")
+    assert len(calls) == 1
