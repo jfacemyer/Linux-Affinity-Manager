@@ -185,23 +185,23 @@ def for_prefix(prefix) -> list[Command]:
 
     launchers = [
         (
+            "affinity-on-linux.exe",
+            "Affinity, with the fixes",
+            "Starts Affinity as the menu and a double-clicked document do: "
+            "loads the Affinity on Linux fixes, and hands a document to an "
+            "Affinity that is already running.",
+        ),
+        (
             "AffinityHook.exe",
-            "Affinity, with plugins",
-            "Starts Affinity through the plugin hook, so AffinityPluginLoader "
-            "and WineFix load. This is what the desktop entry uses.",
+            "Affinity, with AffinityPluginLoader",
+            "An install from before the Affinity on Linux fixes: starts "
+            "Affinity through AffinityPluginLoader's hook.",
         ),
         (
             "Affinity.exe",
-            "Affinity, no plugins",
+            "Affinity, without the fixes",
             "Starts Affinity directly. Use this to find out whether a problem "
-            "belongs to Affinity or to the plugins.",
-        ),
-        (
-            "affinity-on-linux.exe",
-            "Affinity, as the file manager starts it",
-            "The handler a double-clicked document goes through: converts the "
-            "path, serialises launches, and hands warm documents to a running "
-            "instance.",
+            "belongs to Affinity or to the fixes.",
         ),
     ]
     for exe_name, label, detail in launchers:

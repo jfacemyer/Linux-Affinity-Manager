@@ -143,8 +143,9 @@ def launch(
 def launch_affinity(prefix, *, wine_build: str | None = None) -> subprocess.Popen:
     """Start Affinity in a prefix.
 
-    Goes through AffinityHook.exe when it is there so plugins load, and falls
-    back to Affinity.exe when it is not. opencl is disabled on the builds where,
+    Goes through affinity-on-linux.exe when it is there, so the Affinity on
+    Linux fixes load and a running Affinity is not joined by a second; then
+    AffinityPluginLoader's AffinityHook.exe; then Affinity.exe. opencl is disabled on the builds where,
     on a real GPU, it deadlocks Affinity at startup (Wine 11.11 to 11.18)."""
     prefix = Path(prefix).expanduser()
     from . import appimage, appimagerun, probe
@@ -153,10 +154,9 @@ def launch_affinity(prefix, *, wine_build: str | None = None) -> subprocess.Pope
         # Wine is inside the AppImage, which knows how to start it.
         return appimagerun.launch_command(prefix).run()
     app = probe.affinity_dir(prefix)
-    exe = app / "AffinityHook.exe"
-    if not exe.is_file():
-        exe = app / "Affinity.exe"
-    if not exe.is_file():
+    exe = next((app / n for n in ("affinity-on-linux.exe", "AffinityHook.exe", "Affinity.exe")
+                if (app / n).is_file()), None)
+    if exe is None:
         raise FileNotFoundError(f"No Affinity found in {prefix}")
 
     build = wine_build
