@@ -258,8 +258,9 @@ def test_release_downloads_default_to_github(ali, monkeypatch):
     config = ali.AffinityInstallerGUI._get_wine_version_config(None, "11.19")
     assert config["wine_url"].startswith("https://github.com/jfacemyer/Affinity-Wine-Builder/")
     assert config["wine_sha256"] == ali.WINE_11_19_SHA256
-    assert ali.apl_release_api_url() == (
-        f"https://api.github.com/repos/{ali.APL_RELEASE_REPO}/releases/tags/{ali.APL_RELEASE_TAG}"
+    assert ali.aol_loader_url() == (
+        "https://github.com/jfacemyer/AffinityOnLinuxLoader/releases/download/"
+        f"v{ali.AOL_LOADER_VERSION}/aol-loader-{ali.AOL_LOADER_VERSION}.tar.xz"
     )
 
 
@@ -315,10 +316,8 @@ def test_release_downloads_follow_the_override(ali, monkeypatch):
     other = ali.AffinityInstallerGUI._get_wine_version_config(None, "11.18")
     assert other["wine_url"].startswith("https://git.example.org/someone/Affinity-Wine-Builder/")
     assert other["wine_sha256"] == ali.WINE_11_18_SHA256
-    assert ali.apl_release_api_url() == (
-        "https://git.example.org/api/v1/repos/someone/AffinityPluginLoader/releases/tags/"
-        + ali.APL_RELEASE_TAG
-    )
+    assert ali.aol_loader_url().startswith(
+        "https://git.example.org/someone/AffinityOnLinuxLoader/releases/download/")
 
 
 # --------------------------------------------------------------------------- #
@@ -1456,32 +1455,89 @@ def test_the_slow_verbs_get_the_most_of_the_bar(ali):
     assert times["dotnet48"] > sum(t for n, t in times.items() if n != "dotnet48")
 
 
-def test_winefix_guard_off_in_a_new_settings_file(ali, tmp_path):
-    assert ali.winefix_disable_bezier_split_guard(tmp_path)
-    assert (tmp_path / "apl/config/winefix.toml").read_text() == "[patches]\nbezier_split_guard = false\n"
+def _loader_archive(path, entries):
+    import io
+    import tarfile
+    with tarfile.open(path, "w:xz") as tar:
+        for name, data in entries.items():
+            info = tarfile.TarInfo(name)
+            if data is None:
+                info.type = tarfile.DIRTYPE
+                tar.addfile(info)
+            else:
+                info.size = len(data)
+                tar.addfile(info, io.BytesIO(data))
+    return path
 
 
-def test_winefix_guard_off_keeps_the_rest_and_the_line_ends(ali, tmp_path):
-    config = tmp_path / "apl/config/winefix.toml"
-    config.parent.mkdir(parents=True)
-    config.write_bytes(b"[patches]\r\n# Guard\r\nbezier_split_guard = true\r\nwiden_stub_fix = true\r\n")
-    assert ali.winefix_disable_bezier_split_guard(tmp_path)
-    assert config.read_bytes() == (
-        b"[patches]\r\n# Guard\r\nbezier_split_guard = false\r\nwiden_stub_fix = true\r\n")
-    assert not ali.winefix_disable_bezier_split_guard(tmp_path)
+LOADER = {
+    "aol-loader": None,
+    "aol-loader/aol-bootstrap.dll": b"MZ bootstrap",
+    "aol-loader/aol-loader.dll": b"MZ loader",
+    "aol-loader/0Harmony.dll": b"MZ harmony",
+    "aol-loader/aol/plugins/aol-fixes.dll": b"MZ fixes",
+}
 
 
-def test_winefix_guard_off_added_when_the_key_is_missing(ali, tmp_path):
-    config = tmp_path / "apl/config/winefix.toml"
-    config.parent.mkdir(parents=True)
-    config.write_text("[patches]\nwiden_stub_fix = true\n\n[crash-fixes]\npin_plugin_host = true\n")
-    ali.winefix_disable_bezier_split_guard(tmp_path)
-    assert config.read_text() == (
-        "[patches]\nbezier_split_guard = false\nwiden_stub_fix = true\n\n"
-        "[crash-fixes]\npin_plugin_host = true\n")
-    config.write_text("[crash-fixes]\npin_plugin_host = true\n")
-    ali.winefix_disable_bezier_split_guard(tmp_path)
-    assert config.read_text() == "[crash-fixes]\npin_plugin_host = true\n[patches]\nbezier_split_guard = false\n"
+def test_the_loader_pin_is_a_real_checksum(ali):
+    import re
+    assert re.fullmatch(r"[0-9a-f]{64}", ali.AOL_LOADER_SHA256)
+    assert re.fullmatch(r"\d+\.\d+\.\d+", ali.AOL_LOADER_VERSION)
+
+
+def test_the_loader_installs_into_a_fresh_affinity(ali, tmp_path):
+    archive = _loader_archive(tmp_path / "l.tar.xz", LOADER)
+    app = tmp_path / "Affinity"
+    app.mkdir()
+    notes = ali.install_aol_loader_files(archive, app)
+    assert (app / "aol-bootstrap.dll").read_bytes() == b"MZ bootstrap"
+    assert (app / "aol" / "plugins" / "aol-fixes.dll").read_bytes() == b"MZ fixes"
+    assert not (app / "apl").exists() and not (app / "d2d1.dll.winefix-old").exists()
+    assert [level for level, _ in notes] == ["success"]
+
+
+def test_the_loader_retires_affinitypluginloader_and_keeps_its_settings(ali, tmp_path):
+    archive = _loader_archive(tmp_path / "l.tar.xz", LOADER)
+    app = tmp_path / "Affinity"
+    (app / "apl" / "config").mkdir(parents=True)
+    (app / "apl" / "plugins").mkdir()
+    (app / "apl" / "plugins" / "WineFix.dll").write_bytes(b"MZ")
+    (app / "apl" / "config" / "winefix.toml").write_text("[patches]\npin_plugin_host = false\n")
+    (app / "apl" / "config" / "apl.toml").write_text("[logging]\n")
+    for name in ("AffinityHook.exe", "AffinityBootstrap.dll", "AffinityPluginLoader.dll"):
+        (app / name).write_bytes(b"MZ")
+    (app / "d2d1.dll").write_bytes(b"MZ wine 10.18 d2d1 from an old WineFix")
+    (app / "Affinity.exe").write_bytes(b"MZ affinity")
+
+    ali.install_aol_loader_files(archive, app)
+
+    assert (app / "aol" / "config" / "fixes.toml").read_text() == "[patches]\npin_plugin_host = false\n"
+    assert (app / "aol" / "config" / "aol.toml").read_text() == "[logging]\n"
+    assert not (app / "apl").exists()
+    assert not any((app / n).exists() for n in ("AffinityHook.exe", "AffinityBootstrap.dll", "AffinityPluginLoader.dll"))
+    assert (app / "d2d1.dll.winefix-old").read_bytes().startswith(b"MZ wine 10.18")
+    assert (app / "Affinity.exe").read_bytes() == b"MZ affinity"
+
+
+def test_the_loaders_own_settings_win_over_old_ones(ali, tmp_path):
+    archive = _loader_archive(tmp_path / "l.tar.xz", LOADER)
+    app = tmp_path / "Affinity"
+    (app / "apl" / "config").mkdir(parents=True)
+    (app / "apl" / "config" / "winefix.toml").write_text("old")
+    (app / "aol" / "config").mkdir(parents=True)
+    (app / "aol" / "config" / "fixes.toml").write_text("new")
+    ali.install_aol_loader_files(archive, app)
+    assert (app / "aol" / "config" / "fixes.toml").read_text() == "new"
+
+
+@pytest.mark.parametrize("bad", ["aol-loader/../escape.dll", "/etc/escape", "other/x.dll"])
+def test_a_loader_archive_with_a_stray_path_writes_nothing(ali, tmp_path, bad):
+    archive = _loader_archive(tmp_path / "l.tar.xz", dict(LOADER, **{bad: b"x"}))
+    app = tmp_path / "Affinity"
+    app.mkdir()
+    with pytest.raises(ValueError):
+        ali.install_aol_loader_files(archive, app)
+    assert list(app.iterdir()) == []
 
 
 def test_download_retries_a_403_with_the_installers_own_agent(ali, monkeypatch):

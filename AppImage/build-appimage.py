@@ -5,8 +5,8 @@
                       --runtime RUNTIME --version 3.3.2-1 --work DIR
 
   PREFIX    a prefix with Affinity installed by the Affinity on Linux installer
-            (Affinity in Program Files/Affinity/Affinity, the plugin loader,
-            WineFix and vkd3d-proton beside it). Read, never changed.
+            (Affinity in Program Files/Affinity/Affinity, with the Affinity on
+            Linux fixes and vkd3d-proton beside it). Read, never changed.
   WINE      the Wine build: a directory, or the .tar.xz the builder makes.
   MANAGER   the Affinity on Linux Manager's source (the folder holding
             affinity_manager/). Its install and upgrade code goes into the
@@ -61,9 +61,10 @@ UPDATE_INFO = ("gh-releases-zsync|ryzendew|Linux-Affinity-Installer|latest|"
 # Affinity on upgrade, so keeping it does not mean keeping old fixes. Not
 # Serif.Affinity.dll, which the installer patches: that one belongs to one
 # Affinity version.
-OVERLAY = ("affinity-on-linux.exe", "AffinityHook.exe", "AffinityPluginLoader.dll",
-           "AffinityBootstrap.dll", "0Harmony.dll", "apl", "d3d12.dll",
-           "d3d12core.dll", "LICENSE", "README.md")
+# aol/plugins, not aol: aol/config holds the user's own settings for the fixes.
+OVERLAY = ("affinity-on-linux.exe", "aol-bootstrap.dll", "aol-loader.dll",
+           "0Harmony.dll", "aol/plugins", "d3d12.dll", "d3d12core.dll",
+           "LICENSE", "README.md")
 
 # The Windows user every install of the image runs under, whoever runs it:
 # AppRun sets USER to it (the name is written in the prefix, .windows-user).

@@ -21,8 +21,10 @@
 //     cannot both decide "not running" and both cold start
 //   * warm (an instance is up): hands each document straight to Affinity.exe
 //     and lets Affinity's own single-instance handoff forward it
-//   * cold: goes through AffinityHook.exe when it is installed, so plugins load,
-//     and watches for the intermittent startup deadlock
+//   * cold: starts Affinity.exe and loads the Affinity on Linux loader into
+//     it (aol-bootstrap.dll; see LOADING THE FIXES below). An install from
+//     before the loader still goes through AffinityPluginLoader's
+//     AffinityHook.exe instead
 //   * clears a shutdown zombie first -- an Affinity 3.3 that logged "Exit" and
 //     then deadlocked in libnetwork.dll's process detach. See THE SHUTDOWN
 //     ZOMBIE below; it is why a launch can appear to do nothing at all.
@@ -120,11 +122,18 @@ namespace AffinityOnLinux
             }
 
             string affinity = Path.Combine(dir, "Affinity.exe");
+            string bootstrap = Path.Combine(dir, "aol-bootstrap.dll");
+            if (!File.Exists(bootstrap) || !File.Exists(Path.Combine(dir, "aol-loader.dll")))
+                bootstrap = null;
+            // AffinityPluginLoader's launcher, on an install the installer has
+            // not yet moved to our loader. Never both: two loaders would patch
+            // Affinity twice.
             string hook = Path.Combine(dir, "AffinityHook.exe");
-            bool hasHook = File.Exists(hook);
+            bool hasHook = bootstrap == null && File.Exists(hook);
             string launcher = hasHook ? hook : affinity;
 
-            Log("affinity=" + affinity + " hook=" + (hasHook ? hook : "(not installed)"));
+            Log("affinity=" + affinity + " loader=" + (bootstrap ?? "(not installed)")
+                + (hasHook ? " hook=" + hook : ""));
 
             var docs = new List<string>();
             int failed = 0;
@@ -166,7 +175,7 @@ namespace AffinityOnLinux
                 return failed;
             }
 
-            return ColdStart(launcher, affinity, hasHook, docs) ? failed : 1;
+            return ColdStart(launcher, affinity, hasHook, bootstrap, docs) ? failed : 1;
         }
 
         // ---------------------------------------------------------------- cold
@@ -189,7 +198,8 @@ namespace AffinityOnLinux
         // file, but Affinity keeps the short name as the document's identity
         // (the lock sidecar comes out as BRAN~ECI.AF~lock~), so the tab and
         // Recent Documents would show it too.
-        private static bool ColdStart(string launcher, string affinity, bool viaHook, List<string> docs)
+        private static bool ColdStart(string launcher, string affinity, bool viaHook,
+                                      string bootstrap, List<string> docs)
         {
             bool needsTwoStage = viaHook && docs.Exists(NeedsQuoting);
             bool opened = true;
@@ -223,6 +233,7 @@ namespace AffinityOnLinux
 
             Process child = Start(launcher, arguments);
             if (child == null) { Note("could not start " + launcher); return false; }
+            if (bootstrap != null) LoadFixes(child, bootstrap);
 
             // The two-stage handoff has nothing to hand to until the window is
             // up, so this path still waits for one. It no longer kills anything
@@ -242,6 +253,128 @@ namespace AffinityOnLinux
             }
             return opened;
         }
+
+        // LOADING THE FIXES
+        //
+        // The Affinity on Linux loader corrects Affinity's own code in memory
+        // (aol-loader.dll, and the fixes in aol\plugins). It has to run inside
+        // Affinity.exe, on its .NET runtime, before Affinity gets far. This is
+        // the job AffinityPluginLoader's AffinityHook.exe did, done here so
+        // there is one launcher:
+        //
+        //   1. wait until the CLR in the new process has loaded clrjit.dll, one
+        //      of the last modules of its startup. Loading the bootstrap any
+        //      earlier kills Affinity with 0x80131506 (an execution engine
+        //      error);
+        //   2. CreateRemoteThread(LoadLibraryW, "<dir>\aol-bootstrap.dll").
+        //      Its DllMain starts a thread that runs AolLoader.EntryPoint on
+        //      the running CLR.
+        //
+        // Anything that goes wrong is logged and Affinity runs without the
+        // fixes: a launch that does not open Affinity is worse than one
+        // without them.
+        private const int ClrWaitMs = 60000;
+
+        private static void LoadFixes(Process child, string bootstrap)
+        {
+            const uint access = 0x0002 | 0x0008 | 0x0010 | 0x0020 | 0x0400 | 0x00100000;
+            // CREATE_THREAD | VM_OPERATION | VM_READ | VM_WRITE | QUERY_INFORMATION | SYNCHRONIZE
+            IntPtr process = IntPtr.Zero;
+            try
+            {
+                var clock = Stopwatch.StartNew();
+                while (!ProcessHasModule(child.Id, "clrjit.dll"))
+                {
+                    if (child.HasExited) { Log("loader: Affinity exited before its runtime started"); return; }
+                    if (clock.ElapsedMilliseconds > ClrWaitMs)
+                    {
+                        Note("Affinity's .NET runtime did not start within " + (ClrWaitMs / 1000)
+                             + "s; running without the Affinity on Linux fixes");
+                        return;
+                    }
+                    Thread.Sleep(20);
+                }
+                Log("loader: runtime up after " + clock.ElapsedMilliseconds + " ms");
+
+                process = OpenProcess(access, false, child.Id);
+                if (process == IntPtr.Zero) { Note("loader: cannot open Affinity, error " + Marshal.GetLastWin32Error()); return; }
+
+                IntPtr loadLibrary = GetProcAddress(GetModuleHandleW("kernel32.dll"), "LoadLibraryW");
+                byte[] path = Encoding.Unicode.GetBytes(bootstrap + "\0");
+                IntPtr remote = VirtualAllocEx(process, IntPtr.Zero, (UIntPtr)path.Length, 0x3000, 0x04);
+                UIntPtr written;
+                if (remote == IntPtr.Zero || !WriteProcessMemory(process, remote, path, (UIntPtr)path.Length, out written))
+                {
+                    Note("loader: cannot write to Affinity, error " + Marshal.GetLastWin32Error());
+                    return;
+                }
+                IntPtr thread = CreateRemoteThread(process, IntPtr.Zero, UIntPtr.Zero, loadLibrary, remote, 0, IntPtr.Zero);
+                if (thread == IntPtr.Zero) { Note("loader: cannot start a thread in Affinity, error " + Marshal.GetLastWin32Error()); return; }
+                uint loaded = 0;
+                bool done = WaitForSingleObject(thread, 10000) == 0 && GetExitCodeThread(thread, out loaded);
+                CloseHandle(thread);
+                // The exit code is the low half of the module handle: zero
+                // means LoadLibraryW failed. The path buffer is left: it is a
+                // few hundred bytes, and freeing it while a timed-out
+                // LoadLibraryW may still read it would be worse.
+                if (!done) Note("loader: aol-bootstrap.dll is still loading after 10s");
+                else if (loaded == 0) Note("loader: Affinity could not load " + bootstrap);
+                else Log("loader: aol-bootstrap.dll loaded");
+            }
+            catch (Exception ex) { Note("loader: " + ex.Message); }
+            finally { if (process != IntPtr.Zero) CloseHandle(process); }
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct MODULEENTRY32W
+        {
+            public uint dwSize, th32ModuleID, th32ProcessID, GlblcntUsage, ProccntUsage;
+            public IntPtr modBaseAddr;
+            public uint modBaseSize;
+            public IntPtr hModule;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)] public string szModule;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string szExePath;
+        }
+
+        private static bool ProcessHasModule(int pid, string module)
+        {
+            IntPtr snap = CreateToolhelp32Snapshot(0x8 | 0x10, (uint)pid);   // SNAPMODULE | SNAPMODULE32
+            if (snap == IntPtr.Zero || snap == new IntPtr(-1)) return false;
+            try
+            {
+                var e = new MODULEENTRY32W();
+                e.dwSize = (uint)Marshal.SizeOf(typeof(MODULEENTRY32W));
+                for (bool ok = Module32FirstW(snap, ref e); ok; ok = Module32NextW(snap, ref e))
+                    if (string.Equals(e.szModule, module, StringComparison.OrdinalIgnoreCase)) return true;
+                return false;
+            }
+            finally { CloseHandle(snap); }
+        }
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern IntPtr CreateToolhelp32Snapshot(uint flags, uint pid);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+        private static extern bool Module32FirstW(IntPtr snap, ref MODULEENTRY32W entry);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+        private static extern bool Module32NextW(IntPtr snap, ref MODULEENTRY32W entry);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+        private static extern IntPtr GetModuleHandleW(string name);
+        [DllImport("kernel32.dll", CharSet = CharSet.Ansi)]
+        private static extern IntPtr GetProcAddress(IntPtr module, string name);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern IntPtr VirtualAllocEx(IntPtr process, IntPtr address, UIntPtr size, uint type, uint protect);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool WriteProcessMemory(IntPtr process, IntPtr address, byte[] buffer, UIntPtr size, out UIntPtr written);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern IntPtr CreateRemoteThread(IntPtr process, IntPtr attributes, UIntPtr stack, IntPtr start, IntPtr parameter, uint flags, IntPtr threadId);
+        [DllImport("kernel32.dll")]
+        private static extern uint WaitForSingleObject(IntPtr handle, uint ms);
+        [DllImport("kernel32.dll")]
+        private static extern bool GetExitCodeThread(IntPtr thread, out uint code);
+        [DllImport("kernel32.dll")]
+        private static extern bool CloseHandle(IntPtr handle);
 
         // RETIRED 2026-09-16 -- the retry watchdog, kept for reference.
         //

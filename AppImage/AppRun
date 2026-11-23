@@ -251,8 +251,8 @@ fi
 # Through the Affinity on Linux handler when it is there: it turns a document's
 # Linux path into a Windows one, hands it to an Affinity that is already
 # running rather than starting a second (which would close the first), and
-# still starts Affinity through the plugin loader. Then the plugin loader's
-# hook, then Affinity itself.
+# loads the Affinity on Linux fixes into a new one. Then AffinityPluginLoader's
+# hook, which an image from before the fixes has, then Affinity itself.
 
 for exe in affinity-on-linux.exe AffinityHook.exe Affinity.exe; do
     if [ -f "${APP}/${exe}" ]; then

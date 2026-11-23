@@ -112,7 +112,7 @@ RIGHT_GROUPS = [
         "Patches",
         [
             "Return Colors (v3)",
-            "Install AffinityPluginLoader",
+            "Install Affinity on Linux fixes",
         ],
     ),
 ]

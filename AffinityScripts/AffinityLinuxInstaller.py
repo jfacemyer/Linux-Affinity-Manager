@@ -453,54 +453,71 @@ def release_download_url(url):
     return url
 
 
-def apl_release_api_url():
-    """The plugin loader release's metadata: GitHub's API, or the Forgejo/Gitea
-    one on the host AFFINITY_RELEASES_FROM names."""
-    alt = releases_from()
-    name = APL_RELEASE_REPO.split("/", 1)[1]
-    if alt:
-        host, owner = alt.rsplit("/", 1)
-        return f"{host}/api/v1/repos/{owner}/{name}/releases/tags/{APL_RELEASE_TAG}"
-    return f"https://api.github.com/repos/{APL_RELEASE_REPO}/releases/tags/{APL_RELEASE_TAG}"
-
-
 def source_repo():
     return os.environ.get("AFFINITY_MANAGER_REPO", "").strip().rstrip("/") or SOURCE_REPO
 
 
-def winefix_disable_bezier_split_guard(install_dir):
-    """Turn off WineFix's bezier split guard in its settings file, creating the
-    file if WineFix has not written one yet. Returns True if the file changed.
+# AffinityPluginLoader's files, which the Affinity on Linux loader replaces.
+# Its Windows launcher, AffinityHook.exe, goes too: affinity-on-linux.exe loads
+# our loader itself, and an AffinityHook left behind would load the old one.
+APL_FILES = ("AffinityHook.exe", "AffinityBootstrap.dll", "AffinityPluginLoader.dll")
 
-    The guard finds the function it hooks by a prologue byte pattern, and in
-    the Wine builds this installer offers (and in plain Wine 11.21) the first
-    match is another function: in ours, the fill triangulation, which then
-    returned at once with nothing built. Affinity drew no fills, logged
-    "Edge not found" and faulted, and a fault inside the deferred outline work
-    left a lock held and hung the next draw of that path. These builds carry
-    their own limit on bezier splitting, so the guard has nothing to add.
-    WineFix keeps a value it finds in the file and fills in defaults for the
-    rest."""
-    config = Path(install_dir) / "apl" / "config" / "winefix.toml"
-    line = "bezier_split_guard = false"
-    if not config.exists():
-        config.parent.mkdir(parents=True, exist_ok=True)
-        config.write_text(f"[patches]\n{line}\n")
-        return True
-    # newline="" keeps a CRLF file CRLF.
-    with open(config, newline="") as f:
-        text = f.read()
-    new, count = re.subn(r"(?m)^bezier_split_guard\s*=\s*\w+[ \t]*(?=\r?$)", line, text)
-    if not count:
-        if re.search(r"(?m)^\[patches\][ \t]*\r?$", text):
-            new = re.sub(r"(?m)^\[patches\][ \t]*(\r?)$", lambda m: f"[patches]{m.group(1)}\n{line}{m.group(1)}", text, count=1)
-        else:
-            new = text + ("" if text.endswith("\n") or not text else "\n") + f"[patches]\n{line}\n"
-    if new == text:
-        return False
-    with open(config, "w", newline="") as f:
-        f.write(new)
-    return True
+# Settings carried over from AffinityPluginLoader, old name -> new name.
+APL_SETTINGS = {"apl.toml": "aol.toml", "winefix.toml": "fixes.toml"}
+
+
+def install_aol_loader_files(archive, install_dir):
+    """Unpack the Affinity on Linux loader into Affinity's folder and retire
+    AffinityPluginLoader. Returns (level, message) pairs for the log.
+
+    The archive holds one folder, aol-loader/, with regular files only;
+    anything else (a link, a path that climbs out) refuses the whole archive
+    before a file is written. AffinityPluginLoader's settings are copied to
+    the loader's names unless the loader already has its own, and its files
+    are then removed. An old WineFix's d2d1.dll beside Affinity.exe, a Wine
+    10.18 build that would shadow the prefix's own, is renamed aside."""
+    install_dir = Path(install_dir)
+    notes = []
+    with tarfile.open(archive, "r:*") as tar:
+        members = tar.getmembers()
+        files = []
+        for m in members:
+            parts = Path(m.name).parts
+            if (not parts or parts[0] != "aol-loader" or Path(m.name).is_absolute()
+                    or ".." in parts or not (m.isfile() or m.isdir())):
+                raise ValueError(f"unexpected entry in the loader archive: {m.name}")
+            if m.isfile() and len(parts) > 1:
+                files.append((m, Path(*parts[1:])))
+        if not any(rel == Path("aol-bootstrap.dll") for _, rel in files):
+            raise ValueError("the loader archive has no aol-bootstrap.dll")
+        for m, rel in files:
+            dest = install_dir / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            with tar.extractfile(m) as src, open(dest, "wb") as out:
+                shutil.copyfileobj(src, out)
+    notes.append(("success", f"Installed {len(files)} file(s) of the Affinity on Linux loader"))
+
+    apl = install_dir / "apl"
+    for old, new in APL_SETTINGS.items():
+        src, dest = apl / "config" / old, install_dir / "aol" / "config" / new
+        if src.is_file() and not dest.exists():
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dest)
+            notes.append(("info", f"Kept your settings from {old} as aol/config/{new}"))
+    removed = [name for name in APL_FILES if (install_dir / name).is_file()]
+    for name in removed:
+        (install_dir / name).unlink()
+    if apl.is_dir():
+        shutil.rmtree(apl)
+        removed.append("apl/")
+    if removed:
+        notes.append(("success", "Removed AffinityPluginLoader, which this loader replaces: " + ", ".join(removed)))
+    beside = install_dir / "d2d1.dll"
+    if beside.is_file():
+        aside = beside.with_name("d2d1.dll.winefix-old")
+        beside.replace(aside)
+        notes.append(("success", f"An old WineFix's d2d1.dll was shadowing Wine's; it is now {aside.name}"))
+    return notes
 
 
 def source_branch():
@@ -520,7 +537,7 @@ def source_raw_url(path):
 # The handler this installer is meant to install, by content. The piped install
 # fetches it over the network from a branch that can be older than this file,
 # and "it starts with MZ and is over 4KB" does not tell those apart.
-HANDLER_SHA256 = "5bd31facbe433a884afab9dd6861d5094726055f3c1706a4d001a800e30ed97a"
+HANDLER_SHA256 = "be87006366f417b35f87f76e414f6b69cc9a208f1db7009e97c616194a1c9dd6"
 
 # The same patch set on Wine 11.18, pinned for the same reason. Released on the
 # fork that carries the patches' upstream pull request.
@@ -549,21 +566,21 @@ WINE_11_22_SHA256 = "8408c62d6d8949a5b6139e4741db02b6cc71a4cd1a30d4dd4dd2e6c87f2
 VKD3D_PROTON_VERSION = "3.1"
 VKD3D_PROTON_SHA256 = "b85ea8219b71093a3924913dd7aae6172333dc0c069983ed510816d67f02120b"
 
-# The plugin loader. Upstream's latest release (v0.3.0, April) predates Canva
-# sign-in, the command-line open fix and the runtime Direct2D patches, all of
-# which sit unreleased on its dev branch. This build is that dev branch plus
-# fixes -- libplugins.dll kept loaded (random crashes), launch arguments quoted
-# (paths with spaces), the color picker under Wine, the empty Leading dropdown in
-# the text context toolbar (Affinity 3.3), the sub-tool panel's columns after
-# a studio switch -- released on a fork until
-# upstream publishes one. Each asset is pinned, like the Wine build.
-# POC SOURCE -- repoint at an upstream release that carries these.
-APL_RELEASE_REPO = "jfacemyer/AffinityPluginLoader"
-APL_RELEASE_TAG = "wine-fixes-4"
-APL_ASSET_SHA256 = {
-    "affinitypluginloader-v0.3.0.zip": "5f254cda839a589ff8f17347c693bd4296e8e06079dc76a7d64f6a3b1ba1ca4a",
-    "winefix-v0.3.0.zip": "40297d01f5b15f39dea9872563293989058285a8ac9aa6eca2e0f2a65f960d02",
-}
+# The Affinity on Linux loader: the fixes to Affinity's own code that cannot
+# be made in Wine, applied in memory at startup. It began as Noah Curoe's
+# AffinityPluginLoader and WineFix; affinity-on-linux.exe loads it. Pinned,
+# like the Wine build: a tarball that is not this one is refused. Rebuild with
+# its build.sh (reproducible), republish under a new tag, and update the
+# version and the hash together.
+AOL_LOADER_VERSION = "1.0.0"
+AOL_LOADER_SHA256 = "e1160fdbf56f401497ccc588d4879b7dc6d7f3452aaa0d3fa2bcd0a447a3530f"
+
+
+def aol_loader_url():
+    return release_download_url(
+        f"{RELEASES_HOME}/AffinityOnLinuxLoader/releases/download/"
+        f"v{AOL_LOADER_VERSION}/aol-loader-{AOL_LOADER_VERSION}.tar.xz"
+    )
 
 
 def script_dir():
@@ -4198,9 +4215,9 @@ class AffinityInstallerGUI(QMainWindow):
                     "wand",
                 ),
                 (
-                    "Install AffinityPluginLoader",
-                    self.install_affinity_plugin_loader,
-                    "Download and install the latest AffinityPluginLoader + WineFix from GitHub. Also updates Affinity.desktop to launch via AffinityHook.exe",
+                    "Install Affinity on Linux fixes",
+                    self.install_aol_loader,
+                    "Install the fixes to Affinity's own code that Wine cannot make (the Affinity on Linux loader). Replaces AffinityPluginLoader and WineFix.",
                     "wand",
                 ),
             ],
@@ -10752,9 +10769,9 @@ class AffinityInstallerGUI(QMainWindow):
         if self.check_cancelled():
             return
 
-        # Step 5: Install AffinityPluginLoader + WineFix
+        # Step 5: Install the Affinity on Linux loader
         self.update_progress_text(
-            "Step 5/5: Installing AffinityPluginLoader + WineFix..."
+            "Step 5/5: Installing the Affinity on Linux fixes..."
         )
         self.update_progress(0.97)
 
@@ -10765,16 +10782,16 @@ class AffinityInstallerGUI(QMainWindow):
             Path(self.directory) / "drive_c" / "Program Files" / "Affinity" / "Affinity"
         )
         if install_dir.exists():
-            self.log("\nInstalling AffinityPluginLoader + WineFix...", "info")
+            self.log("\nInstalling the Affinity on Linux fixes...", "info")
             with self.progress_span(0.97, 1.0, expected_seconds=10):
-                self._install_affinity_plugin_loader_thread(standalone=False)
+                self._install_aol_loader_thread(standalone=False)
         else:
             self.log(
-                "\nSkipping AffinityPluginLoader install - Affinity not yet installed.",
+                "\nSkipping the Affinity on Linux fixes - Affinity not yet installed.",
                 "info",
             )
             self.log(
-                "Use the 'Install AffinityPluginLoader' button after installing Affinity.",
+                "Use the 'Install Affinity on Linux fixes' button after installing Affinity.",
                 "info",
             )
 
@@ -17127,17 +17144,17 @@ Would you like to continue with {distro_name} anyway?"""
                         "Desktop entry will not be created automatically.", "warning"
                     )
 
-                # Run AffinityPluginLoader + WineFix automatically after Affinity (Unified) installs
+                # Install the Affinity on Linux fixes after Affinity (Unified) installs
                 if app_name == "Add":
                     if app_path.parent.exists():
                         self.log(
-                            "\nRunning AffinityPluginLoader + WineFix install...",
+                            "\nInstalling the Affinity on Linux fixes...",
                             "info",
                         )
-                        self._install_affinity_plugin_loader_thread(standalone=False)
+                        self._install_aol_loader_thread(standalone=False)
                     else:
                         self.log(
-                            "\n⚠ Affinity directory not found — skipping AffinityPluginLoader install.",
+                            "\n⚠ Affinity directory not found — skipping the Affinity on Linux fixes.",
                             "warning",
                         )
                     # Last, after everything that can boot the prefix -- see
@@ -17928,7 +17945,7 @@ Would you like to continue with {distro_name} anyway?"""
             self.update_progress(0.9)
             self.create_desktop_entry(app_name)
 
-            # Run AffinityPluginLoader + WineFix automatically after Affinity (Unified) installs
+            # Install the Affinity on Linux fixes after Affinity (Unified) installs
             if app_name in ["Add", "Affinity (Unified)"]:
                 install_dir = (
                     Path(self.directory)
@@ -17939,16 +17956,16 @@ Would you like to continue with {distro_name} anyway?"""
                 )
                 if install_dir.exists():
                     self.update_progress_text(
-                        "Installing AffinityPluginLoader + WineFix..."
+                        "Installing the Affinity on Linux fixes..."
                     )
                     self.log(
-                        "\nRunning AffinityPluginLoader + WineFix install...", "info"
+                        "\nInstalling the Affinity on Linux fixes...", "info"
                     )
                     with self.progress_span(0.91, 0.96, expected_seconds=10):
-                        self._install_affinity_plugin_loader_thread(standalone=False)
+                        self._install_aol_loader_thread(standalone=False)
                 else:
                     self.log(
-                        "\n⚠ Affinity directory not found — skipping AffinityPluginLoader install.",
+                        "\n⚠ Affinity directory not found — skipping the Affinity on Linux fixes.",
                         "warning",
                     )
 
@@ -22950,15 +22967,11 @@ Would you like to continue with {distro_name} anyway?"""
                         f"Warning: Could not remove d3d12 DLL overrides: {e}", "warning"
                     )
 
-        # Prefer AffinityHook.exe if AffinityPluginLoader has been installed —
-        # launching Affinity.exe directly bypasses the hook, so the plugin
-        # loader silently never loads even though it's installed correctly.
-        hook_exe = affinity_exe.parent / "AffinityHook.exe"
-        if hook_exe.exists():
-            launch_target = "C:/Program Files/Affinity/Affinity/AffinityHook.exe"
-            self.log("AffinityPluginLoader detected — launching via AffinityHook.exe", "info")
-        else:
-            launch_target = "C:/Program Files/Affinity/Affinity/Affinity.exe"
+        # Start Affinity through affinity-on-linux.exe when it is installed:
+        # it loads the Affinity on Linux fixes, and it will not start a second
+        # Affinity beside a running one. Affinity.exe directly gets neither.
+        launcher_exe = affinity_exe.parent / "affinity-on-linux.exe"
+        start_exe = launcher_exe if launcher_exe.exists() else affinity_exe
 
         self.log("✓ Environment variables configured", "success")
         self.log(f"Wine: {wine_bin}", "info")
@@ -22970,7 +22983,7 @@ Would you like to continue with {distro_name} anyway?"""
 
         wine_launch_cmd = [
             str(wine_bin),
-            str(affinity_exe)
+            str(start_exe)
         ]
         launch_prefix = self.get_gpu_launch_prefix()
         if launch_prefix:
@@ -23153,10 +23166,10 @@ Would you like to continue with {distro_name} anyway?"""
         hook_exe = install_dir / "AffinityHook.exe"
         handler_exe = install_dir / "affinity-on-linux.exe"
 
-        # affinity-on-linux.exe wins over both when it is installed: it is what
-        # lets a document be opened from the file manager, and a cold start still
-        # goes through AffinityHook.exe, so preferring it here does not stop the
-        # plugin loader from loading. Without it, behaviour is unchanged.
+        # affinity-on-linux.exe wins over both when it is installed: it opens
+        # documents from the file manager, and it is what loads the Affinity on
+        # Linux fixes (or, on an install not yet moved to them, goes through
+        # AffinityPluginLoader's AffinityHook.exe).
         if handler_exe.exists():
             exe_name = "affinity-on-linux.exe"
         elif prefer_hook and hook_exe.exists():
@@ -23249,16 +23262,8 @@ Would you like to continue with {distro_name} anyway?"""
         except Exception as e:
             self.log(f"✗ Failed to patch Affinity.desktop: {e}", "error")
 
-    def install_affinity_plugin_loader(self):
-        """Download and install the latest AffinityPluginLoader + WineFix from GitHub"""
-        self.log(
-            "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        )
-        self.log("Install AffinityPluginLoader + WineFix", "info")
-        self.log(
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        )
-
+    def install_aol_loader(self):
+        """Install the Affinity on Linux loader into an installed Affinity."""
         install_dir = (
             Path(self.directory) / "drive_c" / "Program Files" / "Affinity" / "Affinity"
         )
@@ -23273,301 +23278,55 @@ Would you like to continue with {distro_name} anyway?"""
             )
             return
 
-        self.start_operation("Install AffinityPluginLoader")
-        threading.Thread(
-            target=self._install_affinity_plugin_loader_thread, daemon=True
-        ).start()
+        self.start_operation("Install the Affinity on Linux fixes")
+        threading.Thread(target=self._install_aol_loader_thread, daemon=True).start()
 
-    def _install_affinity_plugin_loader_thread(self, standalone=True):
-        """Worker thread: fetch latest release, download both zips, extract, patch desktop file"""
+    def _install_aol_loader_thread(self, standalone=True):
+        """Worker: download the pinned loader, install it, retire
+        AffinityPluginLoader, and point the menu entry at the launcher."""
         try:
             install_dir = (
-                Path(self.directory)
-                / "drive_c"
-                / "Program Files"
-                / "Affinity"
-                / "Affinity"
+                Path(self.directory) / "drive_c" / "Program Files" / "Affinity" / "Affinity"
             )
-
-            # ── 1. Fetch the pinned release's metadata ────────────────────────────────
-            self.log(f"Fetching plugin loader release {APL_RELEASE_TAG}...", "info")
-            api_url = apl_release_api_url()
-            request = urllib.request.Request(api_url)
-            request.add_header("User-Agent", "AffinityLinuxInstaller")
-
-            try:
-                with urllib.request.urlopen(request, timeout=15) as response:
-                    release_data = json.loads(response.read().decode())
-            except Exception as e:
-                self.log(f"✗ Failed to fetch release info: {e}", "error")
-                if standalone:
-                    self.end_operation()
-                return
-
-            tag = release_data.get("tag_name", "unknown")
-            assets = release_data.get("assets", [])
-            self.log(f"Release: {tag}", "info")
-
-            if not assets:
-                self.log("✗ No assets found in the release.", "error")
-                if standalone:
-                    self.end_operation()
-                return
-
-            # ── 2. Locate the two zip assets by prefix ────────────────────────────────
-            apl_asset = next(
-                (
-                    a
-                    for a in assets
-                    if a["name"].lower().startswith("affinitypluginloader")
-                    and a["name"].endswith(".zip")
-                ),
-                None,
+            self.log(
+                f"Installing the Affinity on Linux fixes (loader {AOL_LOADER_VERSION})...", "info"
             )
-            winefix_asset = next(
-                (
-                    a
-                    for a in assets
-                    # Released as apl-winefix-*.zip up to v0.2.x and winefix-*.zip
-                    # since. Accept either, or an older pinned release installs
-                    # nothing and the whole plugin-loader step aborts.
-                    if (
-                        a["name"].lower().startswith("winefix")
-                        or a["name"].lower().startswith("apl-winefix")
-                    )
-                    and a["name"].endswith(".zip")
-                ),
-                None,
-            )
-
-            if not apl_asset:
-                self.log(
-                    "✗ Could not find affinitypluginloader zip in release assets.",
-                    "error",
-                )
-                self.log("Assets found:", "info")
-                for a in assets:
-                    self.log(f"  - {a['name']}", "info")
-                if standalone:
-                    self.end_operation()
-                return
-
-            if not winefix_asset:
-                self.log(
-                    "✗ Could not find a winefix-*.zip or apl-winefix-*.zip in release assets.",
-                    "error",
-                )
-                self.log("Assets found:", "info")
-                for a in assets:
-                    self.log(f"  - {a['name']}", "info")
-                if standalone:
-                    self.end_operation()
-                return
-
-            self.log(f"Found: {apl_asset['name']}", "success")
-            self.log(f"Found: {winefix_asset['name']}", "success")
-
-            # ── 3. Download and extract each zip into a temp directory ─────────────────
             with tempfile.TemporaryDirectory() as tmp:
-                tmp_path = Path(tmp)
-
-                for asset, label in [
-                    (apl_asset, "AffinityPluginLoader"),
-                    (winefix_asset, "WineFix"),
-                ]:
-                    url = asset["browser_download_url"]
-                    dest_zip = tmp_path / asset["name"]
-                    self.log(f"Downloading {label} ({asset['name']})...", "info")
-                    self.update_progress(0)
-
-                    try:
-
-                        def _progress(block_num, block_size, total_size):
-                            if total_size > 0:
-                                pct = min(
-                                    100.0, block_num * block_size / total_size * 100
-                                )
-                                self.update_progress(pct)
-
-                        urllib.request.urlretrieve(
-                            url, str(dest_zip), reporthook=_progress
-                        )
-                        self.update_progress(100)
-                        self.log(f"✓ Downloaded {asset['name']}", "success")
-                    except Exception as e:
-                        self.log(f"✗ Failed to download {asset['name']}: {e}", "error")
-                        if standalone:
-                            self.end_operation()
-                        return
-
-                    # The build this installer pins, or nothing: a release
-                    # re-uploaded or renamed under the same tag is refused.
-                    want = APL_ASSET_SHA256.get(asset["name"])
-                    got = _sha256_of(dest_zip)
-                    if got != want:
-                        self.log(
-                            f"✗ {asset['name']} is not the build this installer pins "
-                            f"(got {got[:16]}..., wanted {(want or 'no pin')[:16]}...). "
-                            "Not installing it.",
-                            "error",
-                        )
-                        if standalone:
-                            self.end_operation()
-                        return
-                    self.log(f"✓ {asset['name']}: checksum matches", "success")
-
-                    # Verify it is a valid zip
-                    if not zipfile.is_zipfile(str(dest_zip)):
-                        self.log(
-                            f"✗ Downloaded file is not a valid zip: {asset['name']}",
-                            "error",
-                        )
-                        if standalone:
-                            self.end_operation()
-                        return
-
-                    extract_dir = tmp_path / f"extracted_{label}"
-                    extract_dir.mkdir()
-
-                    self.log(f"Extracting {label}...", "info")
-                    try:
-                        with zipfile.ZipFile(str(dest_zip), "r") as zf:
-                            members = zf.namelist()
-                            self.log(f"  Contents: {', '.join(members)}", "info")
-                            zf.extractall(str(extract_dir))
-                        self.log(f"✓ Extracted {label}", "success")
-                    except Exception as e:
-                        self.log(f"✗ Failed to extract {asset['name']}: {e}", "error")
-                        if standalone:
-                            self.end_operation()
-                        return
-
-                    # ── 4. Copy files into the Affinity install directory ──────────────
+                archive = Path(tmp) / f"aol-loader-{AOL_LOADER_VERSION}.tar.xz"
+                if not self.download_file(aol_loader_url(), str(archive), archive.name):
+                    self.log("✗ Could not download the Affinity on Linux loader", "error")
+                    return
+                got = _sha256_of(archive)
+                if got != AOL_LOADER_SHA256:
                     self.log(
-                        f"Installing {label} files into Affinity directory...", "info"
+                        f"✗ {archive.name} is not the build this installer pins "
+                        f"(got {got[:16]}..., wanted {AOL_LOADER_SHA256[:16]}...). "
+                        "Not installing it.",
+                        "error",
                     )
-                    installed_count = 0
-                    try:
-                        for item in extract_dir.rglob("*"):
-                            if item.is_file():
-                                # Preserve relative sub-directory structure (e.g. apl/d2d1.dll)
-                                relative = item.relative_to(extract_dir)
-                                dest_file = install_dir / relative
-                                dest_file.parent.mkdir(parents=True, exist_ok=True)
-                                shutil.copy2(str(item), str(dest_file))
-                                self.log(f"  Installed: {relative}", "info")
-                                installed_count += 1
-                    except Exception as e:
-                        self.log(f"✗ Failed to copy {label} files: {e}", "error")
-                        if standalone:
-                            self.end_operation()
-                        return
+                    return
+                self.log(f"✓ {archive.name}: checksum matches", "success")
+                try:
+                    notes = install_aol_loader_files(archive, install_dir)
+                except (OSError, ValueError, tarfile.TarError) as e:
+                    self.log(f"✗ Could not install the Affinity on Linux loader: {e}", "error")
+                    return
+                for level, message in notes:
+                    self.log(f"  {message}", level)
 
-                    if installed_count == 0:
-                        self.log(
-                            f"⚠ No files were installed from {label} — archive may be empty or structured unexpectedly.",
-                            "warning",
-                        )
-                    else:
-                        self.log(
-                            f"✓ {label}: {installed_count} file(s) installed", "success"
-                        )
-
-                    # WineFix's d2d1.dll ships under apl/ in the zip, and the loop
-                    # above preserves that. It has to end up BESIDE Affinity.exe:
-                    # Wine resolves a DLL through the executable's own directory,
-                    # which is how this copy shadows Wine's d2d1 at all. Left under
-                    # apl/ it is never loaded and WineFix silently does nothing.
-                    #
-                    # Newer WineFix ships no d2d1.dll at all: its Direct2D fixes
-                    # are runtime patches applied to the d2d1 Wine provides. A
-                    # copy left beside Affinity.exe by an older WineFix -- built
-                    # from Wine 10.18 -- would go on shadowing Wine's, so it is
-                    # renamed aside rather than left to win.
-                    if label == "WineFix":
-                        beside = install_dir / "d2d1.dll"
-                        found = next(
-                            (f for f in extract_dir.rglob("d2d1.dll") if f.is_file()),
-                            None,
-                        )
-                        if found:
-                            if not beside.exists():
-                                shutil.copy2(str(found), str(beside))
-                                self.log(
-                                    f"  Moved d2d1.dll up from {found.relative_to(extract_dir)}"
-                                    " so Affinity.exe can find it",
-                                    "success",
-                                )
-                            self.log("  ✓ d2d1.dll is beside Affinity.exe", "success")
-                        elif beside.exists():
-                            aside = beside.with_name("d2d1.dll.winefix-old")
-                            beside.replace(aside)
-                            self.log(
-                                "  ✓ This WineFix patches Wine's own d2d1 at runtime; "
-                                f"the old copy beside Affinity.exe is now {aside.name}",
-                                "success",
-                            )
-                        else:
-                            self.log(
-                                "  ✓ WineFix patches Wine's own d2d1 at runtime", "success"
-                            )
-                        try:
-                            if winefix_disable_bezier_split_guard(install_dir):
-                                self.log(
-                                    "  ✓ WineFix's bezier split guard is off: it hooks the "
-                                    "wrong function in these Wine builds",
-                                    "success",
-                                )
-                        except OSError as exc:
-                            self.log(
-                                f"  ⚠ Could not turn off WineFix's bezier split guard: {exc}",
-                                "warning",
-                            )
-
-            # ── 5. Verify AffinityHook.exe is present after install ───────────────────
-            hook_exe = install_dir / "AffinityHook.exe"
-            if not hook_exe.exists():
+            # The loader is loaded by affinity-on-linux.exe, so the menu entry
+            # has to start Affinity through it.
+            if not (install_dir / "affinity-on-linux.exe").exists():
                 self.log(
-                    "⚠ AffinityHook.exe not found after installation — desktop file will NOT be patched.",
+                    "⚠ affinity-on-linux.exe is not installed, so Affinity will start "
+                    "without the fixes. Install the file-manager handler to load them.",
                     "warning",
                 )
-                self.log(
-                    "  The plugin files were installed but the launcher hook is missing.",
-                    "warning",
-                )
-                if standalone:
-                    self.end_operation()
-                return
-
-            self.log("✓ AffinityHook.exe confirmed present", "success")
-
-            # AffinityPluginLoader writes its config files at Affinity's first
-            # launch, and the WineFix setting this installer needs is written
-            # above. Starting Affinity here and killing it after 15 seconds, as
-            # this step used to, cut a cold first start off halfway and left a
-            # window in which the user could start a second instance.
-
-            # ── 6. Patch Affinity.desktop to launch AffinityHook.exe ─────────────────
-            self.log("\nPatching Affinity.desktop to use AffinityHook.exe...", "info")
             self._patch_affinity_desktop_for_hook()
-
-            self.log(
-                "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-                "info",
-            )
-            self.log("AffinityPluginLoader + WineFix installation complete!", "success")
-            self.log(
-                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n",
-                "info",
-            )
-            if standalone:
-                self.end_operation()
-
+            self.log("✓ The Affinity on Linux fixes are installed", "success")
         except Exception as e:
-            self.log(
-                f"✗ Unexpected error during AffinityPluginLoader installation: {e}",
-                "error",
-            )
+            self.log(f"✗ Unexpected error installing the Affinity on Linux fixes: {e}", "error")
+        finally:
             if standalone:
                 self.end_operation()
 
