@@ -557,7 +557,7 @@ WINE_11_21_SHA256 = "4f74e8676b4f40d4e4fc24e610187c2a6bb16a135b9cf538edf1b4f5de9
 # had, and nothing noticed. A tarball that is not this one is refused rather
 # than installed. Rebuild, republish under a new tag, and update the URL and
 # this hash together.
-WINE_11_22_SHA256 = "8408c62d6d8949a5b6139e4741db02b6cc71a4cd1a30d4dd4dd2e6c87f2228bf"
+WINE_11_22_SHA256 = "49aa869e59d70dd89ef7b34fe440a50afe94a08e2902b0176c9db95d4e3f637c"
 
 # vkd3d-proton (Affinity's D3D12), pinned the same way. The installer used to
 # take whatever release was newest on GitHub, so new installs got each one the
@@ -15085,7 +15085,7 @@ class AffinityInstallerGUI(QMainWindow):
         else:  # Default to 11.22
             return {
                 # POC SOURCE -- the fork's release of the 11.22 patch set.
-                "wine_url": "https://github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.22-r1/ElementalWarrior-wine-11.22.tar.xz",
+                "wine_url": "https://github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.22-r2/ElementalWarrior-wine-11.22.tar.xz",
                 "wine_file_name": "ElementalWarrior-wine-11.22.tar.xz",
                 "wine_sha256": WINE_11_22_SHA256,
                 "wine_dir_name": "ElementalWarriorWine",

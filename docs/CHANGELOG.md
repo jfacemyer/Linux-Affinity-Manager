@@ -7,7 +7,10 @@
 - **`affinity-on-linux.exe` loads the fixes itself**, so there is one launcher instead of two. A document whose path has a space now opens directly on a cold start, without waiting for the window first.
 - **Three WineFix fixes are gone**, because the Affinity Wine builds make them unnecessary: command-line file opening, synchronous font enumeration and the Canva sign-in helper. Each was checked on Wine 11.22 with Affinity 3.3.3.
 
+- **Wine 11.22 installs [`11.22-r2`](https://github.com/jfacemyer/Affinity-Wine-Builder/releases/tag/11.22-r2)**, which has the fix below.
+
 ### Fixed
+- **Show in Explorer opens your file manager.** The Resource Manager's Show in Explorer opened Wine's own explorer window; it now opens the folder in your desktop's file manager with the file selected.
 - **The installer's Launch button loads the fixes.** It started Affinity.exe directly, so the plugin loader never loaded from it.
 
 ---
