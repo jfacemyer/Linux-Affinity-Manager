@@ -129,3 +129,15 @@ def test_launch_uses_the_prefixs_wine_not_system_wine(tmp_path, monkeypatch):
     monkeypatch.setattr(probe, "active_wine", lambda p: "ElementalWarrior-wine-11.19 (link)")
     installer.launch_affinity(prefix)
     assert started["argv"][0] == str(prefix / "ElementalWarrior-wine-11.19" / "bin" / "wine")
+
+
+def test_launch_goes_through_the_launcher_that_loads_the_fixes(tmp_path, monkeypatch):
+    """affinity-on-linux.exe loads the Affinity on Linux fixes; AffinityHook.exe
+    would load AffinityPluginLoader instead, and Affinity.exe neither."""
+    from affinity_manager import installer
+    prefix = make_prefix(tmp_path, "Work")
+    started = {}
+    monkeypatch.setattr(installer.subprocess, "Popen",
+                        lambda argv, **kw: started.setdefault("argv", argv))
+    installer.launch_affinity(prefix)
+    assert Path(started["argv"][-1]).name == "affinity-on-linux.exe"

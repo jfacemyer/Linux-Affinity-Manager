@@ -78,8 +78,9 @@ def launch_command(prefix) -> tuple[commands.Command, bool]:
     command takes documents.
 
     affinity-on-linux.exe first: it converts a document's path and hands it to a
-    running instance, and still starts Affinity through AffinityHook.exe, so the
-    plugins load either way. Then AffinityHook.exe, then Affinity.exe. Wine is
+    running instance, and loads the Affinity on Linux fixes into a new one.
+    Then AffinityPluginLoader's AffinityHook.exe, on an install from before the
+    fixes, then Affinity.exe. Wine is
     the prefix's ElementalWarriorWine link, so switching the prefix's Wine build
     does not leave the entry on the old one."""
     prefix = Path(prefix).expanduser()

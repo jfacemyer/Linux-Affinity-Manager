@@ -214,8 +214,8 @@ class Image:
 
     @property
     def overlay(self) -> list[str]:
-        """Files in Affinity's folder that are not Serif's: the plugin loader,
-        WineFix, vkd3d-proton. Laid over a kept Affinity, so keeping a newer
+        """Files in Affinity's folder that are not Serif's: the launcher, the
+        Affinity on Linux fixes, vkd3d-proton. Laid over a kept Affinity, so keeping a newer
         Affinity does not mean keeping old fixes."""
         items = self.manifest.get("overlay")
         return [i for i in items if isinstance(i, str) and ".." not in Path(i).parts] \
@@ -643,8 +643,8 @@ def _carry_fonts(old: Path, new: Path) -> list[str]:
 
 def _replace_program(old: Path, new: Path, image: Image) -> list[str]:
     """Put the installed Affinity into the new prefix in place of the image's,
-    then lay the image's own additions (plugin loader, WineFix, vkd3d-proton)
-    over it."""
+    then lay the image's own additions (the launcher, the Affinity on Linux
+    fixes, vkd3d-proton) over it."""
     source = probe.affinity_dir(old)
     target = probe.affinity_dir(new)
     image_app = probe.affinity_dir(image.prefix_dir)
