@@ -185,7 +185,6 @@ For the Canva sign-in, see [Login/Authentication Issues](#loginauthentication-is
 **Fix:** For Affinity v3 the installer copies the WinRT facades from the .NET 4.8 offline installer into the prefix, then registers `affinity-url-handler.desktop` as the `affinity://` handler. It needs `7z` and about 350 MB of temporary space in the prefix. It downloads the .NET installer (about 70 MB) if the winetricks cache no longer has it. The handler is only registered when the prefix also has WinMetadata. The patched Wine builds from 11.18 on carry the login metadata, so the fix applies on any of them. For an existing install, use **Troubleshooting → Fix Canva Sign-in (v3)**.
 
 **Notes:**
-- WineFix 0.3.0 patches out the Canva sign-in dialog. With WineFix 0.3.0, a forwarded `affinity://` URL no longer crashes the running Affinity. Sign-in was not tested with it.
 - The installer replaces Wine's generated `wine-protocol-affinity.desktop`. It does not replace an `affinity://` handler from another setup (Bottles, Lutris). Check with `xdg-mime query default x-scheme-handler/affinity`.
 - Affinity works offline without signing in.
 

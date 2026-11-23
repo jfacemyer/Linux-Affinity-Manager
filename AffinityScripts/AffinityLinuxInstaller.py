@@ -573,7 +573,7 @@ VKD3D_PROTON_SHA256 = "b85ea8219b71093a3924913dd7aae6172333dc0c069983ed510816d67
 # its build.sh (reproducible), republish under a new tag, and update the
 # version and the hash together.
 AOL_LOADER_VERSION = "1.0.0"
-AOL_LOADER_SHA256 = "e1160fdbf56f401497ccc588d4879b7dc6d7f3452aaa0d3fa2bcd0a447a3530f"
+AOL_LOADER_SHA256 = "a466b5031a5735632c188c6f8f782d0661d1cd98f4fef9fc1e1ca5d45be65f11"
 
 
 def aol_loader_url():

@@ -1,5 +1,17 @@
 # Changelog
 
+## [2026-11-23] - The Affinity on Linux fixes
+
+### Changed
+- **AffinityPluginLoader and WineFix are replaced by the Affinity on Linux fixes**, our own continuation of Noah Curoe's work, from [AffinityOnLinuxLoader](https://github.com/jfacemyer/AffinityOnLinuxLoader) and pinned by SHA-256. Installing it keeps your WineFix settings and removes AffinityPluginLoader, AffinityHook.exe included. The fixes appear in Affinity's Preferences as "Affinity on Linux fixes".
+- **`affinity-on-linux.exe` loads the fixes itself**, so there is one launcher instead of two. A document whose path has a space now opens directly on a cold start, without waiting for the window first.
+- **Three WineFix fixes are gone**, because the Affinity Wine builds make them unnecessary: command-line file opening, synchronous font enumeration and the Canva sign-in helper. Each was checked on Wine 11.22 with Affinity 3.3.3.
+
+### Fixed
+- **The installer's Launch button loads the fixes.** It started Affinity.exe directly, so the plugin loader never loaded from it.
+
+---
+
 ## [2026-11-19] - Wine 11.22, printing everywhere
 
 ### Changed
@@ -91,7 +103,7 @@
 - **The 11.19 choice installs [`11.19-r9`](https://github.com/jfacemyer/Affinity-Wine-Builder/releases/tag/11.19-r9)**, pinned by SHA-256 like r8. It fixes Affinity on Wine's OpenGL renderer (the "OpenGL" renderer choice, or a prefix without a renderer setting):
   - **Tool flyouts and tooltips** were black boxes.
   - **The floating Help panel** came back from a studio switch with an empty white frame.
-  
+
   Nothing changes on the Vulkan renderer.
 
 ### Fixed

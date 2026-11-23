@@ -51,19 +51,18 @@ session and whatever was unsaved in it. Nothing is declared dead early.
 ## Warm and cold
 
 - **Warm** (an instance is up): hands the document straight to `Affinity.exe` and
-  lets Affinity's own single-instance handoff forward it. This deliberately
-  skips `AffinityHook.exe`: the hook exists to inject `AffinityPluginLoader.dll`
-  into the process it starts, and on a warm handoff that process forwards the
-  document and exits in about a second, so injecting into it achieves nothing.
-- **Cold**: goes through `AffinityHook.exe` when it is installed, so plugins
-  load, and falls back to `Affinity.exe` when it is not.
+  lets Affinity's own single-instance handoff forward it. Nothing is loaded into
+  that process: it forwards the document and exits in about a second.
+- **Cold**: starts `Affinity.exe` with the documents, properly quoted, and loads
+  the Affinity on Linux fixes into it: once its .NET runtime is up (`clrjit.dll`
+  loaded), a remote thread loads `aol-bootstrap.dll`, which starts
+  `aol-loader.dll`. If that fails, Affinity runs without the fixes.
 
-A cold start whose path contains a space goes two-stage — start the hook with no
-document, wait for the window, then hand the document over as a warm handoff.
-`AffinityPluginLoader` forwards its arguments with `string.Join(" ", args)`, so
-passing such a path straight through would split it into fragments and produce
-one "failed to open" dialog per fragment. Going two-stage behaves the same
-against a patched plugin loader and an unpatched one.
+An install from before the fixes, with AffinityPluginLoader, still goes through
+its `AffinityHook.exe`. That hook forwards its arguments with
+`string.Join(" ", args)`, so a cold start whose path contains a space goes
+two-stage there: start the hook with no document, wait for the window, then hand
+the document over as a warm handoff.
 
 8.3 short paths were tried first and rejected: they open the right file, but
 Affinity keeps the short name as the document's identity, so the tab and Recent
@@ -86,8 +85,8 @@ behind the file manager.
 mcs -target:exe -langversion:5 -out:affinity-on-linux.exe Program.cs
 ```
 
-Mono's `mcs` is the same toolchain `AffinityPluginLoader` is built with. The
-committed binary is built from the `Program.cs` beside it.
+It is built with Mono's `mcs`. The committed binary is built from the
+`Program.cs` beside it.
 
 ## Temporary download sources — must be repointed before merging
 
@@ -111,7 +110,7 @@ grep -n 'POC SOURCE' AffinityScripts/AffinityLinuxInstaller.py AffinityManager/r
 | Wine 11.20 tarball | `github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.20-r8/ElementalWarrior-wine-11.20.tar.xz`, pinned by `WINE_11_20_SHA256` | an upstream 11.20 release, likewise |
 | Wine 11.21 tarball | `github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.21-r6/ElementalWarrior-wine-11.21.tar.xz`, pinned by `WINE_11_21_SHA256` | an upstream 11.21 release, likewise |
 | Wine 11.22 tarball | `github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.22-r1/ElementalWarrior-wine-11.22.tar.xz`, pinned by `WINE_11_22_SHA256` | an upstream 11.22 release, likewise |
-| AffinityPluginLoader + WineFix | `github.com/jfacemyer/AffinityPluginLoader`, release `wine-fixes-4` (`APL_RELEASE_REPO`, `APL_RELEASE_TAG`), each zip pinned in `APL_ASSET_SHA256` | `noahc3/AffinityPluginLoader`'s next release, once it carries upstream `dev` and the fork's fixes |
+| The Affinity on Linux fixes | `github.com/jfacemyer/AffinityOnLinuxLoader/releases/download/v1.0.0/aol-loader-1.0.0.tar.xz` (`AOL_LOADER_VERSION`), pinned by `AOL_LOADER_SHA256` | none: this is the project's own |
 | `affinity-on-linux.exe`, MIME definitions | the source branch: `SOURCE_REPO` / `SOURCE_BRANCH` (`github.com/jfacemyer/Linux-Affinity-Manager`, `main`), or whatever the manager was started from | upstream's repository, if this work is merged there |
 | The manager, via `AffinityManager/run.py` (`REPO`, `BRANCH`) | `github.com/jfacemyer/Linux-Affinity-Manager`, branch `main` | likewise |
 

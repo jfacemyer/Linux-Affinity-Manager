@@ -37,7 +37,7 @@ One run of **One-Click Full Setup** gives you a working Affinity:
 - **Affinity itself**, from Serif's installer (downloaded for you, or a file you already have), with Affinity's settings fixes applied.
 - **GPU rendering** through vkd3d-proton (or DXVK on AMD), and OpenCL where your driver provides it. See [Hardware Acceleration](docs/HARDWARE-ACCELERATION.md).
 - **Help** works: the WebView2 runtime is installed with Affinity.
-- **WineFix** and its plugin loader, for fixes inside Affinity that Wine cannot make: the color picker, the Leading dropdown, the sub-tool panel's columns, crashes at startup.
+- **The Affinity on Linux fixes**, for fixes inside Affinity that Wine cannot make: the color picker, the Leading dropdown, the sub-tool panel's columns, crashes at startup.
 - **Your desktop**: an Affinity entry in the application menu, a desktop icon, **double-clicking an Affinity document** in your file manager opens it in Affinity, and the Canva sign-in completes in the browser.
 - **Checks at the end** of the install: font registrations and the renderer setting are verified and repaired.
 

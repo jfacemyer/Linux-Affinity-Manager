@@ -68,7 +68,7 @@ curl -sSL https://github.com/jfacemyer/Linux-Affinity-Manager/raw/main/AffinityM
 - **New prefix** sets up an Affinity install in its own Wine prefix, through
   **Setup**: the Affinity on Linux installer, run as a page of the manager's
   window. You get Wine with the Affinity patches, the Windows components,
-  Affinity itself, GPU rendering, Help, and WineFix.
+  Affinity itself, GPU rendering, Help, and the Affinity on Linux fixes.
 - **The Default**: choose which install your application menu, double-clicked
   Affinity documents and the Canva sign-in use. Other installs can have menu
   entries of their own.
