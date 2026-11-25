@@ -494,8 +494,31 @@ namespace AffinityOnLinux
             return false;
         }
 
+        // Affinity writes a "~lock~" marker only for its own documents. An
+        // imported PNG, SVG or PDF opens without one, so waiting for it made
+        // every warm open of such a file wait 40 s, ask Affinity to open it a
+        // second time and then report "Affinity did not open" for a file on
+        // screen. Those get one handoff and no confirmation.
+        private static readonly string[] LockingExtensions =
+            { ".af", ".afdesign", ".afphoto", ".afpub" };
+
+        private static bool WritesLock(string doc)
+        {
+            string ext = Path.GetExtension(doc);
+            foreach (string e in LockingExtensions)
+                if (string.Equals(ext, e, StringComparison.OrdinalIgnoreCase))
+                    return true;
+            return false;
+        }
+
         private static bool HandOff(string affinity, string doc, int tries)
         {
+            if (!WritesLock(doc))
+            {
+                StartAndWait(affinity, Quote(doc), 30);
+                return true;                          // no marker to wait for
+            }
+
             bool preexisting = LockPresent(doc);
 
             for (int attempt = 1; attempt <= tries; attempt++)

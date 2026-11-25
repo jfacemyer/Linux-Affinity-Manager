@@ -110,7 +110,7 @@ grep -n 'POC SOURCE' AffinityScripts/AffinityLinuxInstaller.py AffinityManager/r
 | Wine 11.20 tarball | `github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.20-r8/ElementalWarrior-wine-11.20.tar.xz`, pinned by `WINE_11_20_SHA256` | an upstream 11.20 release, likewise |
 | Wine 11.21 tarball | `github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.21-r6/ElementalWarrior-wine-11.21.tar.xz`, pinned by `WINE_11_21_SHA256` | an upstream 11.21 release, likewise |
 | Wine 11.22 tarball | `github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.22-r2/ElementalWarrior-wine-11.22.tar.xz`, pinned by `WINE_11_22_SHA256` | an upstream 11.22 release, likewise |
-| The Affinity on Linux fixes | `github.com/jfacemyer/AffinityOnLinuxLoader/releases/download/v1.0.0/aol-loader-1.0.0.tar.xz` (`AOL_LOADER_VERSION`), pinned by `AOL_LOADER_SHA256` | none: this is the project's own |
+| The Affinity on Linux fixes | `github.com/jfacemyer/AffinityOnLinuxLoader/releases/download/v1.0.1/aol-loader-1.0.1.tar.xz` (`AOL_LOADER_VERSION`), pinned by `AOL_LOADER_SHA256` | none: this is the project's own |
 | `affinity-on-linux.exe`, MIME definitions | the source branch: `SOURCE_REPO` / `SOURCE_BRANCH` (`github.com/jfacemyer/Linux-Affinity-Manager`, `main`), or whatever the manager was started from | upstream's repository, if this work is merged there |
 | The manager, via `AffinityManager/run.py` (`REPO`, `BRANCH`) | `github.com/jfacemyer/Linux-Affinity-Manager`, branch `main` | likewise |
 

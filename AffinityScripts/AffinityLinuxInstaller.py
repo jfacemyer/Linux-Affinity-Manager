@@ -537,7 +537,7 @@ def source_raw_url(path):
 # The handler this installer is meant to install, by content. The piped install
 # fetches it over the network from a branch that can be older than this file,
 # and "it starts with MZ and is over 4KB" does not tell those apart.
-HANDLER_SHA256 = "be87006366f417b35f87f76e414f6b69cc9a208f1db7009e97c616194a1c9dd6"
+HANDLER_SHA256 = "24103e65d5f35a81ba93f48ce348ef0577db6174aeb10dd0628e1262373587ab"
 
 # The same patch set on Wine 11.18, pinned for the same reason. Released on the
 # fork that carries the patches' upstream pull request.
@@ -572,8 +572,8 @@ VKD3D_PROTON_SHA256 = "b85ea8219b71093a3924913dd7aae6172333dc0c069983ed510816d67
 # like the Wine build: a tarball that is not this one is refused. Rebuild with
 # its build.sh (reproducible), republish under a new tag, and update the
 # version and the hash together.
-AOL_LOADER_VERSION = "1.0.0"
-AOL_LOADER_SHA256 = "a466b5031a5735632c188c6f8f782d0661d1cd98f4fef9fc1e1ca5d45be65f11"
+AOL_LOADER_VERSION = "1.0.1"
+AOL_LOADER_SHA256 = "455760aad2574fd6a4611e82182b879eb178f354506020af336ac6bca79ca751"
 
 
 def aol_loader_url():

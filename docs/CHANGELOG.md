@@ -12,6 +12,10 @@
 ### Fixed
 - **Show in Explorer opens your file manager.** The Resource Manager's Show in Explorer opened Wine's own explorer window; it now opens the folder in your desktop's file manager with the file selected.
 - **The installer's Launch button loads the fixes.** It started Affinity.exe directly, so the plugin loader never loaded from it.
+- **Opening an image or PDF in a running Affinity no longer reports a failure.** The file opened at once, but the launcher waited for a lock file that Affinity writes only for its own documents, then asked Affinity to open it again and said "Affinity did not open" it.
+- **The color picker's Exact sampling mode takes effect.** Its setting was saved but never read.
+- **Tab and Shift-Tab into a number field select its value**, as a click does, in the Transform panel and everywhere else Affinity has number fields with units. Before, the field got a focus ring but its value stayed unselected.
+- **Open Folder in Explorer** in the File menu also opens your file manager.
 
 ---
 
